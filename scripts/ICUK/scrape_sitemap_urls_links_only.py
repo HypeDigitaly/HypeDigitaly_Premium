@@ -5,18 +5,34 @@ import json
 import anthropic
 import time
 import os
-import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
 
+# Konstanty pro názvy souborů a adresářů
+SCRIPT_NAME = "scrape_sitemap_urls_links_only"
+LOG_DIR = "scrape_sitemap_urls_links_only_logs"  # Nová konstanta pro adresář s logy
+LAST_RUN_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_last_run_time.txt")
+LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
+
+# Vytvoření adresáře pro logy, pokud neexistuje
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Nastavení loggeru
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+                        logging.StreamHandler()
+                    ])
 logger = logging.getLogger(__name__)
 
 # API klíče a konstanty
-CLAUDE_API_KEY = ""
-VOICEFLOW_API_KEY = ""
+CLAUDE_API_KEY = "[INSERT API KEY]"
+VOICEFLOW_API_KEY = "[INSERT API KEY]"
 BASE_URL = "https://icuk.cz/sitemap.xml"
+
+# TRUE = NAHRAVAT POUZE AKTUALIZACE, NIKOLIV VSE OD ZACATKU
+CHECK_MODIFIED_DATE = True
 
 # Seznam kategorií
 CATEGORIES = [
@@ -29,6 +45,32 @@ CATEGORIES = [
     "Documents",
     "Contact"
 ]
+
+def get_last_run_time():
+    if os.path.exists(LAST_RUN_FILE):
+        with open(LAST_RUN_FILE, 'r') as f:
+            return datetime.fromisoformat(f.read().strip())
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+def save_current_run_time():
+    with open(LAST_RUN_FILE, 'w') as f:
+        f.write(datetime.now(timezone.utc).isoformat())
+
+def is_url_modified(lastmod):
+    if not CHECK_MODIFIED_DATE:
+        return True
+    
+    if not lastmod:
+        return True
+    
+    last_run_time = get_last_run_time()
+    
+    try:
+        lastmod_date = datetime.fromisoformat(lastmod.rstrip('Z')).replace(tzinfo=timezone.utc)
+        return lastmod_date > last_run_time
+    except ValueError:
+        logger.error(f"Neplatný formát data poslední modifikace: {lastmod}")
+        return True
 
 def initialize_payloads():
     payloads = {}
@@ -61,7 +103,10 @@ def parse_sitemap(content):
     root = ET.fromstring(content)
     namespace = {'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
     return [
-        elem.find('sm:loc', namespace).text
+        {
+            'url': elem.find('sm:loc', namespace).text,
+            'lastmod': elem.find('sm:lastmod', namespace).text if elem.find('sm:lastmod', namespace) is not None else None
+        }
         for elem in root.findall('sm:url', namespace) + root.findall('sm:sitemap', namespace)
     ]
 
@@ -203,33 +248,37 @@ def process_sitemap(url, payloads, processed_urls=None):
     content = get_sitemap_content(url)
     urls = parse_sitemap(content)
 
-    for child_url in urls:
+    for item in urls:
+        child_url = item['url']
+        lastmod = item['lastmod']
+        
         if child_url.endswith('.xml'):
             process_sitemap(child_url, payloads, processed_urls)
-        else:
+        elif is_url_modified(lastmod):
             category = categorize_url(child_url)
             if category != "Events":  # Skip processing for Events
                 title = get_title_from_url(child_url)
                 payloads[category]["data"]["items"].append({"Title": title, "URL": child_url})
                 log_processed_url(child_url, category, title)
                 save_payloads_to_files(payloads)  # Update payloads after each URL
+            logger.info(f"Zpracována URL: {child_url}")
+        else:
+            logger.info(f"Přeskočena URL (nebyla modifikována): {child_url}")
 
 def log_processed_url(url, category, title):
-    log_file = "logs/scraper_url_list.log"
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    log_file = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_url_list.log")
     with open(log_file, "a", encoding="utf-8") as f:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         f.write(f"{timestamp} - URL: {url}, Category: {category}, Title: {title}\n")
 
 def save_payloads_to_files(payloads):
     output_dir = "payloads"
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     
     for category, payload in payloads.items():
         if category != "Events":  # Skip saving for Events
             table_name = f"{category.lower()}_table"
-            filename = f"{output_dir}/{table_name}_payload.json"
+            filename = os.path.join(output_dir, f"{table_name}_payload.json")
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             logger.info(f"Aktualizován payload pro tabulku '{table_name}' v souboru: {filename}")
@@ -255,6 +304,7 @@ def upload_to_voiceflow(payloads):
 
 def main():
     logger.info(f"Začátek zpracování sitemapy: {BASE_URL}")
+    logger.info(f"Poslední běh skriptu: {get_last_run_time()}")
     
     try:
         payloads = initialize_payloads()
@@ -263,6 +313,8 @@ def main():
         logger.info("Zpracování sitemapy dokončeno. Nahrávání dat do Voiceflow.")
         upload_to_voiceflow(payloads)
     
+        save_current_run_time()
+        logger.info(f"Aktuální běh skriptu dokončen: {datetime.now(timezone.utc)}")
     except Exception as e:
         logger.error(f"Došlo k chybě při zpracování: {str(e)}", exc_info=True)
         return
