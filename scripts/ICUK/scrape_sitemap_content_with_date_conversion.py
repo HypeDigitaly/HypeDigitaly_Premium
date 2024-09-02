@@ -15,9 +15,9 @@ from urllib3.util.retry import Retry
 import xml.etree.ElementTree as ET
 
 # API klíče a konstanty
-JINA_AI_API_KEY = "[]"
-CLAUDE_API_KEY = "[]"
-VOICEFLOW_API_KEY = "[]"
+JINA_AI_API_KEY = "REMOVED-JINA-KEY"
+CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
+VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
 
 # Zpoždění mezi scrapováním jednotlivých stránek (v sekundách)
 SCRAPING_DELAY = 5
@@ -25,18 +25,8 @@ SCRAPING_DELAY = 5
 # Seznam URL ke zpracování
 CUSTOM_URLS = []
 
-# Přepínač pro kontrolu data modifikace
-CHECK_MODIFIED_DATE = False
-
-# Definice sekcí a jejich sitemap
-SECTIONS = {
-    #"Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
-    #"References": ["https://icuk.cz/reference-sitemap.xml"],
-    #"SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
-    "Events": ["https://icuk.cz/udalost-sitemap.xml"],
-    #"Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
-    #"Articles": ["https://icuk.cz/post-sitemap.xml"]
-}
+# TRUE = NAHRAVAT POUZE AKTUALIZACE, NIKOLIV VSE OD ZACATKU
+CHECK_MODIFIED_DATE = True
 
 # Speciální URL
 SPECIAL_URLS = {
@@ -48,31 +38,64 @@ SPECIAL_URLS = {
 START_SITEMAP_INDEX = 0  # Index sitemapy, od které se má začít
 START_URL_INDEX = 0  # Index URL v rámci sitemapy, od kterého se má začít
 
+# Constants for script name and directories
+SCRIPT_NAME = "scrape_sitemap_content_with_date_conversion"
+LOG_DIR = f"{SCRIPT_NAME}_logs"
+LAST_RUN_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_last_run_time.txt")
+LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Log the start of the script
+logger.info("Logging initialized. Log file cleared and ready for new run.")
+
+# Definice sekcí a jejich sitemap
+SECTIONS = {
+    #"Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
+    #"References": ["https://icuk.cz/reference-sitemap.xml"],
+    #"SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
+    "Events": ["https://icuk.cz/udalost-sitemap.xml"],
+    #"Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
+    #"Articles": ["https://icuk.cz/post-sitemap.xml"]
+}
+
 def date_to_number(date_string):
     try:
-        date_obj = datetime.strptime(date_string, "%Y-%m-%d").date()
-        return date_obj.toordinal()
+        # Validate and parse the date
+        date_obj = datetime.strptime(date_string, '%Y-%m-%d')
+        
+        # Convert to the desired numerical format YYYYMMDD
+        numeric_representation = date_obj.strftime('%Y%m%d')
+        
+        return int(numeric_representation)
+    
     except ValueError:
-        logger.error(f"Invalid date format: {date_string}")
-        return None
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
 
-def setup_logging():
-    log_file = 'logs/scraper.log'
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG,
-                        format='%(asctime)s - %(levelname)s - %(message)s',
-                        handlers=[
-                            logging.FileHandler(log_file, mode='w', encoding='utf-8'),
-                            logging.StreamHandler()
-                        ])
-    logger = logging.getLogger(__name__)
-    logger.info("Logging initialized. Log file cleared and ready for new run.")
-    return logger
+def get_last_run_time():
+    if os.path.exists(LAST_RUN_FILE):
+        with open(LAST_RUN_FILE, 'r') as f:
+            return datetime.fromisoformat(f.read().strip())
+    return datetime.min.replace(tzinfo=timezone.utc)
 
-logger = setup_logging()
+def save_current_run_time():
+    with open(LAST_RUN_FILE, 'w') as f:
+        f.write(datetime.now(timezone.utc).isoformat())
 
 def create_directories():
-    directories = ['logs', 'payloads']
+    directories = ['payloads']
     for directory in directories:
         if not os.path.exists(directory):
             os.makedirs(directory)
@@ -473,10 +496,11 @@ def is_url_modified(lastmod):
     if not lastmod:
         return True
     
+    last_run_time = get_last_run_time()
+    
     try:
-        lastmod_date = datetime.strptime(lastmod, "%Y-%m-%dT%H:%M:%S%z")
-        current_date = datetime.now(timezone.utc)
-        return lastmod_date > current_date
+        lastmod_date = datetime.fromisoformat(lastmod.rstrip('Z')).replace(tzinfo=timezone.utc)
+        return lastmod_date > last_run_time
     except ValueError:
         logger.error(f"Neplatný formát data poslední modifikace: {lastmod}")
         return True
@@ -891,6 +915,7 @@ def main():
     logger.info("Závěrečné nahrávání všech zpracovaných dat do Voiceflow...")
     upload_all_to_voiceflow()
 
+    save_current_run_time()
     end_time = datetime.now()
     logger.info(f"Konec zpracování: {end_time}")
     logger.info(f"Celková doba zpracování: {end_time - start_time}")
