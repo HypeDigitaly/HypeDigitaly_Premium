@@ -15,9 +15,9 @@ from urllib3.util.retry import Retry
 import xml.etree.ElementTree as ET
 
 # API klíče a konstanty
-JINA_AI_API_KEY = "REMOVED-JINA-KEY"
-CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
-VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
+JINA_AI_API_KEY = "[INSERT API KEY]"
+CLAUDE_API_KEY = "[INSERT API KEY]"
+VOICEFLOW_API_KEY = "[INSERT API KEY]"
 
 # Zpoždění mezi scrapováním jednotlivých stránek (v sekundách)
 SCRAPING_DELAY = 5
