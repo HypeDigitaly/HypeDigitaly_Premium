@@ -1,0 +1,98 @@
+[
+  {
+    "Title": "Odbor dopravy a silničního hospodářství",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Ddopravy%2Da%2Dsilnicniho%2Dhospodarstvi/os-1816/p1=275575"
+  },
+  {
+    "Title": "Odbor ekonomický",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dekonomicky/os-2316/p1=275570"
+  },
+  {
+    "Title": "Odbor informatiky a organizačních věcí",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dinformatiky%2Da%2Dorganizacnich%2Dveci/os-15686/p1=275569"
+  },
+  {
+    "Title": "Odbor investiční",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dinvesticni/os-2416/p1=275571"
+  },
+  {
+    "Title": "Odbor kancelář ředitele",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dkancelar%2Dreditele/os-1516/p1=275567"
+  },
+  {
+    "Title": "Odbor kontroly",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dkontroly/os-11235/p1=275581"
+  },
+  {
+    "Title": "Odbor kultury a památkové péče",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dkultury%2Da%2Dpamatkove%2Dpece/os-2816/p1=275583"
+  },
+  {
+    "Title": "Odbor legislativně-právní",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dlegislativne%2Dpravni/os-1616/p1=275568"
+  },
+  {
+    "Title": "Odbor majetkový",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dmajetkovy/os-2516/p1=275572"
+  },
+  {
+    "Title": "Odbor podpory podnikání, inovací a transformace",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dpodpory%2Dpodnikani%2Dinovaci%2Da%2Dtransformace/os-17354/p1=275582"
+  },
+  {
+    "Title": "Odbor regionálního rozvoje",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dregionalniho%2Drozvoje/os-2116/p1=275573"
+  },
+  {
+    "Title": "Odbor sociálních věcí",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dsocialnich%2Dveci/os-17491/p1=275584"
+  },
+  {
+    "Title": "Odbor správních činností a krajský živnostenský úřad",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dspravnich%2Dcinnosti%2Da%2Dkrajsky%2Dzivnostensky%2Durad/os-11775/p1=275577"
+  },
+  {
+    "Title": "Odbor školství, mládeže a tělovýchovy",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dskolstvi%2Dmladeze%2Da%2Dtelovychovy/os-2616/p1=275580"
+  },
+  {
+    "Title": "Odbor územního plánování a stavebního řádu",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Duzemniho%2Dplanovani%2Da%2Dstavebniho%2Dradu/os-2216/p1=275574"
+  },
+  {
+    "Title": "Odbor zdravotnictví",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dzdravotnictvi/os-15297/p1=275579"
+  },
+  {
+    "Title": "Odbor životního prostředí a zemědělství",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dzivotniho%2Dprostredi%2Da%2Dzemedelstvi/os-1916/p1=275576"
+  },
+  {
+    "Title": "Odbor interního auditu",
+    "URL": "https://www.kr-ustecky.cz/odbor%2Dinterniho%2Dauditu/os-10491/p1=275578"
+  },
+  {
+    "Title": "Vedení krajského úřadu",
+    "URL": "https://www.kr-ustecky.cz/vedeni%2Dkrajskeho%2Duradu/d-1642915/p1=272764"
+  },
+  {
+    "Title": "Rada",
+    "URL": "https://www.kr-ustecky.cz/seznam%2Dradnich/os-7795/p1=272787"
+  },
+  {
+    "Title": "Zastupitelstvo",
+    "URL": "https://www.kr-ustecky.cz/zastupitelstvo%2Dkraje/os-7895/p1=272786"
+  },
+  {
+    "Title": "Komise",
+    "URL": "https://www.kr-ustecky.cz/komise/os-10266/p1=272788"
+  },
+  {
+    "Title": "Výbory",
+    "URL": "https://www.kr-ustecky.cz/vybory/os-10366/p1=272789"
+  },
+  {
+    "Title": "Hejtman a náměstci",
+    "URL": "https://www.kr-ustecky.cz/hejtman%2Da%2Dnamestci/os-7695/p1=272785"
+  }
+]

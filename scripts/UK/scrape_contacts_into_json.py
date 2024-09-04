@@ -9,23 +9,66 @@ import datetime
 import logging
 import argparse
 import anthropic
+from logging.handlers import RotatingFileHandler
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import random
 
 # Configuration
-JSON_FILE_PATH = 'URL_List.txt'
-FIRECRAWL_API_KEY = '[INSERT FIRECRAWL API KEY]'
-CLAUDE_API_KEY = "[INSERT CLAUDE API KEY]"
-VOICEFLOW_API_KEY = "[INSERT VF API KEY]"
+JSON_FILE_PATH = 'Contacts_URL_List.txt'
+JINA_AI_API_KEY = ""
+VOICEFLOW_API_KEY = ""
 START_INDEX = 0
 UPPER_THRESHOLD = None
 RETRY_ATTEMPTS = 3
-RETRY_DELAY = 600
 OUTPUT_DIRECTORY = 'payloads'
-FIRECRAWL_API_URL = "https://api.firecrawl.dev/v0/scrape"
 BASE_URL = "https://www.kr-ustecky.cz"
+
+# Constants for script name and log directory
+SCRIPT_NAME = "scrape_contacts_into_json"
+LOG_DIR = f"{SCRIPT_NAME}_logs"
+LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Add handler for rotating file
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# Add handler for console output
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
+# New variables for API call management
+API_CALL_DELAY = 5  # Fixed delay between API calls in seconds
+MAX_RETRIES = 3  # Maximum number of retry attempts
+INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
+
+def requests_retry_session(
+    retries=3,
+    backoff_factor=0.3,
+    status_forcelist=(500, 502, 503, 504, 524),
+    session=None,
+):
+    session = session or requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 def load_urls_from_file(file_path):
     logger.info(f"Loading URLs from file: {file_path}")
@@ -38,35 +81,51 @@ def load_urls_from_file(file_path):
         logger.error(f"Error loading URLs: {str(e)}")
         raise
 
-def scrape_url_with_retries(url, api_key, max_attempts, delay):
-    logger.info(f"\nAttempting to scrape URL: {url}")
-    attempts = 0
-    while attempts < max_attempts:
+def get_html_content(url):
+    logger.info(f"Getting HTML content from URL: {url}")
+    api_url = f'https://r.jina.ai/{url}'
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {JINA_AI_API_KEY}",
+        "X-Return-Format": "html"
+    }
+    
+    for attempt in range(MAX_RETRIES):
         try:
-            logger.info(f"Scrape attempt {attempts + 1}/{max_attempts}")
-            payload = {
-                "pageOptions": {
-                    "includeHtml": True,
-                    "onlyMainContent": True,
-                    "onlyIncludeTags": ["#stred"]
-                },
-                "url": url
-            }
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-
-            response = requests.post(FIRECRAWL_API_URL, json=payload, headers=headers)
+            response = requests_retry_session().get(api_url, headers=headers, timeout=30)
             response.raise_for_status()
-
-            logger.info("Scrape successful")
-            return response.json()
-        except Exception as e:
-            attempts += 1
-            logger.error(f"Attempt {attempts} failed. Error: {str(e)}. Retrying in {delay} seconds...")
+            data = response.json()
+            
+            logger.debug(f"API Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
+            
+            if data['status'] == 20000 and 'data' in data:
+                html_content = data['data'].get('html', '')
+                if html_content:
+                    title = BeautifulSoup(html_content, 'html.parser').title.string if html_content else ''
+                    metadata = {
+                        'title': title,
+                        'url': data['data'].get('url', url)
+                    }
+                    return html_content, metadata
+                else:
+                    logger.error("HTML content not found in API response")
+                    raise ValueError("HTML content missing in API response")
+            else:
+                error_message = data.get('status', 'Unknown error')
+                logger.error(f"Error getting content: {error_message}")
+                raise ValueError(f"API Error: {error_message}")
+        
+        except (requests.RequestException, json.JSONDecodeError, ValueError) as e:
+            if attempt == MAX_RETRIES - 1:
+                logger.error(f"Failed to get HTML content after {MAX_RETRIES} attempts: {str(e)}")
+                raise
+            
+            delay = INITIAL_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(f"Error getting HTML content, attempt {attempt + 1}/{MAX_RETRIES}. Retrying in {delay:.2f} seconds...")
             time.sleep(delay)
-    raise Exception(f"Failed to scrape URL: {url} after {max_attempts} attempts.")
+    
+    # Apply fixed delay after successful API call
+    time.sleep(API_CALL_DELAY)
 
 def sanitize_filename(filename):
     sanitized = re.sub(r'[^\w\-_\. ]', '', filename)
@@ -192,10 +251,7 @@ def upload_to_voiceflow(table_name, items):
         }
     }
     
-    log_filename = f"logs/{table_name}_log.txt"
-    
-    if not os.path.exists('logs'):
-        os.makedirs('logs')
+    log_filename = os.path.join(LOG_DIR, f"{table_name}_upload_log.txt")
     
     with open(log_filename, 'a', encoding='utf-8') as f:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -216,7 +272,7 @@ def upload_to_voiceflow(table_name, items):
     else:
         logger.error(f"Error uploading table '{table_name}': {response.text}")
 
-def process_urls(url_data, firecrawl_api_key, start_index=0, upper_threshold=None, upload_to_voiceflow_flag=False):
+def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voiceflow_flag=False):
     count = 0
     end_index = upper_threshold if upper_threshold else len(url_data)
 
@@ -233,60 +289,50 @@ def process_urls(url_data, firecrawl_api_key, start_index=0, upper_threshold=Non
         logger.info(f"\n--- Processing URL {i+1}/{end_index}: {initial_url} ---")
 
         try:
-            response = scrape_url_with_retries(initial_url, firecrawl_api_key, RETRY_ATTEMPTS, RETRY_DELAY)
+            html_content, metadata = get_html_content(initial_url)
             
-            if response.get('success', False):
-                data = response.get('data', {})
-                metadata = data.get('metadata', {})
+            if html_content:
                 title = metadata.get('title', 'Untitled')
-                url = metadata.get('sourceURL', initial_url)
-                html_content = data.get('html', '')
+                url = metadata.get('url', initial_url)
+                soup = BeautifulSoup(html_content, 'html.parser')
+                items = extract_contacts(soup, url, title)
 
-                if html_content:
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    items = extract_contacts(soup, url, title)
-
-                    if items:
-                        # Remove 'Ústecký kraj' from the table name
-                        table_name = re.sub(r'\s*Ústecký kraj\s*$', '', title).strip()
-                        
-                        json_output = {
-                            "data": {
-                                "schema": {
-                                    "searchableFields": [
-                                        "FullName", "Role", "Department", "Subdepartment", "PhoneNumber", "URL", "Origin"
-                                    ],
-                                    "metadataFields": [
-                                        "FirstName", "LastName", "Department", "Subdepartment", "Origin"
-                                    ]
-                                },
-                                "name": sanitize_filename(table_name),
-                                "tags": ["Kontakt"],
-                                "items": items
-                            }
+                if items:
+                    # Remove 'Ústecký kraj' from the table name
+                    table_name = re.sub(r'\s*Ústecký kraj\s*$', '', title).strip()
+                    
+                    json_output = {
+                        "data": {
+                            "schema": {
+                                "searchableFields": [
+                                    "FullName", "Role", "Department", "Subdepartment", "PhoneNumber", "URL", "Origin"
+                                ],
+                                "metadataFields": [
+                                    "FirstName", "LastName", "Department", "Subdepartment", "Origin"
+                                ]
+                            },
+                            "name": sanitize_filename(table_name),
+                            "tags": ["Kontakt"],
+                            "items": items
                         }
+                    }
 
-                        sanitized_title = sanitize_filename(table_name)
-                        filename = f"{sanitized_title}.json"
-                        file_path = os.path.join(OUTPUT_DIRECTORY, filename)
-                        
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            json.dump(json_output, f, ensure_ascii=False, indent=2)
+                    sanitized_title = sanitize_filename(table_name)
+                    filename = f"{sanitized_title}.json"
+                    file_path = os.path.join(OUTPUT_DIRECTORY, filename)
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(json_output, f, ensure_ascii=False, indent=2)
 
-                        logger.info(f"Successfully processed URL: {url}")
-                        logger.info(f"Saved to file: {file_path}")
+                    logger.info(f"Successfully processed URL: {url}")
+                    logger.info(f"Saved to file: {file_path}")
 
-                        if upload_to_voiceflow_flag:
-                            upload_to_voiceflow(sanitized_title, items)
-                    else:
-                        logger.info(f"No content to save for URL: {url}")
+                    if upload_to_voiceflow_flag:
+                        upload_to_voiceflow(sanitized_title, items)
                 else:
-                    logger.info(f"No HTML content retrieved for URL: {url}")
+                    logger.info(f"No content to save for URL: {url}")
             else:
-                logger.error(f"API response was not successful for URL: {initial_url}")
-                if 'data' in response and 'metadata' in response['data']:
-                    logger.error(f"Page status code: {response['data']['metadata'].get('pageStatusCode')}")
-                    logger.error(f"Page error: {response['data']['metadata'].get('pageError')}")
+                logger.info(f"No HTML content retrieved for URL: {initial_url}")
 
         except Exception as e:
             logger.error(f"Error processing URL: {initial_url}")
@@ -307,7 +353,7 @@ def upload_existing_files(directory):
                 items = data['data']['items']
                 upload_to_voiceflow(table_name, items)
 
-# Main execution (continued)
+# Main execution
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
     parser.add_argument("--skip-scraping", type=int, choices=[0, 1], default=0,
@@ -335,7 +381,7 @@ if __name__ == "__main__":
             logger.info(f"Output Directory: {OUTPUT_DIRECTORY}")
             logger.info(f"Upload to Voiceflow: {'Yes' if args.upload_to_voiceflow else 'No'}")
 
-            process_urls(url_data, FIRECRAWL_API_KEY, START_INDEX, UPPER_THRESHOLD, args.upload_to_voiceflow)
+            process_urls(url_data, START_INDEX, UPPER_THRESHOLD, args.upload_to_voiceflow)
 
     except Exception as e:
         logger.error(f"An error occurred during script execution: {str(e)}")

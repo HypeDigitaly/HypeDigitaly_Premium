@@ -8,16 +8,46 @@ import os
 from urllib.parse import urljoin
 import argparse
 from datetime import datetime, timedelta
+import re
+import unicodedata
+from logging.handlers import RotatingFileHandler
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import random
+from anthropic import InternalServerError, RateLimitError
 
-# Nastavení loggeru
+# Constants for script name and log directory
+SCRIPT_NAME = "scrape_sitemap"
+LOG_DIR = f"{SCRIPT_NAME}_logs"
+LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Add handler for rotating file
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# Add handler for console output
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
 # API klíče a konstanty
-CLAUDE_API_KEY = "[INSERT CLAUDE API KEY]"
-FIRECRAWL_API_KEY = "[INSERT FIRECRAWL API KEY]"
-VOICEFLOW_API_KEY = "[INSERT VF API KEY]"
+CLAUDE_API_KEY = ""
+JINA_AI_API_KEY = ""
+VOICEFLOW_API_KEY = ""
 BASE_URL = "https://www.kr-ustecky.cz"
+
+# New variables for API call management
+API_CALL_DELAY = 5  # Fixed delay between API calls in seconds
+MAX_RETRIES = 3  # Maximum number of retry attempts
+INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 
 # Seznam kategorií
 CATEGORIES = [
@@ -43,70 +73,48 @@ CATEGORIES = [
 
 def get_html_content(url):
     logger.info(f"Získávání HTML obsahu z URL: {url}")
-    api_url = "https://api.firecrawl.dev/v0/scrape"
-    payload = {
-        "url": url,
-        "pageOptions": {
-            "includeHtml": True,
-            "includeRawHtml": True,
-            "replaceAllPathsWithAbsolutePaths": True
-        }
-    }
+    api_url = f'https://r.jina.ai/{url}'
     headers = {
-        "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
-        "Content-Type": "application/json"
+        "Accept": "application/json",
+        "Authorization": f"Bearer {JINA_AI_API_KEY}",
+        "X-Return-Format": "html"
     }
     
     try:
-        response = requests.post(api_url, json=payload, headers=headers)
+        response = requests_retry_session().get(api_url, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
         
-        if data.get('success'):
-            html_content = data.get('data', {}).get('html')
+        logger.debug(f"API Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
+        
+        if data['status'] == 20000 and 'data' in data:
+            html_content = data['data'].get('html', '')
             if html_content:
-                return html_content
+                title = BeautifulSoup(html_content, 'html.parser').title.string if html_content else ''
+                metadata = {
+                    'title': title,
+                    'url': data['data'].get('url', url)
+                }
+                return html_content, metadata
             else:
                 logger.error("HTML obsah nebyl nalezen v odpovědi API")
                 raise ValueError("HTML obsah chybí v odpovědi API")
         else:
-            error_message = data.get('data', {}).get('warning', 'Neznámá chyba')
+            error_message = data.get('status', 'Neznámá chyba')
             logger.error(f"Chyba při získávání obsahu: {error_message}")
             raise ValueError(f"Chyba API: {error_message}")
     except requests.RequestException as e:
-        logger.error(f"Chyba při volání Firecrawl API: {str(e)}")
+        logger.error(f"Chyba při volání Jina AI API: {str(e)}")
         raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Chyba při parsování JSON odpovědi: {str(e)}")
+        logger.debug(f"Raw API Response: {response.text}")
+        raise ValueError("Neplatná JSON odpověď od API")
 
 def parse_menu(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     main_menu = soup.find('ul', class_='ui')
     return main_menu
-
-def extract_links(menu_item, path=[], categorized_links={}):
-    if menu_item.name == 'li':
-        link = menu_item.find('a')
-        if link:
-            current_path = path + [link.text.strip()]
-            absolute_path = ' > '.join(current_path)
-            absolute_url = urljoin(BASE_URL, link['href'])
-            logger.info(f"Zpracovávání odkazu: {absolute_path}")
-            category = categorize_link_claude(current_path)
-            logger.info(f"Odkaz zařazen do kategorie: {category}")
-            
-            if category not in categorized_links:
-                categorized_links[category] = []
-            categorized_links[category].append({"Title": link.text.strip(), "URL": absolute_url})
-            
-            save_payloads_to_files(categorized_links)
-            time.sleep(5)  # 5 sekundová pauza mezi zpracováním odkazů
-        
-        sub_menu = menu_item.find('ul')
-        if sub_menu:
-            extract_links(sub_menu, path + [link.text.strip() if link else ''], categorized_links)
-    elif menu_item.name == 'ul':
-        for item in menu_item.find_all('li', recursive=False):
-            extract_links(item, path, categorized_links)
-    return categorized_links
 
 def categorize_link_claude(path):
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
@@ -129,22 +137,62 @@ DŮLEŽITÉ INSTRUKCE:
 Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co nejpřesnější zařazení/zvolení dané kategorie ze vstupního seznamu.
 """
 
-    message = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
-        max_tokens=50,
-        temperature=0,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-    
-    category = message.content[0].text.strip()
-    
-    if category not in CATEGORIES and category != "Nezařazeno":
-        logger.warning(f"Claude vrátil neočekávanou kategorii: {category}. Použije se 'Nezařazeno'.")
-        return "Nezařazeno"
-    
-    return category
+    for attempt in range(MAX_RETRIES):
+        try:
+            message = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=50,
+                temperature=0,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            category = message.content[0].text.strip()
+            
+            if category not in CATEGORIES and category != "Nezařazeno":
+                logger.warning(f"Claude vrátil neočekávanou kategorii: {category}. Použije se 'Nezařazeno'.")
+                return "Nezařazeno"
+            
+            # Apply fixed delay after successful API call
+            time.sleep(API_CALL_DELAY)
+            
+            return category
+        
+        except (InternalServerError, RateLimitError) as e:
+            if attempt == MAX_RETRIES - 1:
+                logger.error(f"Nepodařilo se získat kategorii po {MAX_RETRIES} pokusech: {str(e)}")
+                return "Nezařazeno"
+            
+            # Calculate exponential backoff delay
+            delay = INITIAL_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(f"Chyba při kategorizaci, pokus {attempt + 1}/{MAX_RETRIES}. Čekání {delay:.2f} sekund před dalším pokusem.")
+            time.sleep(delay)
+
+def extract_links(menu_item, path=[], categorized_links={}):
+    if menu_item.name == 'li':
+        link = menu_item.find('a')
+        if link:
+            current_path = path + [link.text.strip()]
+            absolute_path = ' > '.join(current_path)
+            absolute_url = urljoin(BASE_URL, link['href'])
+            logger.info(f"Zpracovávání odkazu: {absolute_path}")
+            category = categorize_link_claude(current_path)
+            logger.info(f"Odkaz zařazen do kategorie: {category}")
+            
+            if category not in categorized_links:
+                categorized_links[category] = []
+            categorized_links[category].append({"Title": link.text.strip(), "URL": absolute_url})
+            
+            save_payloads_to_files(categorized_links)
+        
+        sub_menu = menu_item.find('ul')
+        if sub_menu:
+            extract_links(sub_menu, path + [link.text.strip() if link else ''], categorized_links)
+    elif menu_item.name == 'ul':
+        for item in menu_item.find_all('li', recursive=False):
+            extract_links(item, path, categorized_links)
+    return categorized_links
 
 def save_payloads_to_files(categorized_links):
     output_dir = "payloads"
@@ -188,23 +236,93 @@ def load_payloads_from_files():
                     logger.error(f"Chyba při načítání souboru {filename}: {str(e)}")
     return payloads
 
-def clean_old_logs(log_file):
-    """Vyčistí log soubor, pokud je starší než týden."""
-    if not os.path.exists(log_file):
-        return
+def requests_retry_session(
+    retries=3,
+    backoff_factor=0.3,
+    status_forcelist=(500, 502, 503, 504, 524),
+    session=None,
+):
+    session = session or requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
-    current_time = datetime.now()
-    file_modification_time = datetime.fromtimestamp(os.path.getmtime(log_file))
+def remove_accents(input_str):
+    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    return ''.join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+def truncate_content(content, max_tokens=199000):
+    """
+    Truncate the content to a maximum number of tokens (approximated by characters).
     
-    if current_time - file_modification_time > timedelta(days=7):
-        try:
-            os.remove(log_file)
-            logger.info(f"Starý log soubor {log_file} byl odstraněn.")
-        except Exception as e:
-            logger.error(f"Chyba při odstraňování starého log souboru {log_file}: {str(e)}")
+    Args:
+    content (str): The content to truncate
+    max_tokens (int): Maximum number of tokens (approximated as characters)
+    
+    Returns:
+    str: Truncated content
+    """
+    # A simple approximation: 1 token ~= 4 characters
+    max_chars = max_tokens * 4
+    if len(content) > max_chars:
+        return content[:max_chars] + "..."
+    return content
 
-def upload_to_voiceflow(table_name, category, items):
-    logger.info(f"Nahrávání tabulky '{table_name}' s kategorií '{category}' do Voiceflow")
+def save_payload_to_file(url, content, section, metadata):
+    title = metadata.get('title', '')
+    if not title:
+        title = url.replace('/', '_').replace(':', '_')
+    
+    title = remove_accents(title)
+    title = re.sub(r'[<>:"/\\|?*]', '_', title)
+    title = re.sub(r'\s+', '_', title)
+    title = re.sub(r'_+', '_', title)
+    title = title.strip('_')
+    title = title[:200]
+    
+    filename = f"payloads/{section.lower()}_{title}_payload.json"
+    
+    schema = {
+        "searchableFields": ["Question", "Answer"]
+    }
+    
+    payload = {
+        "data": {
+            "schema": schema,
+            "name": f"{section.lower()}_{title}",
+            "tags": [section],
+            "items": content
+        }
+    }
+    
+    # Dodatečná validace struktury payloadu
+    if not isinstance(payload["data"]["items"], list):
+        raise ValueError("Content must be a list")
+    for item in payload["data"]["items"]:
+        if not isinstance(item, dict):
+            raise ValueError("Each item must be a dictionary")
+        for key in schema["searchableFields"]:
+            if key not in item:
+                raise ValueError(f"Missing required key: {key}")
+    
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"Uložen payload pro URL '{url}' do souboru: {filename}")
+    logger.debug(f"Payload content: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+    print(f"Vytvořen nový payload: {filename}")
+    return filename
+
+def upload_to_voiceflow(filename):
+    logger.info(f"Nahrávání souboru '{filename}' do Voiceflow")
     url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true'
     headers = {
         'Authorization': VOICEFLOW_API_KEY,
@@ -212,44 +330,19 @@ def upload_to_voiceflow(table_name, category, items):
         'content-type': 'application/json'
     }
     
-    payload = {
-        "data": {
-            "schema": {
-                "searchableFields": ["Title", "URL"]
-            },
-            "name": table_name,
-            "tags": [category],
-            "items": items
-        }
-    }
+    with open(filename, 'r', encoding='utf-8') as f:
+        payload = json.load(f)
     
-    log_filename = f"logs/{table_name}_log.txt"
-    
-    # Vyčistí starý log soubor, pokud existuje a je starší než týden
-    clean_old_logs(log_filename)
-    
-    with open(log_filename, 'a', encoding='utf-8') as f:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        f.write(f"--- Log entry: {timestamp} ---\n")
-        f.write("REQUEST:\n")
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-        f.write("\n\n")
-        
-        response = requests.post(url, headers=headers, json=payload)
-        
-        f.write("RESPONSE:\n")
-        f.write(f"Status Code: {response.status_code}\n")
-        f.write(f"Response Body:\n{response.text}\n")
-        f.write("--- End of log entry ---\n\n")
+    response = requests.post(url, headers=headers, json=payload)
     
     if response.status_code == 200:
-        logger.info(f"Úspěšně nahráno {len(items)} položek pro tabulku '{table_name}'")
+        logger.info(f"Úspěšně nahráno {len(payload['data']['items'])} položek pro soubor '{filename}'")
     else:
-        logger.error(f"Chyba při nahrávání tabulky '{table_name}': {response.text}")
+        logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
 
 def main(skip_scraping):
-    if not os.path.exists('logs'):
-        os.makedirs('logs')
+    start_time = datetime.now()
+    logger.info(f"Začátek zpracování: {start_time}")
 
     if skip_scraping:
         logger.info("Přeskakuji scraping, načítám payloady ze souborů")
@@ -259,7 +352,7 @@ def main(skip_scraping):
         logger.info(f"Začátek zpracování webu: {url}")
         
         try:
-            html_content = get_html_content(url)
+            html_content, _ = get_html_content(url)
             main_menu = parse_menu(html_content)
             
             if not main_menu:
@@ -280,9 +373,11 @@ def main(skip_scraping):
 
     logger.info("Nahrávání dat do Voiceflow")
     for table_name, data in payloads.items():
-        upload_to_voiceflow(table_name, data['category'], data['items'])
+        upload_to_voiceflow(f"payloads/{table_name}_payload.json")
     
-    logger.info("Zpracování dokončeno")
+    end_time = datetime.now()
+    logger.info(f"Konec zpracování: {end_time}")
+    logger.info(f"Celková doba zpracování: {end_time - start_time}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
