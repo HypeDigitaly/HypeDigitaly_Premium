@@ -56,6 +56,9 @@ CATEGORIES = [
     "Contact"
 ]
 
+# forced delay in seconds between each processed URL
+URL_PROCESSING_DELAY = 30  # DELAY IN SECONDS
+
 def get_last_run_time():
     if os.path.exists(LAST_RUN_FILE):
         with open(LAST_RUN_FILE, 'r') as f:
@@ -289,7 +292,7 @@ def convert_to_qa(content, title):
 {content}
 ---
 
-# IMPORTANT: Output = clean JSON array. Extract maximum SPECIFIC, FACTUAL Q&A pairs (min. 5) covering all relevant information for "{title}".
+# IMPORTANT: Output = clean JSON array. Extract as MANY AS POSSIBLE AND SPECIFIC, FACTUAL Q&A pairs (min. 5) covering all relevant information for "{title}".
 
 # Response Language: You must absolutely respond and formulate your entire response solely in the following language: "{LANGUAGE}"
 """
@@ -444,8 +447,16 @@ def process_single_url(url, lastmod, payloads):
             logger.error(f"Error processing content for URL {url}: {str(e)}", exc_info=True)
     else:
         logger.info(f"Skipping URL (not modified): {url}")
+    
+    # Add delay after processing URL
+    time.sleep(URL_PROCESSING_DELAY)
+
+def clear_log_file():
+    with open(LOG_FILE, 'w', encoding='utf-8'):
+        pass  # Clears the content of the file
 
 def main():
+    clear_log_file()  # Clear log file before each run
     logger.info(f"Starting processing: {datetime.now()}")
     logger.info(f"Last script run: {get_last_run_time()}")
     
@@ -465,6 +476,10 @@ def main():
                     url = line.strip()
                     if url:
                         process_single_url(url, None, payloads)
+            
+            # Upload URL data to Voiceflow after processing all URLs
+            for category, payload in payloads.items():
+                upload_to_voiceflow_single(category, "urls", payload["urls"])
         except Exception as e:
             logger.error(f"Error processing URL list: {str(e)}", exc_info=True)
     else:
