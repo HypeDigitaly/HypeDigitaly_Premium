@@ -30,8 +30,8 @@ CHECK_MODIFIED_DATE = True
 
 # Speciální URL
 SPECIAL_URLS = {
-    #"https://icuk.cz/o-nas/": "Contact",
-    #"https://icuk.cz/dokumenty-ke-stazeni/": "Documents"
+    "https://icuk.cz/o-nas/": "Contact",
+    "https://icuk.cz/dokumenty-ke-stazeni/": "Documents"
 }
 
 # Nové proměnné pro určení počátečního bodu
@@ -63,12 +63,12 @@ logger.info("Logging initialized. Log file cleared and ready for new run.")
 
 # Definice sekcí a jejich sitemap
 SECTIONS = {
-    #"Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
-    #"References": ["https://icuk.cz/reference-sitemap.xml"],
-    #"SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
+    "Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
+    "References": ["https://icuk.cz/reference-sitemap.xml"],
+    "SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
     "Events": ["https://icuk.cz/udalost-sitemap.xml"],
-    #"Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
-    #"Articles": ["https://icuk.cz/post-sitemap.xml"]
+    "Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
+    "Articles": ["https://icuk.cz/post-sitemap.xml"]
 }
 
 def date_to_number(date_string):
@@ -82,7 +82,7 @@ def date_to_number(date_string):
         return int(numeric_representation)
     
     except ValueError:
-        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
 
 def get_last_run_time():
     if os.path.exists(LAST_RUN_FILE):
@@ -489,7 +489,10 @@ def upload_to_voiceflow(filename):
     else:
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
 
-def is_url_modified(lastmod):
+def is_url_modified(lastmod, section):
+    if section == "Events":
+        return True  # Vždy zpracovat všechny události
+    
     if not CHECK_MODIFIED_DATE:
         return True
     
@@ -889,13 +892,11 @@ def main():
                         url = url_data['url']
                         lastmod = url_data['lastmod']
                         logger.info(f"Zpracovávám URL {i} ze sitemapy {sitemap_url}: {url}")
-                        if is_url_modified(lastmod):
+                        if section == "Events" or is_url_modified(lastmod, section):
                             process_url(url, section)
-                            if i < len(urls) - 1:  # Don't delay after the last URL
-                                logger.info(f"Čekání {SCRAPING_DELAY} sekund před zpracováním další URL...")
-                                time.sleep(SCRAPING_DELAY)
-                        else:
-                            logger.info(f"Přeskakuji URL {url}, nebyla modifikována od posledního zpracování")
+                        if i < len(urls) - 1:  # Don't delay after the last URL
+                            logger.info(f"Čekání {SCRAPING_DELAY} sekund před zpracováním další URL...")
+                            time.sleep(SCRAPING_DELAY)
                 except Exception as e:
                     logger.error(f"Chyba při zpracování sitemapy {sitemap_url}: {str(e)}", exc_info=True)
                 
