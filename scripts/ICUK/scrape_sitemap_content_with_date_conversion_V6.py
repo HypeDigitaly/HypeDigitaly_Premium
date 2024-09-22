@@ -31,7 +31,7 @@ CHECK_MODIFIED_DATE = False
 # Speciální URL
 SPECIAL_URLS = {
     "https://icuk.cz/o-nas/": "Contact",
-    "https://icuk.cz/dokumenty-ke-stazeni/": "Documents"
+    #"https://icuk.cz/dokumenty-ke-stazeni/": "Documents"
 }
 
 # Nové proměnné pro určení počátečního bodu
@@ -63,12 +63,12 @@ logger.info("Logging initialized. Log file cleared and ready for new run.")
 
 # Definice sekcí a jejich sitemap
 SECTIONS = {
-    "Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
-    "References": ["https://icuk.cz/reference-sitemap.xml"],
-    "SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
-    "Events": ["https://icuk.cz/udalost-sitemap.xml"],
-    "Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
-    "Articles": ["https://icuk.cz/post-sitemap.xml"]
+    #"Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
+    #"References": ["https://icuk.cz/reference-sitemap.xml"],
+    #"SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
+    #"Events": ["https://icuk.cz/udalost-sitemap.xml"],
+    #"Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
+    #"Articles": ["https://icuk.cz/post-sitemap.xml"]
 }
 
 def date_to_number(date_string):
@@ -190,7 +190,7 @@ def parse_contacts(html_content):
         info_div = contact_div.find('div', class_='osoba-info')
         image_div = contact_div.find('div', class_='osoba-obrazek')
         
-        name = info_div.find('h3', class_='osoba-nazev').text.strip() if info_div.find('h3', class_='osoba-nazev') else ''
+        full_name = info_div.find('h3', class_='osoba-nazev').text.strip() if info_div.find('h3', class_='osoba-nazev') else ''
         role = info_div.find('span', class_='osoba-pozice').text.strip() if info_div.find('span', class_='osoba-pozice') else ''
         email = info_div.find('span', class_='osoba-email').text.strip() if info_div.find('span', class_='osoba-email') else ''
         linkedin = info_div.find('span', class_='osoba-linkedin').find('a')['href'] if info_div.find('span', class_='osoba-linkedin') and info_div.find('span', class_='osoba-linkedin').find('a') else ''
@@ -203,18 +203,40 @@ def parse_contacts(html_content):
             if url_match:
                 image_url = url_match.group(1)
         
-        name_parts = name.split()
-        first_name = name_parts[0] if name_parts else ''
-        last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+        # Rozdělení jména na FirstName, LastName a Title
+        name_parts = full_name.split()
+        first_name = ''
+        last_name = ''
+        title_before = []
+        title_after = []
+        
+        # Kontrola titulů před jménem
+        while name_parts and (name_parts[0].endswith('.') or name_parts[0] in ['Ing.', 'Mgr.', 'PhDr.', 'doc.', 'prof.', 'Bc.', 'MUDr.', 'JUDr.']):
+            title_before.append(name_parts.pop(0))
+        
+        # Kontrola titulů za jménem
+        while name_parts and (name_parts[-1].endswith('.') or name_parts[-1] in ['MBA', 'Ph.D.', 'CSc.', 'DrSc.', 'DiS.', 'LL.M.']):
+            title_after.insert(0, name_parts.pop())
+        
+        # Odstranění čárek z posledního jména
+        if name_parts and name_parts[-1].endswith(','):
+            name_parts[-1] = name_parts[-1].rstrip(',')
+        
+        if name_parts:
+            first_name = name_parts.pop(0)
+            last_name = ' '.join(name_parts)
+        
+        title = ' '.join(title_before + title_after)
         
         contact = {
             "FirstName": first_name,
             "LastName": last_name,
-            "FullName": name,
+            "FullName": full_name,
+            "Title": title.strip(),
             "Role": role,
             "Email": email,
             "LinkedInProfileURL": linkedin,
-            "ImageURL": image_url  # Přidáno nové pole ImageURL
+            "ImageURL": image_url
         }
         contacts.append(contact)
     return contacts
@@ -261,10 +283,11 @@ def initialize_json_files():
         },
         "payloads/all_contacts.json": {
             "schema": {
-                "searchableFields": ["FirstName", "LastName", "FullName", "Role", "Email", "LinkedInProfileURL", "ImageURL"],
-                "metadataFields": ["FirstName", "LastName", "Role", "Category"]
+                "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Email", "LinkedInProfileURL", "ImageURL"],
+                "metadataFields": ["FirstName", "LastName", "Title", "Role", "Category"]
             },
-            "name": "all_contacts"
+            "name": "all_contacts",
+            "Category": "Contact"
         },
         "payloads/all_documents.json": {
             "schema": {
@@ -861,7 +884,7 @@ def initialize_json_files():
         },
         "payloads/all_contacts.json": {
             "schema": {
-                "searchableFields": ["FirstName", "LastName", "FullName", "Role", "Email", "LinkedInProfileURL", "ImageURL"],
+                "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Email", "LinkedInProfileURL", "ImageURL"],
                 "metadataFields": ["FirstName", "LastName", "Role", "Category"]
             },
             "name": "all_contacts",
