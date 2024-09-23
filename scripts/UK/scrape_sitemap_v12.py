@@ -39,9 +39,9 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 logger.addHandler(console_handler)
 
 # API klíče a konstanty
-CLAUDE_API_KEY = ""
-JINA_AI_API_KEY = ""
-VOICEFLOW_API_KEY = ""
+CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
+JINA_AI_API_KEY = "REMOVED-JINA-KEY"
+VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
 BASE_URL = "https://www.kr-ustecky.cz"
 
 # New variables for API call management
