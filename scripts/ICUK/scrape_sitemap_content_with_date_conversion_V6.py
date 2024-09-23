@@ -20,18 +20,18 @@ CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
 VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
 
 # Zpoždění mezi scrapováním jednotlivých stránek (v sekundách)
-SCRAPING_DELAY = 5
+SCRAPING_DELAY = 0
 
 # Seznam URL ke zpracování
 CUSTOM_URLS = []
 
 # TRUE = NAHRAVAT POUZE AKTUALIZACE, NIKOLIV VSE OD ZACATKU
-CHECK_MODIFIED_DATE = False
+CHECK_MODIFIED_DATE = True
 
 # Speciální URL
 SPECIAL_URLS = {
     "https://icuk.cz/o-nas/": "Contact",
-    #"https://icuk.cz/dokumenty-ke-stazeni/": "Documents"
+    "https://icuk.cz/dokumenty-ke-stazeni/": "Documents"
 }
 
 # Nové proměnné pro určení počátečního bodu
@@ -63,12 +63,12 @@ logger.info("Logging initialized. Log file cleared and ready for new run.")
 
 # Definice sekcí a jejich sitemap
 SECTIONS = {
-    #"Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
-    #"References": ["https://icuk.cz/reference-sitemap.xml"],
-    #"SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
-    #"Events": ["https://icuk.cz/udalost-sitemap.xml"],
-    #"Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
-    #"Articles": ["https://icuk.cz/post-sitemap.xml"]
+    "Services": ["https://icuk.cz/pro-firmy-sitemap.xml", "https://icuk.cz/pro-region-sitemap.xml", "https://icuk.cz/pro-skoly-sitemap.xml"],
+    "References": ["https://icuk.cz/reference-sitemap.xml"],
+    "SuccessStories": ["https://icuk.cz/success-story-sitemap.xml"],
+    "Events": ["https://icuk.cz/udalost-sitemap.xml"],
+    "Podcasts": ["https://icuk.cz/podcast-sitemap.xml"],
+    "Articles": ["https://icuk.cz/post-sitemap.xml"]
 }
 
 def date_to_number(date_string):
@@ -215,17 +215,18 @@ def parse_contacts(html_content):
             title_before.append(name_parts.pop(0))
         
         # Kontrola titulů za jménem
-        while name_parts and (name_parts[-1].endswith('.') or name_parts[-1] in ['MBA', 'Ph.D.', 'CSc.', 'DrSc.', 'DiS.', 'LL.M.']):
+        while name_parts and (name_parts[-1].endswith('.') or name_parts[-1] in ['MBA', 'Ph.D.', 'CSc.', 'DrSc.', 'DiS', 'LL.M.', 'DiS.']):
             title_after.insert(0, name_parts.pop())
         
-        # Odstranění čárek z posledního jména
-        if name_parts and name_parts[-1].endswith(','):
-            name_parts[-1] = name_parts[-1].rstrip(',')
-        
+        # Zpracování jména
         if name_parts:
             first_name = name_parts.pop(0)
             last_name = ' '.join(name_parts)
         
+        # Odstranění čárek z příjmení
+        last_name = last_name.rstrip(',')
+        
+        # Spojení titulů
         title = ' '.join(title_before + title_after)
         
         contact = {
@@ -284,7 +285,7 @@ def initialize_json_files():
         "payloads/all_contacts.json": {
             "schema": {
                 "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Email", "LinkedInProfileURL", "ImageURL"],
-                "metadataFields": ["FirstName", "LastName", "Title", "Role", "Category"]
+                "metadataFields": ["FirstName", "LastName", "Role", "Category"]
             },
             "name": "all_contacts",
             "Category": "Contact"
@@ -742,10 +743,14 @@ def extract_json_from_response(response_text):
             logger.error("V odpovědi nebyl nalezen žádný JSON objekt")
             return None
 
-def process_url(url, section):
+def process_url(url, section, lastmod):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            if not is_url_modified(lastmod, section):
+                logger.info(f"URL {url} nebyla od posledního spuštění modifikována, přeskakuji")
+                return None
+
             return_format = 'html' if url in SPECIAL_URLS else 'markdown'
             content, metadata = get_html_content(url, return_format)
             if not content:
