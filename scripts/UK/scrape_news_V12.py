@@ -69,6 +69,9 @@ def extract_item_data(item):
     date_obj = datetime.strptime(pub_date, '%a, %d %b %Y %H:%M:%S %Z')
     formatted_date = date_obj.strftime('%Y%m%d')
     
+    # Log all processed URLs
+    logger.info(f"Processing item with URL: {link}")
+    
     # Check if the date is greater than or equal to the dateThreshold
     if formatted_date < dateThreshold:
         logger.info(f"Skipping item with date {formatted_date} (before threshold {dateThreshold})")
@@ -122,6 +125,9 @@ def upload_to_voiceflow(filename):
         logger.info(f"Úspěšně nahráno {len(payload['data']['items'])} položek pro soubor '{filename}'")
     else:
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
+    
+    # Log the status of the upload
+    logger.info(f"Upload status for '{filename}': {response.status_code} - {response.reason}")
 
 def main():
     try:
