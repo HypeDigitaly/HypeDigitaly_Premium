@@ -25,7 +25,7 @@ OUTPUT_DIRECTORY = 'payloads'
 BASE_URL = "https://www.kr-ustecky.cz"
 
 # Constants for script name and log directory
-SCRIPT_NAME = "scrape_contacts_into_json"
+SCRIPT_NAME = "scrape_contacts"
 LOG_DIR = f"{SCRIPT_NAME}_logs"
 LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
 
@@ -47,9 +47,11 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 logger.addHandler(console_handler)
 
 # New variables for API call management
-API_CALL_DELAY = 5  # Fixed delay between API calls in seconds
 MAX_RETRIES = 3  # Maximum number of retry attempts
 INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
+
+# Přejmenujeme proměnnou a nastavíme ji na 10 sekund
+JINA_AI_TIMEOUT = 10
 
 def requests_retry_session(
     retries=3,
@@ -87,12 +89,14 @@ def get_html_content(url):
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
-        "X-Return-Format": "html"
+        "X-Return-Format": "html",
+        "X-Timeout": str(JINA_AI_TIMEOUT),
+        "X-Wait-For-Selector": "#utvar"
     }
     
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests_retry_session().get(api_url, headers=headers, timeout=30)
+            response = requests_retry_session().get(api_url, headers=headers, timeout=JINA_AI_TIMEOUT)
             response.raise_for_status()
             data = response.json()
             
@@ -124,8 +128,8 @@ def get_html_content(url):
             logger.warning(f"Error getting HTML content, attempt {attempt + 1}/{MAX_RETRIES}. Retrying in {delay:.2f} seconds...")
             time.sleep(delay)
     
-    # Apply fixed delay after successful API call
-    time.sleep(API_CALL_DELAY)
+    # Použijeme JINA_AI_TIMEOUT místo API_CALL_DELAY
+    time.sleep(JINA_AI_TIMEOUT)
 
 def sanitize_filename(filename):
     sanitized = re.sub(r'[^\w\-_\. ]', '', filename)
@@ -276,17 +280,17 @@ def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voicef
     count = 0
     end_index = upper_threshold if upper_threshold else len(url_data)
 
-    logger.info(f"\nProcessing URLs from index {start_index} to {end_index}")
+    logger.info(f"\nZpracovávám URL od indexu {start_index} do {end_index}")
 
     if not os.path.exists(OUTPUT_DIRECTORY):
         os.makedirs(OUTPUT_DIRECTORY)
-        logger.info(f"Created directory: {OUTPUT_DIRECTORY}")
+        logger.info(f"Vytvořen adresář: {OUTPUT_DIRECTORY}")
     else:
-        logger.info(f"Output directory already exists: {OUTPUT_DIRECTORY}")
+        logger.info(f"Výstupní adresář již existuje: {OUTPUT_DIRECTORY}")
 
     for i, entry in enumerate(url_data[start_index:end_index], start=start_index):
         initial_url = entry['URL']
-        logger.info(f"\n--- Processing URL {i+1}/{end_index}: {initial_url} ---")
+        logger.info(f"\n--- Zpracovávám URL {i+1}/{end_index}: {initial_url} ---")
 
         try:
             html_content, metadata = get_html_content(initial_url)
@@ -338,9 +342,9 @@ def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voicef
             logger.error(f"Error details: {str(e)}")
 
         count += 1
-        if count % 3 == 0 and count < end_index:
-            logger.info("\nResting for 60 seconds to respect rate limits...")
-            time.sleep(60)
+        # Odstraníme podmínku pro čekání po každých 3 URL a použijeme vždy JINA_AI_TIMEOUT
+        logger.info(f"Čekám {JINA_AI_TIMEOUT} sekund před zpracováním dalšího URL...")
+        time.sleep(JINA_AI_TIMEOUT)
 
 def upload_existing_files(directory):
     for filename in os.listdir(directory):
