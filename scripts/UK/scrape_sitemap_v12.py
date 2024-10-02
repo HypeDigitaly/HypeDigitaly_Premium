@@ -132,7 +132,7 @@ DŮLEŽITÉ INSTRUKCE:
 1. Odpovězte POUZE názvem JEDNÉ JEDINÉ nejvhodnější kategorie ze seznamu výše.
 2. Pokud žádná z kategorií dobře neodpovídá, odpovězte "Nezařazeno".
 3. Neodpovídejte žádným jiným textem, pouze názvem kategorie nebo "Nezařazeno".
-4. Cokoliv se týká lidí, osob, krajského úřadu, organizační struktury nebo kontaktních informací, zařaďte do kategorie "Kontakt".
+4. Cokoliv se týká lidí, osob, krajského úřadu, organizační struktury nebo kontaktních informací, zařaďte do kategorie "Kontakt" (např. Komise, Výbory, Zastupitelstvo, Radní, zaměstnanci, atd.).
 
 Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co nejpřesnější zařazení/zvolení dané kategorie ze vstupního seznamu.
 """
