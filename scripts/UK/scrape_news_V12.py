@@ -90,7 +90,7 @@ def create_initial_payload(year):
     return {
         "data": {
             "schema": {
-                "searchableFields": ["Title", "URL", "Description", "ImageURL"],
+                "searchableFields": ["Title", "URL", "Description", "ImageURL", "Date"],
                 "metadataFields": ["Category", "Date"]
             },
             "name": f"tiskove_informace_table_{year}",
