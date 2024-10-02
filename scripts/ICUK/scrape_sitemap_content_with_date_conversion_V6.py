@@ -146,7 +146,8 @@ def get_html_content(url, return_format='markdown'):
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
-        "X-Return-Format": return_format
+        "X-Return-Format": return_format,
+        "X-Timeout": "10"
     }
     
     try:
@@ -954,7 +955,7 @@ def main():
     # Process special URLs first
     for url, section in SPECIAL_URLS.items():
         try:
-            process_url(url, section)
+            process_url(url, section, None)
         except Exception as e:
             logger.error(f"Chyba při zpracování speciální URL {url}: {str(e)}", exc_info=True)
 
@@ -967,7 +968,7 @@ def main():
         for i, url in enumerate(CUSTOM_URLS[START_URL_INDEX:], start=START_URL_INDEX):
             try:
                 section = determine_section(url)
-                process_url(url, section)
+                process_url(url, section, None)
                 if i < len(CUSTOM_URLS) - 1:  # Don't delay after the last URL
                     logger.info(f"Čekání {SCRAPING_DELAY} sekund před zpracováním další URL...")
                     time.sleep(SCRAPING_DELAY)
@@ -988,7 +989,7 @@ def main():
                         lastmod = url_data['lastmod']
                         logger.info(f"Zpracovávám URL {i} ze sitemapy {sitemap_url}: {url}")
                         if section == "Events" or is_url_modified(lastmod, section):
-                            process_url(url, section)
+                            process_url(url, section, lastmod)  # Předáváme lastmod
                         if i < len(urls) - 1:  # Don't delay after the last URL
                             logger.info(f"Čekání {SCRAPING_DELAY} sekund před zpracováním další URL...")
                             time.sleep(SCRAPING_DELAY)
