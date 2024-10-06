@@ -2,6 +2,7 @@ import requests
 import json
 import logging
 import os
+import time
 from bs4 import BeautifulSoup
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -40,6 +41,9 @@ RSS_URL = "https://www.kr-ustecky.cz/rss/?21"
 # OUTPUT_FILE = "payloads/tiskove_informace_payload.json"
 VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
 dateThreshold = "20230101"  # Set the date threshold here
+
+# Přidáno: Konstanta pro zpoždění mezi API voláními (v sekundách)
+API_CALL_DELAY = 30
 
 def fetch_rss_feed(url):
     logger.info(f"Fetching RSS feed from URL: {url}")
@@ -126,8 +130,12 @@ def upload_to_voiceflow(filename):
     else:
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
     
-    # Log the status of the upload
-    logger.info(f"Upload status for '{filename}': {response.status_code} - {response.reason}")
+    # Log stavu nahrávání
+    logger.info(f"Stav nahrávání pro '{filename}': {response.status_code} - {response.reason}")
+    
+    # Přidáno: Zpoždění po každém API volání
+    logger.info(f"Čekání {API_CALL_DELAY} sekund před dalším API voláním...")
+    time.sleep(API_CALL_DELAY)
 
 def main():
     try:
