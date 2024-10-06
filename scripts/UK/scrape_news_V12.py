@@ -65,16 +65,16 @@ def extract_item_data(item):
         logger.warning(f"Image not found for item with title: {title}")
         image_url = None  # nebo nastavte na nějakou výchozí hodnotu
     
-    # Convert pubDate to YYYYMMDD format
+    # Převod pubDate na formát YYYYMMDD jako celé číslo
     date_obj = datetime.strptime(pub_date, '%a, %d %b %Y %H:%M:%S %Z')
-    formatted_date = date_obj.strftime('%Y%m%d')
+    formatted_date = int(date_obj.strftime('%Y%m%d'))
     
     # Log all processed URLs
     logger.info(f"Processing item with URL: {link}")
     
-    # Check if the date is greater than or equal to the dateThreshold
-    if formatted_date < dateThreshold:
-        logger.info(f"Skipping item with date {formatted_date} (before threshold {dateThreshold})")
+    # Kontrola, zda je datum větší nebo rovno dateThreshold
+    if formatted_date < int(dateThreshold):
+        logger.info(f"Přeskakuji položku s datem {formatted_date} (před prahem {dateThreshold})")
         return None
     
     return {
@@ -83,7 +83,7 @@ def extract_item_data(item):
         "Description": description,
         "ImageURL": image_url,
         "Category": "Media_Komunikace",
-        "Date": formatted_date
+        "Date": formatted_date  # Již je celé číslo
     }
 
 def create_initial_payload(year):
@@ -135,11 +135,15 @@ def main():
         rss_items = parse_rss_feed(rss_content)
         
         payloads_by_year = {}
+        total_items = 0
+        filtered_items = 0
         
         for item in rss_items:
+            total_items += 1
             item_data = extract_item_data(item)
             if item_data:
-                year = item_data['Date'][:4]
+                filtered_items += 1
+                year = str(item_data['Date'])[:4]  # Převedeme int na string před získáním roku
                 if year not in payloads_by_year:
                     payloads_by_year[year] = create_initial_payload(year)
                 append_item_to_payload(item_data, payloads_by_year[year])
@@ -149,8 +153,10 @@ def main():
             save_payload_to_file(payload, output_file)
             upload_to_voiceflow(output_file)
         
+        logger.info(f"Zpracováno celkem {total_items} položek, z toho {filtered_items} prošlo filtrem data.")
+        
     except Exception as e:
-        logger.error(f"An error occurred: {str(e)}", exc_info=True)
+        logger.error(f"Došlo k chybě: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
     main()
