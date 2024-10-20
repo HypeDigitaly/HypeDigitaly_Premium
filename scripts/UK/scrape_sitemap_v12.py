@@ -113,7 +113,21 @@ def get_html_content(url):
 
 def parse_menu(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
-    main_menu = soup.find('ul', class_='ui')
+    main_menu = soup.select_one('#osnova > div.odkazy.text-to-speech > ul')
+    
+    if not main_menu:
+        print("Varování: Hlavní menu nebylo nalezeno pomocí selektoru '#osnova > div.odkazy.text-to-speech > ul'.")
+        # Pokud není nalezeno hlavní menu, zkusíme alternativní metody
+        main_menu = soup.find('ul', class_='ui')
+        if main_menu:
+            print("Nalezen <ul> element s třídou 'ui' jako záložní řešení.")
+        else:
+            main_menu = soup.find('ul')
+            if main_menu:
+                print("Nalezen první <ul> element jako záložní řešení.")
+            else:
+                print("Žádný vhodný <ul> element nebyl nalezen.")
+    
     return main_menu
 
 def categorize_link_claude(path):
