@@ -1,0 +1,9 @@
+PROJECT_NAME=UKBOT
+AUTH_TOKEN=
+PROJECT_ID=
+START_DATE=2024-10-29
+END_DATE=2024-12-01
+OUTPUT_DIRECTORY=2024-10-29 to 2024-12-01
+CATEGORIES=[Administrativa_Uredni_Zalezitosti,Charakteristika_Kraje,Doprava,Dotace,Finance_Hospodareni,Kontakt,Krizove_Situace,Kultura_Pamatkova_Pece,Media_Komunikace,Rozvoj_Projekty,Socialni_Pece,Strategicke_Dokumenty,Ukrajina,Uzemni_Planovani_Stavebni_Rad,Verejne_Zakazky,Vzdelavani,Zdravotnictvi,Zivotni_Prostredi_Zemedelstvi]
+ANTHROPIC_API_KEY=
+BATCH_SIZE=25
