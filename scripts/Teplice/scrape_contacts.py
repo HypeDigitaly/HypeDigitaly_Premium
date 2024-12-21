@@ -22,7 +22,10 @@ os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Add handler for rotating file
+# Clear existing log file and add handler for rotating file
+if os.path.exists(LOG_FILE):
+    open(LOG_FILE, 'w').close()  # Clear the log file
+
 if not any(isinstance(handler, RotatingFileHandler) for handler in logger.handlers):
     file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))

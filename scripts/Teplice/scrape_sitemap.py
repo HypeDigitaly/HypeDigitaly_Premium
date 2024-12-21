@@ -24,19 +24,46 @@ LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
 # Create log directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+# Clear the log file if it exists
+if os.path.exists(LOG_FILE):
+    open(LOG_FILE, 'w').close()
 
-# Add handler for rotating file
+# Update logging format and handlers
+logging.basicConfig(level=logging.INFO)  # Change base level to INFO
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Change logger level to INFO
+
+# Clear any existing handlers
+logger.handlers.clear()
+
+# Create custom formatter that only includes essential information
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# Configure rotating file handler with more focused filtering
+class URLAndAPIFilter(logging.Filter):
+    def filter(self, record):
+        # Only allow logs related to URL processing and API calls
+        return any([
+            "URL:" in record.getMessage(),
+            "Claude API" in record.getMessage(),
+            "Status code:" in record.getMessage(),
+            "API response:" in record.getMessage(),
+            "Kategorizace URL" in record.getMessage(),
+            "Cesta:" in record.getMessage(),
+            "Přiřazena kategorie:" in record.getMessage()
+        ])
+
 file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+file_handler.setFormatter(formatter)
+file_handler.addFilter(URLAndAPIFilter())
+file_handler.setLevel(logging.INFO)
 logger.addHandler(file_handler)
 
-# Add handler for console output
+# Configure console handler with same filter
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+console_handler.setFormatter(formatter)
+console_handler.addFilter(URLAndAPIFilter())
+console_handler.setLevel(logging.INFO)
 logger.addHandler(console_handler)
 
 # API klíče a konstanty
@@ -238,11 +265,12 @@ def extract_links(menu_item, path=[], categorized_links={}):
             absolute_url = urljoin(BASE_URL, link['href'])
             
             logger.info(f"=== Začátek zpracování URL: {absolute_url} ===")
+            logger.info(f"Cesta: {absolute_path}")
             
             try:
                 # 1. Kategorizace URL
                 category = categorize_link_claude(current_path)
-                logger.info(f"URL zařazena do kategorie: {category}")
+                logger.info(f"Přiřazena kategorie: {category} na základě cesty")
                 
                 # 2. Získání obsahu stránky
                 html_content, metadata = get_html_content(absolute_url)

@@ -8,18 +8,58 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 import anthropic
 
-# Add these constants at the top with other constants
-CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
 
-# Constants for script name and log directory
+#######################
+### FEATURE FLAGS ####
+#######################
+
+ENABLE_CATEGORIZATION = True  # Set to False to disable Claude API categorization
+
+
+#######################
+### API KEYS & AUTH ###
+#######################
+
+CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
+VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
+
+
+########################
+### URLs & ENDPOINTS ###
+########################
+
+BASE_URL = "https://www.teplice.cz"
+RSS_URL = "https://www.teplice.cz/rss/?21"
+
+
+####################################
+### DATE & PROCESSING PARAMETERS ###
+####################################
+
+##PROCESS_MAX_DATE = "20241220" 
+PROCESS_MAX_DATE = None  # You can set this to None or remove this line entirely
+PROCESS_MAX_DATE = datetime.now().strftime('%Y%m%d') if PROCESS_MAX_DATE is None else PROCESS_MAX_DATE
+dateThreshold = "20190101"  # Lower date threshold for processing (YYYYMMDD)
+API_CALL_DELAY = 30  # Delay between API calls in seconds
+
+
+########################################
+### FILE & DIRECTORY CONFIGURATION  ####
+########################################
+
 SCRIPT_NAME = "scrape_news"
 LOG_DIR = f"{SCRIPT_NAME}_logs"
 LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
+LAST_PROCESSED_DATE_FILE = f"{SCRIPT_NAME}_last_processed_date.txt"
 
-# Create log directory if it doesn't exist
+# Create required directories
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Set up logging
+
+##########################
+### LOGGING SETUP #######
+##########################
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -39,15 +79,25 @@ if not any(isinstance(handler, logging.StreamHandler) for handler in logger.hand
 with open(LOG_FILE, 'w'):
     pass
 
-BASE_URL = "https://www.teplice.cz"
-RSS_URL = "https://www.teplice.cz/rss/?21"
-# OUTPUT_FILE NEMÁ AKTUÁLNĚ VÝZNAM, JELIKOŽ SE NÁZVY SOUBORŮ TVOŘÍ DYNAMICKY PODLE ROKŮ (SOUVISÍ S "dateThreshold")
-# OUTPUT_FILE = "payloads/tiskove_informace_payload.json"
-VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
-dateThreshold = "20230101"  # Set the date threshold here
 
-# Přidáno: Konstanta pro zpoždění mezi API voláními (v sekundách)
-API_CALL_DELAY = 30
+################################################################################
+### MAIN SCRIPT FUNCTIONS BELOW ##############################################
+################################################################################
+
+def load_last_processed_date():
+    """Load the last processed date from file if it exists"""
+    try:
+        with open(LAST_PROCESSED_DATE_FILE, 'r') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.info("No previous processed date found")
+        return None
+
+def save_last_processed_date(pub_date):
+    """Save the last processed date to file"""
+    with open(LAST_PROCESSED_DATE_FILE, 'w') as f:
+        f.write(pub_date)
+    logger.info(f"Saved last processed date: {pub_date}")
 
 def fetch_rss_feed(url):
     logger.info(f"Fetching RSS feed from URL: {url}")
@@ -55,10 +105,72 @@ def fetch_rss_feed(url):
     response.raise_for_status()
     return response.content
 
+def parse_date(date_str):
+    """Parse date string in format 'Fri, 31 Dec 2024 23:59:59 GMT' to datetime object"""
+    try:
+        return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+    except ValueError as e:
+        logger.error(f"Error parsing date '{date_str}': {e}")
+        return None
+
+def format_date_for_filename(date_str):
+    """Convert date string to YYYYMMDD format for filenames"""
+    date_obj = parse_date(date_str)
+    if date_obj:
+        return date_obj.strftime('%Y%m%d')
+    return None
+
 def parse_rss_feed(content):
-    soup = BeautifulSoup(content, 'xml')
+    # Load the last processed date
+    last_processed_date = load_last_processed_date()
+    if last_processed_date:
+        last_processed_dt = parse_date(last_processed_date)
+        logger.info(f"Found last processed date: {last_processed_dt.strftime('%Y-%m-%d')}")
+    else:
+        last_processed_dt = None
+        logger.info("No last processed date found - will process all items within threshold range")
+    
+    # Convert threshold dates to datetime
+    max_date_dt = datetime.strptime(PROCESS_MAX_DATE, '%Y%m%d')
+    min_date_dt = datetime.strptime(dateThreshold, '%Y%m%d')
+    
+    soup = BeautifulSoup(content, 'lxml-xml')
     items = soup.find_all('item')
-    return items
+    
+    logger.info(f"Found {len(items)} total items in RSS feed")
+    
+    filtered_items = []
+    for item in items:
+        pub_date = item.pubDate.text.strip()
+        pub_date_dt = parse_date(pub_date)
+        
+        if not pub_date_dt:
+            logger.warning(f"Could not parse date: {pub_date}")
+            continue
+        
+        # Skip if we've already processed this item in a previous run
+        if last_processed_dt and pub_date_dt <= last_processed_dt:
+            logger.debug(f"Skipping already processed item from {pub_date_dt.strftime('%Y-%m-%d')}")
+            continue
+            
+        # Check if date is within our desired range
+        if min_date_dt <= pub_date_dt <= max_date_dt:
+            filtered_items.append(item)
+            logger.info(f"Including new item with date {pub_date_dt.strftime('%Y-%m-%d')}")
+        else:
+            logger.debug(f"Skipping item with date {pub_date_dt.strftime('%Y-%m-%d')} - outside range")
+    
+    logger.info(f"Filtered to {len(filtered_items)} new items within date range")
+    
+    # Sort filtered_items by date (newest first)
+    filtered_items.sort(key=lambda x: parse_date(x.pubDate.text.strip()), reverse=True)
+    
+    # Save the newest processed date (first item in RSS feed)
+    if filtered_items:
+        newest_item_date = filtered_items[0].pubDate.text.strip()
+        save_last_processed_date(newest_item_date)
+    
+    return filtered_items, last_processed_date
 
 def extract_item_data(item):
     title = item.title.get_text(strip=True)
@@ -85,7 +197,11 @@ def extract_item_data(item):
         logger.info(f"Přeskakuji položku s datem {formatted_date} (před prahem {dateThreshold})")
         return None
     
-    categories = get_categories_from_claude(title, description)
+    # Modified categories assignment based on feature flag
+    if ENABLE_CATEGORIZATION:
+        categories = get_categories_from_claude(title, description)
+    else:
+        categories = ["Media_Komunikace"]  # Default category when categorization is disabled
     
     return {
         "Title": title,
@@ -93,17 +209,17 @@ def extract_item_data(item):
         "Description": description,
         "ImageURL": image_url,
         "Category": categories,
-        "Date": formatted_date  # Již je celé číslo
+        "Date": formatted_date
     }
 
-def create_initial_payload(year):
+def create_initial_payload(filename_without_extension):
     return {
         "data": {
             "schema": {
                 "searchableFields": ["Title", "URL", "Description", "ImageURL", "Date"],
                 "metadataFields": ["Category", "Date"]
             },
-            "name": f"tiskove_informace_table_{year}",
+            "name": filename_without_extension,  # Use the filename as the table name
             "items": []
         }
     }
@@ -119,7 +235,7 @@ def append_item_to_payload(item, payload):
 
 def upload_to_voiceflow(filename):
     logger.info(f"Nahrávání souboru '{filename}' do Voiceflow")
-    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true'
+    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=false'
     headers = {
         'Authorization': VOICEFLOW_API_KEY,
         'accept': 'application/json',
@@ -132,7 +248,7 @@ def upload_to_voiceflow(filename):
     response = requests.post(url, headers=headers, json=payload)
     
     if response.status_code == 200:
-        logger.info(f"Úspěšně nahráno {len(payload['data']['items'])} položek pro soubor '{filename}'")
+        logger.info(f"Úspěně nahráno {len(payload['data']['items'])} položek pro soubor '{filename}'")
     else:
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
     
@@ -277,29 +393,46 @@ Správné kategorie: ["Verejne_Zakazky"]
         return ["Media_Komunikace"]  # Fallback kategorie
 
 def create_payloads_structure():
-    """Initialize empty payload structures for all possible years"""
+    """Initialize empty payload structures only for years matching dateThreshold"""
     payloads = {}
-    # Initialize with current year and previous year to start
+    threshold_year = str(dateThreshold)[:4]
     current_year = datetime.now().year
-    years = [str(current_year), str(current_year - 1)]
+    
+    years = [str(year) for year in range(int(threshold_year), current_year + 1)]
+    
+    # Initialize a dict to store the last processed date for each year
+    last_dates = {year: None for year in years}
     
     for year in years:
         payloads[year] = create_initial_payload(year)
-        # Create the file immediately
-        output_file = f"payloads/table_tiskove_informace_{year}.json"
-        save_payload_to_file(payloads[year], output_file)
+        # Note: We'll save the files later when we have the last processed dates
         logger.info(f"Created initial payload structure for year {year}")
     
-    return payloads
+    return payloads, last_dates
 
 def main():
     try:
-        # Initialize payload structure at the start
-        payloads_by_year = create_payloads_structure()
+        # Initialize payload structure
+        payloads_by_year = {}
         
         rss_content = fetch_rss_feed(RSS_URL)
-        rss_items = parse_rss_feed(rss_content)
+        rss_items, last_processed_date = parse_rss_feed(rss_content)
         
+        if not rss_items:
+            logger.info("No new items to process")
+            return
+            
+        # Get the newest date (first RSS item's date) for filename
+        newest_date = rss_items[0].pubDate.text.strip()
+        newest_date_formatted = format_date_for_filename(newest_date)
+        
+        # Format the last processed date for filename
+        last_processed_formatted = format_date_for_filename(last_processed_date) if last_processed_date else None
+        if not last_processed_formatted:
+            logger.warning("No last processed date found, using dateThreshold")
+            last_processed_formatted = dateThreshold
+        
+        current_year = str(datetime.now().year)
         total_items = 0
         filtered_items = 0
         
@@ -310,30 +443,30 @@ def main():
                 filtered_items += 1
                 year = str(item_data['Date'])[:4]
                 
-                # If we encounter a new year, initialize its structure
                 if year not in payloads_by_year:
-                    payloads_by_year[year] = create_initial_payload(year)
-                    output_file = f"payloads/table_tiskove_informace_{year}.json"
-                    save_payload_to_file(payloads_by_year[year], output_file)
-                    logger.info(f"Created new payload structure for year {year}")
+                    # Create filename without extension for table name
+                    if year == current_year:
+                        # Include date range only for current year
+                        filename_without_ext = f"table_tiskove_informace_{year}_{last_processed_formatted}_{newest_date_formatted}"
+                    else:
+                        # For past years, use only the year
+                        filename_without_ext = f"table_tiskove_informace_{year}"
+                    payloads_by_year[year] = create_initial_payload(filename_without_ext)
                 
-                # Add item to the payload
                 append_item_to_payload(item_data, payloads_by_year[year])
-                
-                # Save the updated payload immediately
-                output_file = f"payloads/table_tiskove_informace_{year}.json"
-                save_payload_to_file(payloads_by_year[year], output_file)
-                logger.info(f"Added and saved item: {item_data['Title']} to year {year}")
         
-        # Final upload to Voiceflow
+        # Save and upload files - one per year with date range in filename
         for year, payload in payloads_by_year.items():
-            output_file = f"payloads/table_tiskove_informace_{year}.json"
-            upload_to_voiceflow(output_file)
+            if payload['data']['items']:  # Only save if there are items
+                output_file = f"payloads/{payload['data']['name']}.json"
+                save_payload_to_file(payload, output_file)
+                upload_to_voiceflow(output_file)
+                logger.info(f"Saved and uploaded file: {output_file} with {len(payload['data']['items'])} items")
         
-        logger.info(f"Zpracováno celkem {total_items} položek, z toho {filtered_items} prošlo filtrem data.")
+        logger.info(f"Processed total {total_items} items, {filtered_items} passed the filter.")
         
     except Exception as e:
-        logger.error(f"Došlo k chybě: {str(e)}", exc_info=True)
+        logger.error(f"Error occurred: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
     main()

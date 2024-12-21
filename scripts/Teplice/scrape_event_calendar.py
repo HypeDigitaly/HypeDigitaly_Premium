@@ -16,6 +16,12 @@ LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
 # Create log directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# Clear log file at the start of the script
+try:
+    open(LOG_FILE, 'w').close()
+except Exception as e:
+    print(f"Failed to clear log file: {str(e)}")
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,10 +37,6 @@ if not any(isinstance(handler, logging.StreamHandler) for handler in logger.hand
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(console_handler)
-
-# Clear log file at the start of the script
-with open(LOG_FILE, 'w'):
-    pass
 
 BASE_URL = "https://www.teplice.cz"
 RSS_URL = "https://www.teplice.cz/rss/?22"
