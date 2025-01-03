@@ -12,7 +12,7 @@ import argparse
 
 # Script configuration
 SITEMAP_URL = ""  # URL of the XML sitemap
-URL_LIST_FILE = "URL_List.txt"  # Path to the text file containing the list of URLs
+URL_LIST_FILE = "URLS_LIST.txt"  # Path to the text file containing the list of URLs
 LANGUAGE = "Čeština"  # Set the desired language for Claude API responses
 
 # Constants for file names and directories
@@ -48,12 +48,8 @@ CHECK_MODIFIED_DATE = True
 CATEGORIES = [
     "Services",
     "References",
-    "SuccessStories",
-    "Events",
-    "Podcasts",
-    "Articles",
-    "Documents",
-    "Contact"
+    "Contact",
+    "Articles"
 ]
 
 # forced delay in seconds between each processed URL
@@ -93,20 +89,20 @@ def initialize_payloads():
             "urls": {
                 "data": {
                     "schema": {
-                        "searchableFields": ["Title", "URL"]
+                        "searchableFields": ["Title", "URL"],
+                        "metadataFields": ["Category"]
                     },
                     "name": f"{table_name}_urls",
-                    "tags": [category],
                     "items": []
                 }
             },
             "content": {
                 "data": {
                     "schema": {
-                        "searchableFields": ["Question", "Answer"]
+                        "searchableFields": ["Question", "Answer"],
+                        "metadataFields": ["Category"]
                     },
                     "name": f"{table_name}_content",
-                    "tags": [category],
                     "items": []
                 }
             }
@@ -163,7 +159,7 @@ RESPOND ONLY with the category name, nothing else.
 """
 
     message = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
+        model="claude-3-5-sonnet-20241022",
         max_tokens=50,
         temperature=0,
         messages=[
@@ -175,9 +171,10 @@ RESPOND ONLY with the category name, nothing else.
     
     category = message.content[0].text.strip()
     
+    # Validate that the returned category is one from our CATEGORIES array
     if category not in CATEGORIES:
-        logger.warning(f"Claude returned an unexpected category: {category}. Using 'Uncategorized'.")
-        return "Uncategorized"
+        logger.warning(f"Claude returned an unexpected category: {category}. Using 'Articles'.")
+        return "Services"  # Default to Articles if category is not in our list
     
     return category
 
@@ -194,9 +191,10 @@ RULES:
 2. Maintain the exact number and order of words from the URL.
 3. Replace hyphens with spaces.
 4. Capitalize each word appropriately, according to {LANGUAGE} grammar rules.
-5. Do not change or add any extra words.
+5. Do not change or add any extra words or change the meaning of the text.
 6. The length of the title must be exactly the same as the number of words in the URL path.
 7. Ensure the resulting text is grammatically correct and makes sense in {LANGUAGE}, like a native speaker born in the corresponding country would write it.
+8. If the URL contains a company name or product name - you are not permitted to change it or modify it in any way.
 
 RESPONSE FORMAT:
 Respond only with the resulting title without any additional information or explanation.
@@ -206,7 +204,7 @@ OUTPUT:
 # Response Language: You must absolutely respond only in the following language: {LANGUAGE}"""
 
     message = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
+        model="claude-3-5-sonnet-20241022",
         max_tokens=50,
         temperature=0,
         messages=[
@@ -247,59 +245,77 @@ def get_html_content(url):
         logger.error(f"Error calling Jina AI API: {str(e)}")
         raise
 
-def convert_to_qa(content, title):
+def convert_to_qa(content, title, category):
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     
-    system_prompt = f"""You are an expert in information extraction and JSON creation. Your task is to analyze the provided content and create structured question-answer pairs in JSON format. All output must be in English and directly related to the topic '{title}'."""
+    system_prompt = f"""You are a high-capacity AI expert in comprehensive information extraction. You MUST provide your COMPLETE analysis in a SINGLE response, regardless of length. Your task is to analyze the provided content and create an exhaustive set of structured question-answer pairs in JSON format, all directly related to '{title}'. NEVER split or truncate your response."""
     
     user_prompt = f"""
-# YOUR ONLY TASK: Create a JSON array with question-answer pairs from the provided content. All output must be in "{LANGUAGE}" language and must directly relate to the topic "{title}".
+# MISSION-CRITICAL INSTRUCTION: You MUST provide your ENTIRE response in ONE SINGLE OUTPUT. NEVER split your response or mention continuation.
 
-# EXPECTED JSON FORMAT OF YOUR RESPONSE:
+# YOUR TASK: Create a COMPLETE JSON array containing ALL question-answer pairs from the content. Output must be in "{LANGUAGE}" and relate to "{title}".
+
+# EXPECTED JSON FORMAT (SINGLE COMPLETE RESPONSE):
 {{
   "qa_pairs": [
     {{
-      "Question": "Question 1 ? | Alternative 1? | Alternative 2?",
-      "Answer": "Comprehensive factual answer."
-    }},
-    {{
-      "Question": "Question 2 ? | Alternative 1? | Alternative 2?",
-      "Answer": "Comprehensive factual answer."
+      "Question": "Primary Question? | Rephrased Question? | Alternative Question?",
+      "Answer": "Detailed, comprehensive answer including all relevant facts and data points."
     }},
     ...
   ]
 }}
 
-## RULES:
-1. Create at least 5 Q&A pairs, ideally more, until you exhaust all relevant and factual content.
-2. Each question must have 3 formulations separated by |.
-3. Focus on HIGHLY SPECIFIC data: numbers, amounts, dates, names.
-4. Questions and answers must be SPECIFIC and DIRECTLY related to "{title}".
-5. Extract ALL relevant key information on the topic.
-6. CRITICALLY IMPORTANT: Include all relevant URL links DIRECTLY in the answers, EXACTLY in the format they appear in the source Markdown content.
-7. Omit irrelevant information (headers, footers, GDPR, cookies, etc.) and other information not explicitly directly related to "{title}".
-8. Ensure 100% valid JSON.
-9. Do not use nested structures in answers.
+## CRITICAL RULES:
+1. SINGLE RESPONSE REQUIREMENT: Output your ENTIRE response at once. NEVER mention continuation or splitting
+2. QUANTITY: Generate 10-30+ Q&A pairs until ALL relevant content is captured
+3. GRANULARITY: Break complex information into multiple specific Q&A pairs
+4. COVERAGE - Create questions for:
+   - Core facts and data
+   - Specific details (numbers, dates, names, locations)
+   - Process explanations
+   - Definitions and terminology
+   - Related services or products
+   - Contact information
+   - Unique features
+5. Each question requires 3 formulations (separated by |)
+6. Include ALL URLs exactly as in source
+7. Focus on relevant content only
+8. Maintain valid JSON structure
+9. Keep answers as single-level text
 
 ## FORMATTING:
-- Provide only the bare JSON array.
-- No quotes around the entire array.
-- No additional text outside of JSON.
-- Properly escape quotes.
+- Pure JSON only
+- No external text
+- No continuation notes
+- No splitting markers
 
-# CONTENT TO PROCESS:
+# CONTENT TO ANALYZE:
 ---
 {content}
 ---
 
-# IMPORTANT: Output = clean JSON array. Extract as MANY AS POSSIBLE AND SPECIFIC, FACTUAL Q&A pairs (min. 5) covering all relevant information for "{title}".
+# SUCCESS REQUIREMENTS:
+1. COMPLETE response in ONE output
+2. Minimum 10-30 comprehensive Q&A pairs
+3. ALL relevant information captured
+4. NO mentions of continuation or response splitting
+5. Valid JSON format in "{LANGUAGE}"
 
-# Response Language: You must absolutely respond and formulate your entire response solely in the following language: "{LANGUAGE}"
-"""
+CRITICAL: You have sufficient capacity to process and return ALL Q&A pairs in a single response. DO NOT truncate or split your response."""
 
     logger.debug(f"Claude API Q&A Prompt: {user_prompt[:500]}...")
     
-    response = call_anthropic_api_with_retry(client, system_prompt, user_prompt)
+    response = client.messages.create(
+        model="claude-3-5-sonnet-20241022",
+        max_tokens=8000,
+        temperature=0.2,
+        system=system_prompt,
+        messages=[
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+    
     response_text = response.content[0].text.strip()
     logger.debug(f"Raw Claude API Q&A Response: {response_text}")
     
@@ -318,6 +334,11 @@ def convert_to_qa(content, title):
             logger.error(f"Invalid Q&A pairs structure or insufficient number of pairs for {title}")
             logger.error(f"Parsed Q&A pairs: {qa_pairs}")
             raise ValueError("Invalid Q&A pairs structure or insufficient number of pairs")
+        
+        # Add the category to each QA pair
+        for qa_pair in qa_pairs:
+            qa_pair["Category"] = category  # Add the category that was determined by categorize_url_claude
+        
         return qa_pairs
     except json.JSONDecodeError as e:
         logger.error(f"Error parsing JSON response for {title}: {str(e)}")
@@ -328,7 +349,7 @@ def call_anthropic_api_with_retry(client, system_prompt, user_prompt, max_retrie
     for attempt in range(max_retries):
         try:
             message = client.messages.create(
-                model="claude-3-5-sonnet-20240620",
+                model="claude-3-5-sonnet-20241022",
                 max_tokens=4000,
                 temperature=0,
                 system=system_prompt,
@@ -421,22 +442,26 @@ def process_single_url(url, lastmod, payloads):
     title = get_title_from_url(url)
     
     # Process for categories
-    payloads[category]["urls"]["data"]["items"].append({"Title": title, "URL": url})
+    payloads[category]["urls"]["data"]["items"].append({
+        "Title": title, 
+        "URL": url,
+        "Category": category
+    })
     save_payload_to_file(category, "urls", payloads[category]["urls"])
     
     # Process content
     if is_url_modified(lastmod):
         try:
             content, metadata = get_html_content(url)
-            qa_pairs = convert_to_qa(content, title)
+            qa_pairs = convert_to_qa(content, title, category)
             
             qa_payload = {
                 "data": {
                     "schema": {
-                        "searchableFields": ["Question", "Answer"]
+                        "searchableFields": ["Question", "Answer"],
+                        "metadataFields": ["Category"]
                     },
                     "name": title,
-                    "tags": [category],
                     "items": qa_pairs
                 }
             }
