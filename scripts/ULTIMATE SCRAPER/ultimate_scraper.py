@@ -11,8 +11,8 @@ from bs4 import BeautifulSoup
 import argparse
 
 # Script configuration
-SITEMAP_URL = ""  # URL of the XML sitemap
-URL_LIST_FILE = "URLS_LIST.txt"  # Path to the text file containing the list of URLs
+SITEMAP_URL = "https://setrivodou.cz/sitemap_index.xml"  # URL of the XML sitemap
+URL_LIST_FILE = ""  # Path to the text file containing the list of URLs
 LANGUAGE = "Čeština"  # Set the desired language for Claude API responses
 
 # Constants for file names and directories
@@ -49,7 +49,9 @@ CATEGORIES = [
     "Services",
     "References",
     "Contact",
-    "Articles"
+    "Articles",
+    "Documents",
+    "Products"
 ]
 
 # forced delay in seconds between each processed URL
@@ -221,7 +223,10 @@ def get_html_content(url):
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
-        "X-Return-Format": "markdown"
+        "X-Return-Format": "markdown",
+        "X-With-Generated-Alt": "true",
+        "X-With-Images-Summary": "true",
+        "X-With-Links-Summary": "true"
     }
     
     try:
@@ -248,19 +253,19 @@ def get_html_content(url):
 def convert_to_qa(content, title, category):
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     
-    system_prompt = f"""You are a high-capacity AI expert in comprehensive information extraction. You MUST provide your COMPLETE analysis in a SINGLE response, regardless of length. Your task is to analyze the provided content and create an exhaustive set of structured question-answer pairs in JSON format, all directly related to '{title}'. NEVER split or truncate your response."""
+    system_prompt = f"""You are a high-capacity AI expert in comprehensive information extraction and content linking. You MUST provide your COMPLETE analysis in a SINGLE response, regardless of length. Your task is to analyze the provided content, including all embedded links and images, and create an exhaustive set of structured question-answer pairs in JSON format, all directly related to '{title}'. Each answer should include relevant links and images when they directly support or illustrate the answer content. NEVER split or truncate your response."""
     
     user_prompt = f"""
 # MISSION-CRITICAL INSTRUCTION: You MUST provide your ENTIRE response in ONE SINGLE OUTPUT. NEVER split your response or mention continuation.
 
-# YOUR TASK: Create a COMPLETE JSON array containing ALL question-answer pairs from the content. Output must be in "{LANGUAGE}" and relate to "{title}".
+# YOUR TASK: Create a COMPLETE JSON array containing ALL question-answer pairs from the content. Output must be in "{LANGUAGE}" and relate to "{title}". Include relevant links and images within answers when they directly correspond to the answer content.
 
 # EXPECTED JSON FORMAT (SINGLE COMPLETE RESPONSE):
 {{
   "qa_pairs": [
     {{
       "Question": "Primary Question? | Rephrased Question? | Alternative Question?",
-      "Answer": "Detailed, comprehensive answer including all relevant facts and data points."
+      "Answer": "Detailed answer including all relevant facts and data points. [Relevant link text](URL) when applicable. ![Image description](image_url) when directly relevant to the answer."
     }},
     ...
   ]
@@ -279,16 +284,22 @@ def convert_to_qa(content, title, category):
    - Contact information
    - Unique features
 5. Each question requires 3 formulations (separated by |)
-6. Include ALL URLs exactly as in source
+6. LINK AND IMAGE INTEGRATION:
+   - Scan the "Images" and "Links/Buttons" sections at the end of the content
+   - Only include links/images that directly correspond to the specific answer
+   - Format links as [Link text](URL)
+   - Format images as ![Image description](image_url)
+   - Never include unrelated or generic links/images
 7. Focus on relevant content only
 8. Maintain valid JSON structure
-9. Keep answers as single-level text
+9. Keep answers as single-level text with integrated links/images
 
 ## FORMATTING:
 - Pure JSON only
 - No external text
 - No continuation notes
 - No splitting markers
+- Links and images must be properly formatted in markdown
 
 # CONTENT TO ANALYZE:
 ---
@@ -299,17 +310,18 @@ def convert_to_qa(content, title, category):
 1. COMPLETE response in ONE output
 2. Minimum 10-30 comprehensive Q&A pairs
 3. ALL relevant information captured
-4. NO mentions of continuation or response splitting
-5. Valid JSON format in "{LANGUAGE}"
+4. Properly integrated relevant links and images
+5. NO mentions of continuation or response splitting
+6. Valid JSON format in "{LANGUAGE}"
 
-CRITICAL: You have sufficient capacity to process and return ALL Q&A pairs in a single response. DO NOT truncate or split your response."""
+CRITICAL: You have sufficient capacity to process and return ALL Q&A pairs in a single response. DO NOT truncate or split your response. Carefully analyze the "Images" and "Links/Buttons" sections to integrate relevant links and images into corresponding answers."""
 
     logger.debug(f"Claude API Q&A Prompt: {user_prompt[:500]}...")
     
     response = client.messages.create(
         model="claude-3-5-sonnet-20241022",
         max_tokens=8000,
-        temperature=0.2,
+        temperature=0,
         system=system_prompt,
         messages=[
             {"role": "user", "content": user_prompt}
@@ -397,7 +409,7 @@ def save_qa_payload_to_file(title, data):
 
 def upload_qa_to_voiceflow(title, data):
     logger.info(f"Uploading Q/A data to Voiceflow for '{title}'")
-    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true'
+    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true&llmPrependContext=true&llmContentSummarization=true'
     headers = {
         'Authorization': VOICEFLOW_API_KEY,
         'accept': 'application/json',
@@ -455,11 +467,15 @@ def process_single_url(url, lastmod, payloads):
             content, metadata = get_html_content(url)
             qa_pairs = convert_to_qa(content, title, category)
             
+            # Add the URL to each QA pair here, after getting them from Claude
+            for qa_pair in qa_pairs:
+                qa_pair["URL"] = url
+            
             qa_payload = {
                 "data": {
                     "schema": {
                         "searchableFields": ["Question", "Answer"],
-                        "metadataFields": ["Category"]
+                        "metadataFields": ["Category", "URL"]  # Added URL to metadataFields
                     },
                     "name": title,
                     "items": qa_pairs
