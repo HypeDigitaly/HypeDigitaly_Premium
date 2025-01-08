@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 import argparse
+import re
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 # Script configuration
 SITEMAP_URL = "https://setrivodou.cz/sitemap_index.xml"  # URL of the XML sitemap
@@ -47,7 +50,7 @@ CHECK_MODIFIED_DATE = True
 # [THERE WILL BE CREATED THE SAME NUMBER OF FILES AS ARE THESE CATEGORIES -> AND WE WILL USE THEM AS TAGS AS WELL]
 CATEGORIES = [
     "Services",
-    "References",
+    "Testimonials",
     "Contact",
     "Articles",
     "Documents",
@@ -56,6 +59,10 @@ CATEGORIES = [
 
 # forced delay in seconds between each processed URL
 URL_PROCESSING_DELAY = 30  # DELAY IN SECONDS
+
+# Add these constants
+MAX_RETRIES = 3
+TIMEOUT = 60  # Increased from 30 to 60 seconds
 
 def get_last_run_time():
     if os.path.exists(LAST_RUN_FILE):
@@ -198,24 +205,71 @@ RULES:
 7. Ensure the resulting text is grammatically correct and makes sense in {LANGUAGE}, like a native speaker born in the corresponding country would write it.
 8. If the URL contains a company name or product name - you are not permitted to change it or modify it in any way.
 
+STRING FORMATTING REQUIREMENTS:
+1. Output MUST be a single line of text
+2. DO NOT include any of special or potentially problematic characters incompatible with JSON
+3. DO NOT use any HTML or markdown formatting
+4. DO NOT include newlines, tabs, or any control characters
+5. Use standard ASCII or UTF-8 characters only
+6. Maximum length: 200 characters
+7. NO special formatting or decorative characters
+8. NO emojis or special symbols
+9. Replace any double spaces with single spaces
+10. Trim any leading or trailing whitespace
+
 RESPONSE FORMAT:
-Respond only with the resulting title without any additional information or explanation.
+- Output ONLY the clean, single-line title
+- NO additional text, explanation, or formatting
+- NO quotes around the text
+- NO punctuation at the end unless it's part of a product/company name
 
-OUTPUT:
+# Response Language: You must absolutely respond only in the following language: {LANGUAGE}
 
-# Response Language: You must absolutely respond only in the following language: {LANGUAGE}"""
+CRITICAL: Your response must be exactly ONE line of plain text, with no formatting, quotes, or special characters that could interfere with JSON encoding."""
 
     message = client.messages.create(
         model="claude-3-5-sonnet-20241022",
-        max_tokens=50,
+        max_tokens=300,
         temperature=0,
         messages=[
             {"role": "user", "content": prompt}
         ]
     )
     
+    # Clean the response to ensure JSON compatibility
     title = message.content[0].text.strip()
+    
+    # Remove any problematic characters
+    title = (title
+        .replace('"', '')
+        .replace("'", '')
+        .replace('\\', '')
+        .replace('\n', ' ')
+        .replace('\r', ' ')
+        .replace('\t', ' ')
+    )
+    
+    # Replace multiple spaces with single space
+    title = ' '.join(title.split())
+    
+    # Ensure the title isn't too long
+    title = title[:200]
+    
     return title
+
+def sanitize_filename(filename):
+    """Sanitize filename by removing invalid characters"""
+    # Remove or replace invalid characters
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # Limit length to avoid potential issues
+    return sanitized[:200]
+
+def save_qa_payload_to_file(title, data):
+    sanitized_title = sanitize_filename(title)
+    filename = os.path.join(PAYLOADS_DIR, f"{sanitized_title}_payload.json")
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    logger.info(f"Saved Q/A payload for '{title}' to file: {filename}")
 
 def get_html_content(url):
     logger.info(f"Fetching HTML content from URL: {url}")
@@ -229,8 +283,19 @@ def get_html_content(url):
         "X-With-Links-Summary": "true"
     }
     
+    # Create session with retry strategy
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=MAX_RETRIES,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
     try:
-        response = requests.get(api_url, headers=headers, timeout=30)
+        response = session.get(api_url, headers=headers, timeout=TIMEOUT)
         response.raise_for_status()
         data = response.json()
         
@@ -250,10 +315,10 @@ def get_html_content(url):
         logger.error(f"Error calling Jina AI API: {str(e)}")
         raise
 
-def convert_to_qa(content, title, category):
+def convert_to_qa(content, title, category, url):
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     
-    system_prompt = f"""You are a high-capacity AI expert in comprehensive information extraction and content linking. You MUST provide your COMPLETE analysis in a SINGLE response, regardless of length. Your task is to analyze the provided content, including all embedded links and images, and create an exhaustive set of structured question-answer pairs in JSON format, all directly related to '{title}'. Each answer should include relevant links and images when they directly support or illustrate the answer content. NEVER split or truncate your response."""
+    system_prompt = f"""You are a high-capacity AI expert in comprehensive information extraction and content linking. You MUST provide your COMPLETE analysis in a SINGLE response, regardless of length. Your task is to analyze the provided content, including all embedded links and images, and create an exhaustive set of structured question-answer pairs in JSON format, all directly related to '{title}'. Each answer should include relevant links and images when they directly support or illustrate the answer content. NEVER split or truncate your response. You must ensure all JSON strings are properly escaped and formatted as single lines without line breaks or special characters that could break JSON validity."""
     
     user_prompt = f"""
 # MISSION-CRITICAL INSTRUCTION: You MUST provide your ENTIRE response in ONE SINGLE OUTPUT. NEVER split your response or mention continuation.
@@ -294,12 +359,27 @@ def convert_to_qa(content, title, category):
 8. Maintain valid JSON structure
 9. Keep answers as single-level text with integrated links/images
 
+## STRING FORMATTING REQUIREMENTS:
+1. ALL Question and Answer strings MUST be single-line only
+2. PROPERLY ESCAPE special characters:
+   - Replace newlines with \\n
+   - Replace tabs with \\t
+   - Replace quotes with \\"
+   - Replace backslashes with \\\\
+3. REMOVE or ESCAPE any control characters (ASCII < 32)
+4. NO raw line breaks within Question or Answer strings
+5. NO unescaped quotes or special characters that could break JSON
+6. ALL markdown formatting must be inline
+7. ENSURE all URLs are properly escaped
+8. VALIDATE that each string can be parsed as valid JSON
+
 ## FORMATTING:
 - Pure JSON only
 - No external text
 - No continuation notes
 - No splitting markers
 - Links and images must be properly formatted in markdown
+- All strings must be valid JSON-escaped single lines
 
 # CONTENT TO ANALYZE:
 ---
@@ -312,9 +392,11 @@ def convert_to_qa(content, title, category):
 3. ALL relevant information captured
 4. Properly integrated relevant links and images
 5. NO mentions of continuation or response splitting
-6. Valid JSON format in "{LANGUAGE}"
+6. Valid JSON format in "{LANGUAGE}" language
+7. ALL strings properly escaped and formatted as single lines
+8. NO invalid JSON characters or formatting
 
-CRITICAL: You have sufficient capacity to process and return ALL Q&A pairs in a single response. DO NOT truncate or split your response. Carefully analyze the "Images" and "Links/Buttons" sections to integrate relevant links and images into corresponding answers."""
+CRITICAL: You have sufficient capacity to process and return ALL Q&A pairs in a single response. DO NOT truncate or split your response. Carefully analyze the "Images" and "Links/Buttons" sections to integrate relevant links and images into corresponding answers. ENSURE all output strings are properly escaped and formatted as valid JSON single lines."""
 
     logger.debug(f"Claude API Q&A Prompt: {user_prompt[:500]}...")
     
@@ -329,33 +411,98 @@ CRITICAL: You have sufficient capacity to process and return ALL Q&A pairs in a 
     )
     
     response_text = response.content[0].text.strip()
-    logger.debug(f"Raw Claude API Q&A Response: {response_text}")
+    
+    # Step 1: Pre-process common problematic patterns
+    replacements = {
+        '"IČ":'     : 'IČ:',
+        '"DIČ":'    : 'DIČ:',
+        '"IČO":'    : 'IČO:',
+        '"DPH":'    : 'DPH:',
+        '", "'      : '", "',  # Fix potential spacing issues between properties
+        '""'        : '"'      # Remove double quotes
+    }
+    
+    for old, new in replacements.items():
+        response_text = response_text.replace(old, new)
     
     try:
-        # Attempt to find and extract the JSON part from the response
+        # Step 2: Extract JSON content
         json_start = response_text.find('{')
         json_end = response_text.rfind('}') + 1
-        if json_start != -1 and json_end != -1:
-            json_str = response_text[json_start:json_end]
-            qa_data = json.loads(json_str)
-            qa_pairs = qa_data.get('qa_pairs', [])
-        else:
-            raise ValueError("Cannot find valid JSON in the response")
+        
+        if json_start == -1 or json_end == -1:
+            raise ValueError("Cannot find valid JSON structure in response")
+            
+        json_str = response_text[json_start:json_end]
+        
+        # Step 3: Clean and normalize JSON string
+        json_str = ' '.join(json_str.split())  # Normalize whitespace
+        json_str = json_str.replace('\t', '\\t')
+        json_str = json_str.replace('\n', '\\n')
+        json_str = json_str.replace('\r', '\\r')
+        
+        # Step 4: Advanced quote escaping
+        def escape_quotes(match):
+            # Escape quotes within the content while preserving already escaped quotes
+            content = match.group(1)
+            content = content.replace('\\"', '___ESCAPED_QUOTE___')  # Temporarily preserve escaped quotes
+            content = content.replace('"', '\\"')  # Escape unescaped quotes
+            content = content.replace('___ESCAPED_QUOTE___', '\\"')  # Restore originally escaped quotes
+            return content
 
-        if not isinstance(qa_pairs, list) or len(qa_pairs) < 5:
-            logger.error(f"Invalid Q&A pairs structure or insufficient number of pairs for {title}")
-            logger.error(f"Parsed Q&A pairs: {qa_pairs}")
-            raise ValueError("Invalid Q&A pairs structure or insufficient number of pairs")
+        # Apply quote escaping to content between JSON string delimiters
+        json_str = re.sub(r':\s*"(.*?)"(?=\s*[,}])', 
+                         lambda m: ': "' + escape_quotes(m) + '"', 
+                         json_str)
         
-        # Add the category to each QA pair
-        for qa_pair in qa_pairs:
-            qa_pair["Category"] = category  # Add the category that was determined by categorize_url_claude
+        # Step 5: Ensure proper JSON structure
+        if not (json_str.startswith('{') and json_str.endswith('}')):
+            raise ValueError("Invalid JSON structure after processing")
         
-        return qa_pairs
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing JSON response for {title}: {str(e)}")
+        # Step 6: Parse JSON
+        try:
+            qa_data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"Initial JSON parsing failed for {title}: {str(e)}")
+            logger.error(f"Attempting more aggressive cleaning...")
+            
+            # Additional aggressive cleaning if initial parse fails
+            json_str = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', json_str)  # Remove control characters
+            json_str = re.sub(r'(?<!\\)"(?=\s*:)', '\\"', json_str)   # Escape unescaped quotes before colons
+            qa_data = json.loads(json_str)
+        
+        # Step 7: Validate and clean QA pairs
+        qa_pairs = qa_data.get('qa_pairs', [])
+        if not isinstance(qa_pairs, list):
+            raise ValueError("qa_pairs is not a list")
+        
+        cleaned_pairs = []
+        for pair in qa_pairs:
+            if isinstance(pair, dict) and 'Question' in pair and 'Answer' in pair:
+                # Ensure strings are properly cleaned
+                cleaned_pair = {
+                    'Question': pair['Question'].strip(),
+                    'Answer': pair['Answer'].strip(),
+                    'Category': category,
+                    'URL': url  # Use the url parameter
+                }
+                cleaned_pairs.append(cleaned_pair)
+        
+        if len(cleaned_pairs) < 5:
+            logger.warning(f"Low number of QA pairs ({len(cleaned_pairs)}) for {title}")
+        
+        return cleaned_pairs
+        
+    except Exception as e:
+        logger.error(f"Error processing Q&A conversion for {title}: {str(e)}")
         logger.error(f"Raw response causing error: {response_text}")
-        raise
+        # Return a minimal valid structure to allow processing to continue
+        return [{
+            'Question': f"What is {title}?",
+            'Answer': "Information temporarily unavailable.",
+            'Category': category,
+            'URL': url  # Use the url parameter
+        }]
 
 def call_anthropic_api_with_retry(client, system_prompt, user_prompt, max_retries=3, retry_delay=5):
     for attempt in range(max_retries):
@@ -400,12 +547,6 @@ def upload_to_voiceflow_single(category, payload_type, data):
         logger.info(f"Successfully uploaded {len(data['data']['items'])} items for '{category}_{payload_type}'")
     else:
         logger.error(f"Error uploading for '{category}_{payload_type}': {response.text}")
-
-def save_qa_payload_to_file(title, data):
-    filename = os.path.join(PAYLOADS_DIR, f"{title}_payload.json")
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    logger.info(f"Saved Q/A payload for '{title}' to file: {filename}")
 
 def upload_qa_to_voiceflow(title, data):
     logger.info(f"Uploading Q/A data to Voiceflow for '{title}'")
@@ -465,7 +606,7 @@ def process_single_url(url, lastmod, payloads):
     if is_url_modified(lastmod):
         try:
             content, metadata = get_html_content(url)
-            qa_pairs = convert_to_qa(content, title, category)
+            qa_pairs = convert_to_qa(content, title, category, url)
             
             # Add the URL to each QA pair here, after getting them from Claude
             for qa_pair in qa_pairs:
