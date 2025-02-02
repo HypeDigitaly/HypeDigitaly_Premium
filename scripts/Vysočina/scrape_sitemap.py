@@ -47,7 +47,8 @@ INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 # PROCESSING FLAGS
 # ============================================================================
 ENABLE_QA_PROCESSING = False  # Enable Q/A processing
-UPLOAD_IMMEDIATELY = True  # Skip processing and only upload existing payloads
+UPLOAD_IMMEDIATELY = False  # Skip processing and only upload existing payloads
+COMPILE_SEARCH_QUERIES = True  # Enable compilation of search queries into TXT file
 
 # ============================================================================
 # HTTP REQUEST SETTINGS
@@ -116,6 +117,7 @@ class URLAndAPIFilter(logging.Filter):
             "API response:" in record.getMessage(),
             "Kategorizace URL" in record.getMessage(),
             "Cesta:" in record.getMessage(),
+            "Path:" in record.getMessage(),
             "Přiřazena kategorie:" in record.getMessage()
         ])
 
@@ -234,10 +236,14 @@ Zařaďte prosím tuto cestu do JEDNÉ z následujících kategorií:
 {', '.join(CATEGORIES)}
 
 DŮLEŽITÉ INSTRUKCE:
-1. Odpovězte POUZE názvem JEDNÉ JEDINÉ nejvhodnější kategorie ze seznamu výše.
-2. Pokud žádná z kategorií dobře neodpovídá, odpovězte "Nezařazeno".
-3. Neodpovídejte žádným jiným textem, pouze názvem kategorie nebo "Nezařazeno".
-4. Použijte následující vodítka pro kategorizaci:
+1. MUSÍTE odpovědět POUZE názvem JEDNÉ JEDINÉ kategorie ze seznamu výše - odpověď "Nezařazeno" NENÍ povolena.
+2. I když si nejste jisti, vyberte kategorii, která se nejvíce blíží obsahu nebo tématu cesty.
+3. Neodpovídejte žádným jiným textem, pouze názvem kategorie ze seznamu.
+4. V případě nejistoty použijte následující prioritizaci:
+   a) Nejdříve hledejte přímou tematickou shodu
+   b) Pokud není nalezena, hledejte související témata
+   c) Pokud stále není jasné, použijte nejobecnější související kategorii
+5. Použijte následující vodítka pro kategorizaci:
    - Kontakt: 
      * lidé, osoby, krajský/městský úřad, organizační struktura
      * kontaktní informace, komise, výbory, zastupitelstvo, radní, zaměstnanci
@@ -251,7 +257,7 @@ DŮLEŽITÉ INSTRUKCE:
      * hlášení závad a problémů
      * životní situace
 
-Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co nejpřesnější zařazení/zvolení dané kategorie ze vstupního seznamu.
+Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co nejpřesnější zařazení/zvolení dané kategorie ze vstupního seznamu. MUSÍTE vybrat jednu kategorii, i když si nejste zcela jisti - vyberte tu nejvíce odpovídající.
 """
 
     for attempt in range(MAX_RETRIES):
@@ -286,6 +292,54 @@ Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co ne
             logger.warning(f"Chyba při kategorizaci, pokus {attempt + 1}/{MAX_RETRIES}. Čekání {delay:.2f} sekund před dalším pokusem.")
             time.sleep(delay)
 
+def generate_rag_question(path):
+    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    path_string = ' > '.join(path)
+    
+    prompt = f"""Based on the following absolute path from a website sitemap:
+
+{path_string}
+
+Create an open-ended, RAG-optimized question in both Czech and English that would help users find this specific page. The question should:
+1. Be natural and conversational
+2. Include key details from the path
+3. Be suitable for semantic search
+4. Help users find the exact page they're looking for
+5. Include both Czech and English versions separated by " | "
+
+Example format:
+For path: "Dotace > Kotlíková dotace > Aktuality"
+Output: "Kde najdu aktuality, články a důležité informace ke kotlíkovým dotacím? | Where do I find the latest articles, updates and important information regarding boiler subsidies?"
+
+Return ONLY the question pair without any additional text or formatting."""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            message = client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=200,
+                temperature=0,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            question = message.content[0].text.strip()
+            
+            # Apply fixed delay after successful API call
+            time.sleep(API_CALL_DELAY)
+            
+            return question
+            
+        except (InternalServerError, RateLimitError) as e:
+            if attempt == MAX_RETRIES - 1:
+                logger.error(f"Failed to generate RAG question after {MAX_RETRIES} attempts: {str(e)}")
+                return "Default question | Default question in English"
+            
+            delay = INITIAL_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(f"Error generating RAG question, attempt {attempt + 1}/{MAX_RETRIES}. Waiting {delay:.2f} seconds before retry.")
+            time.sleep(delay)
+
 def extract_links(menu_item, path=[], categorized_links={}):
     if menu_item.name == 'li':
         link = menu_item.find('a')
@@ -294,30 +348,36 @@ def extract_links(menu_item, path=[], categorized_links={}):
             absolute_path = ' > '.join(current_path)
             absolute_url = urljoin(BASE_URL, link['href'])
             
-            logger.info(f"=== Začátek zpracování URL: {absolute_url} ===")
-            logger.info(f"Cesta: {absolute_path}")
+            logger.info(f"\n=== Starting processing URL: {absolute_url} ===")
+            logger.info(f"Path: {absolute_path}")
             
             try:
-                # 1. Kategorizace URL
+                # 1. Categorize URL
                 category = categorize_link_claude(current_path)
-                logger.info(f"Přiřazena kategorie: {category} na základě cesty")
+                logger.info(f"Assigned category: {category} based on path")
                 
-                # 2. Získání obsahu stránky
+                # 2. Generate RAG question
+                rag_question = generate_rag_question(current_path)
+                logger.info(f"Generated RAG question: {rag_question}")
+                
+                # 3. Get page content
                 html_content, metadata = get_html_content(absolute_url)
                 
-                # 3. Přidání do categorized_links pro CATEGORIES payload
+                # 4. Add to categorized_links for CATEGORIES payload
                 if category not in categorized_links:
                     categorized_links[category] = []
                 categorized_links[category].append({
                     "Title": link.text.strip(),
                     "URL": absolute_url,
-                    "Category": category
+                    "Category": category,
+                    "Question": rag_question,
+                    "Navigation": absolute_path
                 })
                 
-                # 4. Okamžité uložení aktualizovaného CATEGORIES payloadu
+                # 5. Okamžité uložení aktualizovaného CATEGORIES payloadu
                 save_payloads_to_files(categorized_links)
                 
-                # 5. Q/A Processing - now controlled by ENABLE_QA_PROCESSING flag
+                # 6. Q/A Processing - now controlled by ENABLE_QA_PROCESSING flag
                 if ENABLE_QA_PROCESSING:
                     # Přeskočení Q/A extrakce pro mapu stránek
                     is_sitemap = 'mapa-stranek' in absolute_url.lower() or 'sitemap' in absolute_url.lower()
@@ -329,7 +389,7 @@ def extract_links(menu_item, path=[], categorized_links={}):
                 else:
                     logger.info("Q/A zpracování je vypnuto")
                 
-                logger.info(f"=== Dokončeno zpracování URL: {absolute_url} ===")
+                logger.info(f"=== Dokončeno zpracování URL: {absolute_url} ===\n")
                 
             except Exception as e:
                 logger.error(f"Chyba při zpracování URL {absolute_url}: {str(e)}")
@@ -355,13 +415,19 @@ def save_payloads_to_files(categorized_links):
         table_name = f"{category.lower()}_table"
         filename = f"{output_dir}/{table_name}_payload.json"
         
-        # Přidání Category do každé položky
-        updated_links = [{"Title": link["Title"], "URL": link["URL"], "Category": category} for link in links]
+        # Add Category, Question, and Navigation to each item
+        updated_links = [{
+            "Title": link["Title"],
+            "URL": link["URL"],
+            "Category": category,
+            "Question": link.get("Question", "Default question | Default question in English"),
+            "Navigation": link.get("Navigation", "")  # Add the Navigation field
+        } for link in links]
         
         payload = {
             "data": {
                 "schema": {
-                    "searchableFields": ["Title", "URL"],
+                    "searchableFields": ["Title", "URL", "Question", "Navigation"],  # Add Navigation to searchable fields
                     "metadataFields": ["Category"]
                 },
                 "name": table_name,
@@ -370,7 +436,7 @@ def save_payloads_to_files(categorized_links):
         }
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
-        logger.info(f"Aktualizován payload pro tabulku '{table_name}' v souboru: {filename}")
+        logger.info(f"Updated payload for table '{table_name}' in file: {filename}")
 
 def load_payloads_from_files():
     payloads_dir = "payloads"
@@ -481,7 +547,7 @@ def save_payload_to_file(url, content, section, metadata):
 
 def upload_to_voiceflow(filename):
     logger.info(f"Nahrávání souboru '{filename}' do Voiceflow")
-    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true&llmGeneratedQ=true'
+    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true'
     headers = {
         'Authorization': VOICEFLOW_API_KEY,
         'accept': 'application/json',
@@ -712,7 +778,65 @@ def process_url_content(url, html_content, category, metadata):
     except Exception as e:
         logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}")
 
-def main(skip_scraping):
+def compile_search_queries_file():
+    """
+    Compiles all search queries from JSON payloads into a single TXT file.
+    """
+    output_file = "compiled_search_queries.txt"
+    payloads_dir = "payloads"
+    
+    logger.info(f"Starting compilation of search queries into {output_file}")
+    
+    try:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            example_counter = 1  # Initialize counter
+            
+            # Process all JSON payload files in the payloads directory
+            for filename in os.listdir(payloads_dir):
+                if filename.endswith('_payload.json'):
+                    file_path = os.path.join(payloads_dir, filename)
+                    logger.info(f"Processing file: {filename}")
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as json_file:
+                            payload = json.load(json_file)
+                            items = payload['data']['items']
+                            
+                            for item in items:
+                                title = item.get('Title', '')
+                                questions = item.get('Question', '')
+                                
+                                if title and questions:
+                                    # Format the entry with counter and "Response:" line
+                                    entry = (
+                                        f"\n## Example {example_counter} - Original query about: '{title}'\n"
+                                        "* Response:\n"
+                                        "{\n"
+                                        f'    "WebSearchQuery": "{title}",\n'
+                                        f'    "UserReply": "{questions}"\n'
+                                        "}\n"
+                                    )
+                                    f.write(entry)
+                                    example_counter += 1  # Increment counter
+                    
+                    except Exception as e:
+                        logger.error(f"Error processing file {filename}: {str(e)}")
+                        continue
+        
+        logger.info(f"Successfully compiled {example_counter-1} search queries into {output_file}")
+        
+    except Exception as e:
+        logger.error(f"Error creating compiled search queries file: {str(e)}")
+
+def main(skip_scraping, compile_only=False):
+    if compile_only:
+        logger.info("Spouštím pouze kompilaci vyhledávacích dotazů")
+        if COMPILE_SEARCH_QUERIES:
+            compile_search_queries_file()
+        else:
+            logger.warning("Kompilace vyhledávacích dotazů je vypnuta (COMPILE_SEARCH_QUERIES = False)")
+        return
+
     start_time = datetime.now()
     logger.info(f"Začátek zpracování: {start_time}")
 
@@ -771,6 +895,10 @@ def main(skip_scraping):
     for table_name, data in payloads.items():
         upload_to_voiceflow(f"payloads/{table_name}_payload.json")
     
+    # Add compilation of search queries if enabled
+    if COMPILE_SEARCH_QUERIES:
+        compile_search_queries_file()
+    
     end_time = datetime.now()
     logger.info(f"Konec zpracování: {end_time}")
     logger.info(f"Celková doba zpracování: {end_time - start_time}")
@@ -779,6 +907,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
     parser.add_argument("--skip-scraping", type=int, choices=[0, 1], default=0,
                         help="Přeskočit scraping a nahrát existující payloady (0: ne, 1: ano)")
+    parser.add_argument("--compile-only", action="store_true",
+                        help="Pouze zkompilovat vyhledávací dotazy z existujících payloadů")
     args = parser.parse_args()
     
-    main(skip_scraping=args.skip_scraping)
+    main(skip_scraping=args.skip_scraping, compile_only=args.compile_only)

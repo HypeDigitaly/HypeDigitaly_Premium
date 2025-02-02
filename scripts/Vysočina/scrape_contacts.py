@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Any
 
-# Constants
+# Constantsf
 SCRIPT_NAME = "scrape_contacts"
 LOG_DIR = f"{SCRIPT_NAME}_logs"
 LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
@@ -14,6 +14,12 @@ RSS_URL = "https://www.kr-vysocina.cz/rss/?23"
 PAYLOAD_DIR = "payloads"
 OUTPUT_FILE = os.path.join(PAYLOAD_DIR, "contacts_table.json")
 VOICEFLOW_API_KEY = 'REMOVED-VOICEFLOW-KEY'  # Replace with actual API key
+
+# Add new constants for API URLs
+API_URLS = {
+    'committees': 'https://samosprava.kr-vysocina.cz/api/v1/vybory/',
+    'commissions': 'https://samosprava.kr-vysocina.cz/api/v1/komise/'
+}
 
 # Create log directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -38,11 +44,12 @@ def create_initial_payload() -> Dict[str, Any]:
             "schema": {
                 "searchableFields": [
                     "Name", "Title", "Subtitle", "Description",
-                    "Place"
+                    "Place", "ContactURL"
                 ],
                 "metadataFields": [
                     "FirstName", "LastName", "DegreeBefore",
-                    "DegreeAfter", "Departments", "Emails", "Phones", "Category"
+                    "DegreeAfter", "Departments", "Emails", "Phones", "Category",
+                    "ContactURL"
                 ]
             },
             "name": "Contacts_Table",
@@ -83,6 +90,7 @@ def parse_contact(contact: BeautifulSoup) -> Dict[str, Any]:
             "DegreeBefore": contact.find('degreebefore').text if contact.find('degreebefore') else "",
             "DegreeAfter": contact.find('degreeafter').text if contact.find('degreeafter') else "",
             "Departments": departments,
+            "ContactURL": contact.find('contacturl').text if contact.find('contacturl') else "",
             "Category": "Kontakt"
         }
         
@@ -127,9 +135,93 @@ def upload_to_voiceflow(payload: Dict[str, Any]) -> None:
     except Exception as e:
         logger.error(f"Error uploading to Voiceflow: {str(e)}", exc_info=True)
 
+def parse_person_data(person_data: Dict[str, str], role: str, department_id: int) -> Dict[str, Any]:
+    """Parse person data from API response into contact format."""
+    if not person_data:
+        return None
+        
+    name_parts = person_data['jmeno'].split(', ', 1)
+    full_name = name_parts[0]
+    degree = name_parts[1] if len(name_parts) > 1 else ""
+    
+    # Split full name into first and last name (simple approach)
+    name_split = full_name.split(' ', 1)
+    last_name = name_split[0]
+    first_name = name_split[1] if len(name_split) > 1 else ""
+    
+    return {
+        "Name": person_data['jmeno'],
+        "Title": role,
+        "Subtitle": "",
+        "Description": f"{role} - {person_data['jmeno']}",
+        "Place": "",
+        "Emails": [person_data['email']] if person_data.get('email') else [],
+        "Phones": [],
+        "FirstName": first_name,
+        "LastName": last_name,
+        "DegreeBefore": degree,
+        "DegreeAfter": "",
+        "Departments": [department_id],
+        "ContactURL": "",
+        "Category": "Kontakt"
+    }
+
+def fetch_and_parse_api_data(url: str) -> List[Dict[str, Any]]:
+    """Fetch and parse data from API endpoints."""
+    try:
+        logger.info(f"Fetching data from {url}")
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        contacts = []
+        for item in data:
+            department_id = item['id']
+            
+            # Process coordinator
+            if 'koordinator' in item:
+                coord_data = parse_person_data(
+                    item['koordinator'], 
+                    f"Koordinátor - {item['nazev']}", 
+                    department_id
+                )
+                if coord_data:
+                    contacts.append(coord_data)
+            
+            # Process chairman
+            if 'predseda' in item:
+                chair_data = parse_person_data(
+                    item['predseda'], 
+                    f"Předseda - {item['nazev']}", 
+                    department_id
+                )
+                if chair_data:
+                    contacts.append(chair_data)
+            
+            # Process vice-chairman
+            if 'mistopredseda' in item:
+                vice_data = parse_person_data(
+                    item['mistopredseda'], 
+                    f"Místopředseda - {item['nazev']}", 
+                    department_id
+                )
+                if vice_data:
+                    contacts.append(vice_data)
+        
+        logger.info(f"Successfully parsed {len(contacts)} contacts from {url}")
+        return contacts
+    except Exception as e:
+        logger.error(f"Error fetching/parsing API data from {url}: {str(e)}", exc_info=True)
+        return []
+
 def main():
     try:
-        # Fetch RSS feed
+        # Create payload
+        payload = create_initial_payload()
+        processed_count = 0
+        filtered_count = 0
+        
+        # Fetch and process RSS feed
         logger.info(f"Fetching RSS feed from {RSS_URL}")
         response = requests.get(RSS_URL)
         response.raise_for_status()
@@ -139,17 +231,11 @@ def main():
         contacts = soup.find_all('contact')
         logger.info(f"Found {len(contacts)} contacts in RSS feed")
         
-        # Create payload
-        payload = create_initial_payload()
-        
-        # Process each contact
-        processed_count = 0
-        filtered_count = 0
+        # Process RSS contacts
         for index, contact in enumerate(contacts, 1):
-            logger.info(f"Processing contact {index}/{len(contacts)}")
+            logger.info(f"Processing RSS contact {index}/{len(contacts)}")
             contact_dict = parse_contact(contact)
             if contact_dict:
-                # Filter out unwanted contacts
                 name = contact_dict.get("Name", "").lower()
                 description = contact_dict.get("Description", "").lower()
                 if name not in ["správce", "admin teplice"] and description not in ["správce", "admin teplice"]:
@@ -157,16 +243,20 @@ def main():
                     processed_count += 1
                 else:
                     filtered_count += 1
-                    logger.info(f"Filtered out contact: {contact_dict.get('Name')} (admin/správce)")
-        
+                    
+        # Fetch and process API data
+        for api_name, api_url in API_URLS.items():
+            api_contacts = fetch_and_parse_api_data(api_url)
+            payload["data"]["items"].extend(api_contacts)
+            processed_count += len(api_contacts)
+            
         # Save to file
         save_payload_to_file(payload, OUTPUT_FILE)
         
         # Upload to Voiceflow
         upload_to_voiceflow(payload)
         
-        logger.info(f"Processing complete. Total contacts: {len(contacts)}")
-        logger.info(f"Successfully processed: {processed_count}")
+        logger.info(f"Processing complete. Total contacts processed: {processed_count}")
         logger.info(f"Filtered out: {filtered_count}")
         
     except Exception as e:
