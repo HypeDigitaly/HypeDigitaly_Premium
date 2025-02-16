@@ -207,7 +207,7 @@ def append_item_to_payload(item, payload):
 
 def upload_to_voiceflow(filename):
     logger.info(f"Nahrávání souboru '{filename}' do Voiceflow")
-    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=false'
+    url = 'https://api.voiceflow.com/v1/knowledge-base/docs/upload/table?overwrite=true'
     headers = {
         'Authorization': VOICEFLOW_API_KEY,
         'accept': 'application/json',
