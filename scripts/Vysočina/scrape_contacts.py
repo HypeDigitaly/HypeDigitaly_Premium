@@ -43,13 +43,13 @@ def create_initial_payload() -> Dict[str, Any]:
         "data": {
             "schema": {
                 "searchableFields": [
-                    "Name", "Title", "Subtitle", "Description",
+                    "Name", "Title", "Position", "Role", "Description",
                     "Place", "ContactURL"
                 ],
                 "metadataFields": [
                     "FirstName", "LastName", "DegreeBefore",
                     "DegreeAfter", "Departments", "Emails", "Phones", "Category",
-                    "ContactURL"
+                    "ContactURL", "Role", "Position"
                 ]
             },
             "name": "Contacts_Table",
@@ -80,7 +80,8 @@ def parse_contact(contact: BeautifulSoup) -> Dict[str, Any]:
         contact_dict = {
             "Name": contact.find('name').text if contact.find('name') else "",
             "Title": contact.find('title').text if contact.find('title') else "",
-            "Subtitle": contact.find('subtitle').text if contact.find('subtitle') else "",
+            "Position": contact.find('position').text if contact.find('position') else "",
+            "Role": contact.find('role').text if contact.find('role') else "",
             "Description": contact.find('description').text if contact.find('description') else "",
             "Emails": emails,
             "Phones": phones,
@@ -152,7 +153,8 @@ def parse_person_data(person_data: Dict[str, str], role: str, department_id: int
     return {
         "Name": person_data['jmeno'],
         "Title": role,
-        "Subtitle": "",
+        "Position": person_data.get('position', ""),
+        "Role": person_data.get('role', ""),
         "Description": f"{role} - {person_data['jmeno']}",
         "Place": "",
         "Emails": [person_data['email']] if person_data.get('email') else [],
