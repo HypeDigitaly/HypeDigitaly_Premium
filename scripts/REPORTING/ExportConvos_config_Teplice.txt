@@ -1,0 +1,10 @@
+PROJECT_NAME=Teplicak
+AUTH_TOKEN=REMOVED-VOICEFLOW-KEY
+PROJECT_ID=6718a0e4c0ab47ef9cb27ba4
+START_DATE=2025-01-01
+END_DATE=2025-02-01
+OUTPUT_DIRECTORY=Teplicak_2025-01-01_to_2025-02-01
+CATEGORIES=[Administrativa_Uredni_Zalezitosti,Charakteristika_Mesta,Doprava,Dotace,Finance_Hospodareni, Kontakt,Krizove_Situace,Kultura_Pamatkova_Pece,Media_Komunikace,Rozvoj_Projekty,Socialni_Pece,Strategicke_Dokumenty,Ukrajina,Uzemni_Planovani_Stavebni_Rad,Verejne_Zakazky,Vzdelavani,Zdravotnictvi,Zivotni_Prostredi_Zemedelstvi]
+ANTHROPIC_API_KEY=REMOVED-ANTHROPIC-KEY
+BATCH_SIZE=25
+GenerateFAQ=false

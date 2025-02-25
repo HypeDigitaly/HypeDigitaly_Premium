@@ -100,7 +100,6 @@ def main(config_file):
         project_id = config['PROJECT_ID']
         ANTHROPIC_API_KEY = config['ANTHROPIC_API_KEY']
         CATEGORIES = config['CATEGORIES']
-        generate_faq = config.get('GenerateFAQ', 'true').lower() == 'true'  # New parameter with default value
         
         base_url = "https://api.voiceflow.com/v2/transcripts"
         headers = {
@@ -132,13 +131,9 @@ def main(config_file):
         category_counts = count_category_occurrences()
         create_excel_report(total_human_count, category_counts)
         
-        if generate_faq:
-            logging.info("FAQ generation is enabled, proceeding with conversation analysis...")
-            print("Analyzing conversations with Claude...")
-            faq_analysis = analyze_conversations_with_claude(OUTPUT_DIRECTORY)
-            save_faq_to_word(faq_analysis)
-        else:
-            logging.info("FAQ generation is disabled, skipping conversation analysis...")
+        print("Analyzing conversations with Claude...")
+        faq_analysis = analyze_conversations_with_claude(OUTPUT_DIRECTORY)
+        save_faq_to_word(faq_analysis)
         
         print("Zpracování dokončeno.")
         

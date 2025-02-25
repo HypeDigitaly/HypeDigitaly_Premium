@@ -1,0 +1,10 @@
+PROJECT_NAME=LITOMERICE
+AUTH_TOKEN=REMOVED-VOICEFLOW-KEY
+PROJECT_ID=679f9a4eb581cc269ec4d31b
+START_DATE=2025-02-01
+END_DATE=2025-02-25
+OUTPUT_DIRECTORY=LITOMERICE_2024-02-01_to_2025-02-25
+CATEGORIES=[Kontakt,Administrativa_Uredni_Zalezitosti,Komise_Rady_Mesta,Usneseni_Rady_Mesta,Redakcni_Rada,Usneseni_Zastupitelstvo,Zapisy_Vyboru,Vyrocni_Zpravy,Verejnopravni_Smlouvy,Uredni_Deska,Dokumenty_Mestskeho_Uradu,Vyhlasky,Media_Komunikace,Kultura_Pamatkova_Pece,Dotace,Charakteristika_Mesta,Strategicke_Dokumenty,Krizove_Situace,Rozvoj_Projekty,Finance_Hospodareni,Socialni_Pece,Ukrajina,Uzemni_Planovani_Stavebni_Rad,Vzdelavani,Zdravotnictvi,Zivotni_Prostredi_Zemedelstvi]
+ANTHROPIC_API_KEY=REMOVED-ANTHROPIC-KEY
+BATCH_SIZE=25
+GenerateFAQ=false

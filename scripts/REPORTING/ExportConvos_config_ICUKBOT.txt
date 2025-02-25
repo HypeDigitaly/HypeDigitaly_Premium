@@ -7,3 +7,4 @@ OUTPUT_DIRECTORY=2024-08-01 to 2024-12-31
 CATEGORIES=[Services,References,SuccessStories,Events,Podcasts,Articles,Documents,Contact]
 ANTHROPIC_API_KEY=
 BATCH_SIZE=25
+GenerateFAQ=false
