@@ -132,9 +132,31 @@ def get_html_content(url):
     time.sleep(JINA_AI_TIMEOUT)
 
 def sanitize_filename(filename):
-    sanitized = re.sub(r'[^\w\-_\. ]', '', filename)
-    sanitized = sanitized.replace(' ', '_')
-    return sanitized[:255]
+    # Remove invalid characters for filenames across operating systems
+    return re.sub(r'[\\/*?:"<>|]', "_", filename)
+
+def convert_phone_number(phone_str):
+    """
+    Převede telefonní číslo z formátu "+420 475 657 981" na celé číslo 475657981.
+    Odstraní +420 a všechny mezery.
+    Pokud telefon není platný, vrací N/A.
+    """
+    if phone_str == "N/A" or not phone_str:
+        return "N/A"
+    
+    # Odstranění předvolby +420 (pokud existuje)
+    phone_str = re.sub(r'^\+420\s*', '', phone_str)
+    
+    # Odstranění všech bílých znaků a spojovníků
+    phone_str = re.sub(r'[\s\-]', '', phone_str)
+    
+    # Pokus o převod na celé číslo
+    try:
+        phone_int = int(phone_str)
+        return phone_int
+    except ValueError:
+        # Pokud převod selže, vrátíme původní hodnotu
+        return "N/A"
 
 def extract_contacts(soup, url, title):
     items = []
@@ -248,7 +270,7 @@ def upload_to_voiceflow(table_name, items):
         "data": {
             "schema": {
                 "searchableFields": ["FullName", "Title", "Role", "Department", "Subdepartment", "PhoneNumber", "URL", "Origin"],
-                "metadataFields": ["FirstName", "LastName", "Title", "Department", "Subdepartment", "Origin", "Category"]
+                "metadataFields": ["FirstName", "LastName", "Title", "Department", "Subdepartment", "PhoneNumber", "Origin", "Category"]
             },
             "name": table_name,
             "items": items
@@ -302,6 +324,10 @@ def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voicef
                 items = extract_contacts(soup, url, title)
 
                 if items:
+                    # Převedení telefonních čísel na celá čísla
+                    for item in items:
+                        item["PhoneNumber"] = convert_phone_number(item["PhoneNumber"])
+                    
                     # Remove 'Ústecký kraj' from the table name
                     table_name = re.sub(r'\s*Ústecký kraj\s*$', '', title).strip()
                     
@@ -312,7 +338,7 @@ def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voicef
                                     "FullName", "Role", "Department", "Subdepartment", "PhoneNumber", "URL", "Origin"
                                 ],
                                 "metadataFields": [
-                                    "FirstName", "LastName", "Department", "Subdepartment", "Origin", "Category"
+                                    "FirstName", "LastName", "Department", "Subdepartment", "PhoneNumber", "Origin", "Category"
                                 ]
                             },
                             "name": sanitize_filename(table_name),
@@ -354,6 +380,12 @@ def upload_existing_files(directory):
                 data = json.load(f)
                 table_name = data['data']['name']
                 items = data['data']['items']
+                
+                # Převedení telefonních čísel na celá čísla
+                for item in items:
+                    if "PhoneNumber" in item:
+                        item["PhoneNumber"] = convert_phone_number(item["PhoneNumber"])
+                
                 upload_to_voiceflow(table_name, items)
 
 # Main execution
