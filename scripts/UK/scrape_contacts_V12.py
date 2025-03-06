@@ -179,10 +179,9 @@ def extract_contacts(soup, url, title):
             strong_text = element.get_text(strip=True)
             if "komise" in strong_text.lower() or "výbor" in strong_text.lower():
                 current_department = strong_text
+                current_subdepartment = ""  # Reset subdepartment only when department changes
             elif "oddělení" in strong_text.lower():
                 current_subdepartment = strong_text
-            else:
-                current_subdepartment = ""
         elif element.name == 'li' and element.get('class') == ['o']:
             contact_info = extract_contact_info(element, BASE_URL, current_department, current_subdepartment, origin)
             if contact_info:
