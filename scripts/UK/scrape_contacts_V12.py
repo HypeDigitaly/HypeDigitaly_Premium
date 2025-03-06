@@ -269,7 +269,7 @@ def upload_to_voiceflow(table_name, items):
         "data": {
             "schema": {
                 "searchableFields": ["FullName", "Title", "Role", "Department", "Subdepartment", "PhoneNumber", "URL", "Origin"],
-                "metadataFields": ["FirstName", "LastName", "Title", "Department", "Subdepartment", "PhoneNumber", "Origin", "Category"]
+                "metadataFields": ["FirstName", "LastName", "Role", "Title", "Department", "Subdepartment", "PhoneNumber", "Origin", "Category"]
             },
             "name": table_name,
             "items": items
@@ -337,7 +337,7 @@ def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voicef
                                     "FullName", "Role", "Department", "Subdepartment", "PhoneNumber", "URL", "Origin"
                                 ],
                                 "metadataFields": [
-                                    "FirstName", "LastName", "Department", "Subdepartment", "PhoneNumber", "Origin", "Category"
+                                    "FirstName", "LastName", "Role", "Department", "Subdepartment", "PhoneNumber", "Origin", "Category"
                                 ]
                             },
                             "name": sanitize_filename(table_name),
