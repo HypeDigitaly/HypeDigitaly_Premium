@@ -51,7 +51,7 @@ INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 # ============================================================================
 # PROCESSING FLAGS
 # ============================================================================
-ENABLE_QA_PROCESSING = False  # Enable Q/A processing
+ENABLE_QA_PROCESSING = True  # Enable Q/A processing
 UPLOAD_IMMEDIATELY = False  # Skip processing and only upload existing payloads
 COMPILE_SEARCH_QUERIES = True  # Enable compilation of search queries into TXT file
 
@@ -192,8 +192,8 @@ def get_html_content(url, for_qa=False):
             'Accept': 'application/json',
             'Authorization': f'Bearer {JINA_AI_API_KEY}',
             'X-Return-Format': 'markdown',
-            'X-Target-Selector': '#stred',
-            'X-Wait-For-Selector': '#stred'
+            'X-Target-Selector': '#sp-main-body',
+            'X-Wait-For-Selector': '#sp-main-body'
         }
     else:
         headers = {
@@ -830,6 +830,45 @@ Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce i
         logger.error(f"Chyba při generování Q/A párů pro {title}: {str(e)}")
         return None
 
+def save_qa_payload_for_url(url, qa_pairs, category, metadata):
+    """Save QA payload to a separate JSON file for each URL"""
+    logger.info(f"Saving QA payload for individual URL: {url}")
+    
+    try:
+        # Create a clean filename from the URL
+        url_slug = clean_title_from_url(url)
+        filename = f"payloads/qa_{url_slug}.json"
+        
+        # Create payload structure
+        payload = {
+            "data": {
+                "schema": {
+                    "searchableFields": ["Question", "Answer"],
+                    "metadataFields": ["Category", "URL"]
+                },
+                "name": f"qa_{url_slug}",
+                "items": qa_pairs
+            }
+        }
+        
+        # Add URL to each QA pair for reference
+        for pair in payload["data"]["items"]:
+            pair["URL"] = url
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        # Save payload
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            logger.info(f"Successfully saved QA payload to {filename} with {len(qa_pairs)} items")
+            
+        return filename
+        
+    except Exception as e:
+        logger.error(f"Failed to save QA payload for URL {url}: {str(e)}", exc_info=True)
+        raise
+
 def process_url_content(url, html_content, category, metadata):
     try:
         # Získání markdown obsahu pro Q/A
@@ -839,23 +878,13 @@ def process_url_content(url, html_content, category, metadata):
         qa_pairs = convert_to_qa(qa_content, metadata.get('title', ''), category)
         
         if qa_pairs:
-            # Vytvoření payloadu
-            payload = {
-                "data": {
-                    "schema": {
-                        "searchableFields": ["Question", "Answer"],
-                        "metadataFields": ["Category"]
-                    },
-                    "name": f"{category.lower()}_qa",
-                    "items": qa_pairs
-                }
-            }
+            # Save QA pairs in a separate file for this specific URL
+            qa_filename = save_qa_payload_for_url(url, qa_pairs, category, metadata)
             
-            # Uložení payloadu do souboru
-            filename = save_payload_to_file(url, qa_pairs, category, metadata)
+            # Upload the individual QA file to Voiceflow
+            upload_to_voiceflow(qa_filename)
             
-            # Upload do Voiceflow
-            upload_to_voiceflow(filename)
+            logger.info(f"Successfully processed QA content for URL: {url}")
             
     except Exception as e:
         logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}")
@@ -1110,6 +1139,13 @@ def extract_links_from_sitemap(sitemap_soup, categorized_links={}):
                 title = metadata.get('title', '') or path_components[-1].replace('-', ' ').title()
 
                 logger.info(f"Processing URL {absolute_url} with categories: {categories}")
+
+                # Process QA content for this URL immediately if enabled
+                if ENABLE_QA_PROCESSING:
+                    # Use the first category for QA processing
+                    primary_category = categories[0]
+                    logger.info(f"Starting QA processing for URL {absolute_url} with category {primary_category}")
+                    process_url_content(absolute_url, html_content, primary_category, metadata)
 
                 # Add to categorized_links with new fields
                 for category in categories:
