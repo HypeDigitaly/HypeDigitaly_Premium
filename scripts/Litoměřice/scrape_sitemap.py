@@ -192,8 +192,8 @@ def get_html_content(url, for_qa=False):
             'Accept': 'application/json',
             'Authorization': f'Bearer {JINA_AI_API_KEY}',
             'X-Return-Format': 'markdown',
-            'X-Target-Selector': '#sp-main-body',
-            'X-Wait-For-Selector': '#sp-main-body'
+            'X-Target-Selector': '#sp-component',
+            'X-Wait-For-Selector': '#sp-component'
         }
     else:
         headers = {
@@ -211,6 +211,20 @@ def get_html_content(url, for_qa=False):
         
         try:
             response_text = response.text
+            
+            # Přidáno: Výpis celého JSON response body na konzoli při Q/A volání
+            if for_qa:
+                print("\n===== JINA AI Q/A API RESPONSE (START) =====")
+                print(f"URL: {url}")
+                print(f"Status code: {response.status_code}")
+                print("Response JSON body:")
+                try:
+                    parsed_json = json.loads(response_text)
+                    print(json.dumps(parsed_json, indent=4, ensure_ascii=False))
+                except:
+                    print(response_text)  # Pokud není validní JSON
+                print("===== JINA AI Q/A API RESPONSE (END) =====\n")
+            
             logger.debug(f"Raw response: {response_text[:500]}...")
             data = response.json()
             logger.debug(f"Parsed JSON response: {json.dumps(data, indent=2, ensure_ascii=False)}")
@@ -341,7 +355,7 @@ Lepší JAKÁKOLIV kategorie než ŽÁDNÁ kategorie!
     for attempt in range(MAX_RETRIES):
         try:
             message = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-3-7-sonnet-20250219",
                 max_tokens=50,
                 temperature=0,
                 messages=[
@@ -411,7 +425,7 @@ Return ONLY the question pair without any additional text or formatting."""
     for attempt in range(MAX_RETRIES):
         try:
             message = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-3-7-sonnet-20250219",
                 max_tokens=200,
                 temperature=0,
                 messages=[
@@ -691,8 +705,11 @@ ZAKÁZANÉ OPERACE:
 
 Veškerý výstup musí být v češtině a přímo souviset s tématem '{title}'."""
 
-    user_prompt = """# VÁŠ KRITICKÝ ÚKOL: 
+    user_prompt = f"""# VÁŠ KRITICKÝ ÚKOL: 
 Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce informativních Q/A párů při STRIKTNÍM dodržení pravidel přesnosti.
+
+# OBSAH K EXTRAKCI:
+{content}
 
 # STRIKTNÍ PRAVIDLA EXTRAKCE:
 
@@ -767,7 +784,7 @@ Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce i
     {{
       "Question": "Hlavní otázka? | Alternativní pohled? | Jiná perspektiva? | vyhledávací fráze 1 | vyhledávací fráze 2 | vyhledávací fráze 3",
       "Answer": "Doslovně extrahovaná odpověď ze zdrojového textu bez jakýchkoliv úprav či doplnění",
-      "Category": "{}"
+      "Category": "{category}"
     }}
   ]
 }}
@@ -779,11 +796,11 @@ Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce i
 4. Jsou zachovány VŠECHNY původní formulace a termíny?
 5. Nejsou nikde použity předpoklady či dedukce?
 6. Jsou všechny číselné údaje, URL a kontakty PŘESNĚ zkopírované?
-7. Je každá informace uvedena v původním kontextu?""".format(category)
+7. Je každá informace uvedena v původním kontextu?"""
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-3-7-sonnet-20250219",
             max_tokens=8192,
             temperature=0,
             system=system_prompt,
@@ -1066,7 +1083,7 @@ Key mappings:
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-3-7-sonnet-20250219",
             max_tokens=50,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
