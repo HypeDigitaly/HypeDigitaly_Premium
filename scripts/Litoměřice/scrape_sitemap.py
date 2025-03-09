@@ -130,8 +130,24 @@ MAIN_SECTION_PATHS = [
     '/zakladni-kontakty',
     '/vedenimesta',
     '/uzemni-plany',
-    '/ztraty-a-nalezy'
+    '/ztraty-a-nalezy',
     '/mapa-mesta'
+]
+
+# Define paths that should be skipped during Q/A processing
+SKIP_QA_PATHS = [
+    '/komise-rady-mesta',
+    '/usneseni-rady',
+    '/redakcni-rada',
+    '/usneseni-zastupitelstva',
+    '/podklady-zm',
+    '/zapisy-vyboru',
+    '/vyrocni-zpravy-zkon106',
+    '/verejnospravnismlouvy',
+    '/rozpocet-a-hospodareni-mesta',
+    '/uredni-deska-online',
+    '/vyhlasky-mesta',
+    '/dokumenty-meu',
 ]
 
 # Define paths under which content should be date filtered
