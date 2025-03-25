@@ -679,7 +679,13 @@ def upload_to_voiceflow(filename):
 def convert_to_qa(content, title, category):
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     
+    # Add current date and time
+    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    
     system_prompt = f"""Jste precizní právní poradce pro detailní extrakci informací. Striktně formátujete své odpovědi ve validním JSON formátu. Disponujete následující,i schopnostmi a dodržujete následující omezení:
+
+# AKTUÁLNÍ DATUM A ČAS EXTRAKCE: {current_datetime}
+Veškeré časové údaje a data vztahujte k tomuto aktuálnímu datu. Nedomýšlejte si budoucí data ani neaktualizujte historická data.
 
 EXTRAKČNÍ SCHOPNOSTI:
 1. Hloubková analýza textu pro nalezení všech informačních bodů
