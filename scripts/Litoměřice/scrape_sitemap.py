@@ -77,6 +77,7 @@ CATEGORIES = [
     "Administrativa_Uredni_Zalezitosti",  # This now serves as the parent category
     "Media_Komunikace",
     "Kultura_Pamatkova_Pece",
+    "Doprava",
     "Dotace",
     "Charakteristika_Mesta",
     "Strategicke_Dokumenty",
