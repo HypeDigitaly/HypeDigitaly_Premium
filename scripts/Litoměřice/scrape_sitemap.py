@@ -77,7 +77,6 @@ CATEGORIES = [
     "Administrativa_Uredni_Zalezitosti",  # This now serves as the parent category
     "Media_Komunikace",
     "Kultura_Pamatkova_Pece",
-    "Doprava",
     "Dotace",
     "Charakteristika_Mesta",
     "Strategicke_Dokumenty",
@@ -89,7 +88,8 @@ CATEGORIES = [
     "Uzemni_Planovani_Stavebni_Rad",
     "Vzdelavani",
     "Zdravotnictvi",
-    "Zivotni_Prostredi_Zemedelstvi"
+    "Zivotni_Prostredi_Zemedelstvi",
+    "Doprava"
 ]
 
 # Add this constant after CATEGORIES definition
@@ -209,6 +209,9 @@ def get_html_content(url, for_qa=False):
             'Accept': 'application/json',
             'Authorization': f'Bearer {JINA_AI_API_KEY}',
             'X-Return-Format': 'markdown',
+            "X-With-Generated-Alt": "true",
+            "X-With-Images-Summary": "true",
+            "X-With-Links-Summary": "true",
             'X-Target-Selector': '#sp-component',
             'X-Wait-For-Selector': '#sp-component'
         }
