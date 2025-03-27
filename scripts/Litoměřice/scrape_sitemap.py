@@ -40,6 +40,8 @@ VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
 # ============================================================================
 BASE_URL = "https://www.litomerice.cz"
 SITEMAP_URL = "https://www.litomerice.cz/component/osmap/?view=xml&id=1&format=xml"
+URL_LIST_FILE = "Sitemap_Additional_URL_List.txt"  # Cesta k souboru se seznamem URL adres
+USE_SITEMAP = True  # True pro použití sitemapy, False pro použití seznamu URL
 
 # ============================================================================
 # API CALL SETTINGS
@@ -52,8 +54,6 @@ INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 # PROCESSING FLAGS
 # ============================================================================
 ENABLE_QA_PROCESSING = True  # Enable Q/A processing
-UPLOAD_IMMEDIATELY = False  # Skip processing and only upload existing payloads
-COMPILE_SEARCH_QUERIES = True  # Enable compilation of search queries into TXT file
 
 # ============================================================================
 # HTTP REQUEST SETTINGS
@@ -132,7 +132,8 @@ MAIN_SECTION_PATHS = [
     '/vedenimesta',
     '/uzemni-plany',
     '/ztraty-a-nalezy',
-    '/mapa-mesta'
+    '/mapa-mesta',
+    '/narizeni-rady-mesta'
 ]
 
 # Define paths that should be skipped during Q/A processing
@@ -681,12 +682,13 @@ def upload_to_voiceflow(filename):
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
 
 def convert_to_qa(content, title, category):
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-    
-    # Add current date and time
-    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    
-    system_prompt = f"""Jste precizní právní poradce pro detailní extrakci informací. Striktně formátujete své odpovědi ve validním JSON formátu. Disponujete následující,i schopnostmi a dodržujete následující omezení:
+    try:
+        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+        
+        # Add current date and time
+        current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        
+        system_prompt = f"""Jste precizní právní poradce pro detailní extrakci informací. Striktně formátujete své odpovědi ve validním JSON formátu. Disponujete následující,i schopnostmi a dodržujete následující omezení:
 
 # AKTUÁLNÍ DATUM A ČAS EXTRAKCE: {current_datetime}
 Veškeré časové údaje a data vztahujte k tomuto aktuálnímu datu. Nedomýšlejte si budoucí data ani neaktualizujte historická data.
@@ -731,7 +733,7 @@ ZAKÁZANÉ OPERACE:
 
 Veškerý výstup musí být v češtině a přímo souviset s tématem '{title}'."""
 
-    user_prompt = f"""# VÁŠ KRITICKÝ ÚKOL: 
+        user_prompt = f"""# VÁŠ KRITICKÝ ÚKOL: 
 Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce informativních Q/A párů při STRIKTNÍM dodržení pravidel přesnosti.
 
 # OBSAH K EXTRAKCI:
@@ -824,7 +826,6 @@ Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce i
 6. Jsou všechny číselné údaje, URL a kontakty PŘESNĚ zkopírované?
 7. Je každá informace uvedena v původním kontextu?"""
 
-    try:
         message = client.messages.create(
             model="claude-3-7-sonnet-20250219",
             max_tokens=8192,
@@ -836,42 +837,74 @@ Proveďte VYČERPÁVAJÍCÍ extrakci dat a vytvořte MAXIMÁLNÍ počet vysoce i
         )
         
         response_text = message.content[0].text.strip()
+        logger.debug(f"Raw response from Claude: {response_text[:500]}...")
         
         # Vylepšené zpracování JSON odpovědi
         try:
-            # Pokus o přímé parsování celé odpovědi
+            # Nejprve se pokusíme o přímé parsování
             qa_data = json.loads(response_text)
         except json.JSONDecodeError:
-            # Pokud selže, pokus o extrakci JSON části
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
-            if json_start != -1 and json_end != -1:
-                json_str = response_text[json_start:json_end]
-                try:
-                    qa_data = json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Nelze parsovat JSON z odpovědi pro {title}: {str(e)}")
-                    return None
-            else:
-                logger.error(f"Nelze najít JSON v odpovědi pro {title}")
-                return None
+            # Pokud selže, provedeme důkladné čištění a rekonstrukci JSON
+            
+            # 1. Extrakce všech Q/A párů pomocí regex
+            qa_pattern = r'"Question"\s*:\s*"([^"]+)"\s*,\s*"Answer"\s*:\s*"([^"]+)"'
+            qa_matches = re.findall(qa_pattern, response_text)
+            
+            if not qa_matches:
+                logger.error(f"Nelze najít Q/A páry v odpovědi pro {title}")
+                return []
+            
+            # 2. Rekonstrukce JSON struktury
+            reconstructed_pairs = []
+            for q, a in qa_matches:
+                # Vyčištění a normalizace textu
+                question = unicodedata.normalize('NFKD', q.strip())
+                answer = unicodedata.normalize('NFKD', a.strip())
+                
+                # Odstranění problematických znaků
+                question = re.sub(r'[\n\r\t]', ' ', question)
+                answer = re.sub(r'[\n\r\t]', ' ', answer)
+                
+                # Vytvoření Q/A páru
+                pair = {
+                    "Question": question,
+                    "Answer": answer,
+                    "Category": category
+                }
+                reconstructed_pairs.append(pair)
+            
+            # 3. Vytvoření finální struktury
+            qa_data = {"qa_pairs": reconstructed_pairs}
+            
+            logger.info(f"Úspěšně rekonstruováno {len(reconstructed_pairs)} Q/A párů pro {title}")
         
+        # Zpracování Q/A párů
         qa_pairs = qa_data.get('qa_pairs', [])
-        
-        # Validace Q/A párů
         if not isinstance(qa_pairs, list):
             logger.error(f"Neplatná struktura Q/A párů pro {title}")
-            return None
+            return []
         
-        # Přidání kategorie ke každému Q/A páru
+        # Čištění a validace každého páru
+        cleaned_pairs = []
         for pair in qa_pairs:
-            pair['Category'] = category
+            if isinstance(pair, dict) and 'Question' in pair and 'Answer' in pair:
+                try:
+                    cleaned_pair = {
+                        'Question': unicodedata.normalize('NFKD', str(pair['Question'])).strip(),
+                        'Answer': unicodedata.normalize('NFKD', str(pair['Answer'])).strip(),
+                        'Category': category
+                    }
+                    if cleaned_pair['Question'] and cleaned_pair['Answer']:  # Kontrola neprázdných hodnot
+                        cleaned_pairs.append(cleaned_pair)
+                except Exception as e:
+                    logger.warning(f"Chyba při čištění Q/A páru: {str(e)}")
+                    continue
         
-        return qa_pairs
+        return cleaned_pairs
             
     except Exception as e:
         logger.error(f"Chyba při generování Q/A párů pro {title}: {str(e)}")
-        return None
+        return []
 
 def save_qa_payload_for_url(url, qa_pairs, category, metadata):
     """Save QA payload to a separate JSON file for each URL"""
@@ -912,21 +945,28 @@ def save_qa_payload_for_url(url, qa_pairs, category, metadata):
         logger.error(f"Failed to save QA payload for URL {url}: {str(e)}", exc_info=True)
         raise
 
+def should_process_url_qa(url):
+    """Check if URL should be processed for Q/A based on SKIP_QA_PATHS"""
+    parsed_url = urlparse(url)
+    path = parsed_url.path
+    
+    # Check if path starts with any of the skip paths
+    return not any(path.startswith(skip_path) for skip_path in SKIP_QA_PATHS)
+
 def process_url_content(url, html_content, category, metadata):
     try:
-        # Získání markdown obsahu pro Q/A
+        # Add check for SKIP_QA_PATHS
+        if not should_process_url_qa(url):
+            logger.info(f"Skipping QA processing for URL {url} as it matches SKIP_QA_PATHS")
+            return
+            
+        # Rest of the existing code...
         qa_content, _ = get_html_content(url, for_qa=True)
-        
-        # Generování Q/A párů
         qa_pairs = convert_to_qa(qa_content, metadata.get('title', ''), category)
         
         if qa_pairs:
-            # Save QA pairs in a separate file for this specific URL
             qa_filename = save_qa_payload_for_url(url, qa_pairs, category, metadata)
-            
-            # Upload the individual QA file to Voiceflow
             upload_to_voiceflow(qa_filename)
-            
             logger.info(f"Successfully processed QA content for URL: {url}")
             
     except Exception as e:
@@ -959,32 +999,119 @@ def clean_title_from_url(url, title=None):
 
 def extract_date_from_url(url):
     """
-    Extract date from URL, handling European format (DD-MM-YYYY).
+    Extract date from URL, handling various date formats including document numbers with years.
     Returns datetime object or None if no valid date found.
     """
-    # Look for dates in formats: DD-MM-YYYY, D-MM-YYYY
-    date_patterns = [
-        r'(\d{1,2})-(\d{1,2})-(\d{4})',  # DD-MM-YYYY or D-MM-YYYY
-        r'(\d{1,2})\.(\d{1,2})\.(\d{4})'  # DD.MM.YYYY or D.MM.YYYY
+    # Czech month names mapping
+    CZECH_MONTHS = {
+        'leden': 1, 'ledna': 1, 'lednu': 1,
+        'unor': 2, 'unora': 2, 'unoru': 2, 'únor': 2, 'února': 2, 'únoru': 2,
+        'brezen': 3, 'brezna': 3, 'breznu': 3, 'březen': 3, 'března': 3, 'březnu': 3,
+        'duben': 4, 'dubna': 4, 'dubnu': 4,
+        'kveten': 5, 'kvetna': 5, 'kvetnu': 5, 'květen': 5, 'května': 5, 'květnu': 5,
+        'cerven': 6, 'cervna': 6, 'cervnu': 6, 'červen': 6, 'června': 6, 'červnu': 6,
+        'cervenec': 7, 'cervence': 7, 'cervenci': 7, 'červenec': 7, 'července': 7, 'červenci': 7,
+        'srpen': 8, 'srpna': 8, 'srpnu': 8,
+        'zari': 9, 'září': 9,
+        'rijen': 10, 'rijna': 10, 'rijnu': 10, 'říjen': 10, 'října': 10, 'říjnu': 10,
+        'listopad': 11, 'listopadu': 11,
+        'prosinec': 12, 'prosince': 12, 'prosinci': 12
+    }
+    
+    url_normalized = remove_accents(url.lower())
+    
+    # 1. NEW: Check for document numbers with year patterns
+    doc_number_patterns = [
+        r'[^0-9](\d{1,3})[^0-9]+(\d{4})[^0-9]',  # Obecný vzor pro "číslo/rok" (např. 4-2024, 4/2024, 4_2024)
+        r'[^0-9](\d{4})/(\d{1,3})[^0-9]',        # Obrácený formát "rok/číslo" (např. 2024/4)
+        r'[^0-9](\d{1,3})-(\d{4})[^0-9]',        # Formát s pomlčkou (např. 4-2024)
+        r'[^0-9](\d{4})-(\d{1,3})[^0-9]',        # Obrácený formát s pomlčkou (např. 2024-4)
     ]
     
-    for pattern in date_patterns:
+    for pattern in doc_number_patterns:
+        matches = re.findall(pattern, url_normalized)
+        if matches:
+            for match in matches:
+                try:
+                    # Zkontrolujeme obě čísla, jestli jedno z nich může být rok
+                    num1, num2 = map(int, match)
+                    if 2000 <= num1 <= 2100:  # První číslo je rok
+                        logger.info(f"Found document year {num1} in URL: {url}")
+                        return datetime(num1, 1, 1)
+                    elif 2000 <= num2 <= 2100:  # Druhé číslo je rok
+                        logger.info(f"Found document year {num2} in URL: {url}")
+                        return datetime(num2, 1, 1)
+                except ValueError:
+                    continue
+    
+    # 2. Check for Czech date format with month names
+    for month_name, month_num in CZECH_MONTHS.items():
+        czech_patterns = [
+            rf'(\d{{1,2}})\.\s*{month_name}\s*(\d{{4}})',
+            rf'{month_name}\s*(\d{{4}})',
+        ]
+        
+        for pattern in czech_patterns:
+            matches = re.findall(pattern, url_normalized)
+            if matches:
+                try:
+                    if len(matches[0]) == 2:  # DD. měsíc YYYY
+                        day, year = map(int, matches[0])
+                        if 1 <= day <= 31 and 2000 <= year <= 2100:
+                            logger.info(f"Found Czech date format: {day}.{month_num}.{year} in URL: {url}")
+                            return datetime(year, month_num, day)
+                    else:  # měsíc YYYY
+                        year = int(matches[0])
+                        if 2000 <= year <= 2100:
+                            logger.info(f"Found Czech month and year: {month_num}.{year} in URL: {url}")
+                            return datetime(year, month_num, 1)
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Invalid Czech date in URL {url}: {str(e)}")
+                    continue
+    
+    # 3. Look for numeric dates
+    date_patterns = [
+        r'(\d{1,2})-(\d{1,2})-(\d{4})',
+        r'(\d{1,2})\.(\d{1,2})\.(\d{4})',
+        r'/(\d{4})/',
+        r'-(\d{4})-',
+        r'-(\d{4})$',
+        r'[^0-9](\d{4})[^0-9]'
+    ]
+    
+    # First check for standalone year
+    year_matches = []
+    for pattern in date_patterns[2:]:  # Skip the full date patterns
         matches = re.findall(pattern, url)
         if matches:
-            day, month, year = matches[0]  # Take the first match
+            for year in matches:
+                try:
+                    year_int = int(year)
+                    if 2000 <= year_int <= 2100:  # Reasonable year range
+                        year_matches.append(year_int)
+                except ValueError:
+                    continue
+    
+    # If we found any valid years, use the earliest one
+    if year_matches:
+        earliest_year = min(year_matches)
+        logger.info(f"Found year {earliest_year} in URL: {url}")
+        return datetime(earliest_year, 1, 1)
+    
+    # Check for full numeric dates
+    for pattern in date_patterns[:2]:
+        matches = re.findall(pattern, url)
+        if matches:
             try:
-                # Convert to integers, assuming DD-MM-YYYY format
-                day = int(day)
-                month = int(month)
-                year = int(year)
-                
-                # Validate date components
-                if 1 <= day <= 31 and 1 <= month <= 12 and year >= 2000:
+                day, month, year = map(int, matches[0])
+                if 1 <= day <= 31 and 1 <= month <= 12 and 2000 <= year <= 2100:
+                    logger.info(f"Found numeric date {day}.{month}.{year} in URL: {url}")
                     return datetime(year, month, day)
             except ValueError as e:
-                logger.warning(f"Neplatné datum v URL {url}: {str(e)}")
+                logger.warning(f"Invalid numeric date in URL {url}: {str(e)}")
                 continue
     
+    logger.info(f"No valid date found in URL: {url}")
     return None
 
 def should_apply_date_filter(url):
@@ -1020,7 +1147,7 @@ def update_last_processed_date():
 
 def check_url_in_payloads(url):
     """
-    Check if URL exists in any payload file.
+    Check if URL exists in any JSON file in the payloads directory.
     """
     payload_dir = "payloads"
     
@@ -1029,13 +1156,13 @@ def check_url_in_payloads(url):
         return False
         
     for filename in os.listdir(payload_dir):
-        if not filename.endswith('_payload.json'):
+        if not filename.endswith('.json'):  # Changed from '_payload.json' to just '.json'
             continue
             
         try:
             with open(os.path.join(payload_dir, filename), 'r', encoding='utf-8') as f:
                 payload = json.load(f)
-                # Vylepšená kontrola existence URL
+                # Check for URL existence in the payload structure
                 if 'data' in payload and 'items' in payload['data']:
                     for item in payload['data']['items']:
                         if item.get('URL') == url:
@@ -1045,37 +1172,22 @@ def check_url_in_payloads(url):
             logger.error(f"Chyba při kontrole souboru {filename}: {str(e)}")
             continue
     
-    logger.info(f"URL {url} nenalezena v žádném payload souboru - bude zpracována")
+    logger.info(f"URL {url} nenalezena v žádném JSON souboru - bude zpracována")
     return False
 
 def should_process_url(url, lastmod_date):
-    """
-    Determine if URL should be processed based on existence and last modification date
-    """
-    logger.info(f"Kontrola URL: {url}")
-    
-    # Nejdřív zkontrolujeme existenci v payloadech
+    # 1. Check if URL exists
     url_exists = check_url_in_payloads(url)
     if url_exists:
-        last_processed = get_last_processed_date()
-        if last_processed and lastmod_date and lastmod_date > last_processed:
-            logger.info(f"URL {url} existuje, ale byla modifikována {lastmod_date} po posledním zpracování {last_processed} - zpracuji znovu")
-            return True
-        logger.info(f"URL {url} již existuje a nebyla změněna - přeskakuji")
         return False
 
-    # Pokud URL neexistuje, aplikujeme datový filtr
+    # 2. Check date first!
+    if lastmod_date and lastmod_date.year < FILTER_YEAR:
+        return False
+
+    # 3. Then check other conditions
     if not should_apply_date_filter(url):
-        logger.info(f"URL {url} je hlavní sekce - zpracuji")
         return True
-        
-    if lastmod_date:
-        should_process = lastmod_date.year >= FILTER_YEAR
-        logger.info(f"URL {url} má datum {lastmod_date.year} - {'zpracuji' if should_process else 'přeskočím'}")
-        return should_process
-            
-    logger.info(f"URL {url} nemá datum - přeskočím")
-    return False
 
 def get_administrative_subcategory(path, url):
     """Determine subcategory for administrative content using Claude."""
@@ -1126,11 +1238,11 @@ Key mappings:
         logger.error(f"Error getting subcategory: {str(e)}")
         return "Dokumenty_Mestskeho_Uradu"
 
-def extract_links_from_sitemap(sitemap_soup, categorized_links={}):
+def extract_links_from_sitemap(sitemap_soup):
     """Process sitemap URLs"""
     if not sitemap_soup:
         logger.error("Neplatná sitemap struktura")
-        return categorized_links
+        return
 
     processed_count = 0
     skipped_count = 0
@@ -1163,10 +1275,9 @@ def extract_links_from_sitemap(sitemap_soup, categorized_links={}):
                     logger.warning(f"Cannot get content for URL {absolute_url}")
                     continue
 
-                # Extract path components for categorization and navigation
+                # Extract path components for categorization
                 path_components = urlparse(absolute_url).path.strip('/').split('/')
                 current_path = [comp.replace('-', ' ').title() for comp in path_components if comp]
-                absolute_path = ' > '.join(current_path)
 
                 # Get category using path-based categorization
                 categories = categorize_link_claude(current_path)
@@ -1174,52 +1285,12 @@ def extract_links_from_sitemap(sitemap_soup, categorized_links={}):
                     logger.warning(f"Cannot determine category for URL {absolute_url}")
                     continue
 
-                # Generate RAG question
-                rag_question = generate_rag_question(current_path)
-                logger.info(f"Generated RAG question: {rag_question}")
-
-                # Get title from metadata or generate from URL
-                title = metadata.get('title', '') or path_components[-1].replace('-', ' ').title()
-
-                logger.info(f"Processing URL {absolute_url} with categories: {categories}")
-
-                # Process QA content for this URL immediately if enabled
+                # Process QA content for this URL
                 if ENABLE_QA_PROCESSING:
                     # Use the first category for QA processing
                     primary_category = categories[0]
                     logger.info(f"Starting QA processing for URL {absolute_url} with category {primary_category}")
                     process_url_content(absolute_url, html_content, primary_category, metadata)
-
-                # Add to categorized_links with new fields
-                for category in categories:
-                    if category not in categorized_links:
-                        categorized_links[category] = []
-                    
-                    link_data = {
-                        "Title": title,
-                        "URL": absolute_url,
-                        "Category": category,
-                        "Question": rag_question,
-                        "Navigation": absolute_path,
-                        "SubCategory": None  # Initialize SubCategory field
-                    }
-                    
-                    # Add subcategory only for administrative content
-                    if category == "Administrativa_Uredni_Zalezitosti":
-                        subcategory = get_administrative_subcategory(current_path, absolute_url)
-                        link_data["SubCategory"] = subcategory
-                        logger.info(f"Assigned administrative subcategory: {subcategory}")
-
-                    categorized_links[category].append(link_data)
-                    
-                    # Save immediately after each URL is processed
-                    try:
-                        logger.info(f"Attempting to save payload for category: {category}")
-                        save_payloads_to_files(categorized_links)
-                        logger.info(f"Successfully saved payload")
-                    except Exception as e:
-                        logger.error(f"Failed to save payload for URL {absolute_url}: {str(e)}", exc_info=True)
-                        continue
 
                 processed_count += 1
                 logger.info(f"=== URL {absolute_url} successfully processed ===")
@@ -1233,7 +1304,6 @@ def extract_links_from_sitemap(sitemap_soup, categorized_links={}):
             
     logger.info(f"Total URLs processed: {processed_count}")
     logger.info(f"Total URLs skipped: {skipped_count}")
-    return categorized_links
 
 def count_existing_urls():
     """Count URLs in existing payloads"""
@@ -1253,67 +1323,71 @@ def count_existing_urls():
                 logger.error(f"Chyba při počítání URL v {filename}: {str(e)}")
     return url_count
 
-def compile_search_queries_file():
-    """Compiles all search queries from JSON payloads into a single TXT file."""
-    output_file = "compiled_search_queries.txt"
-    payloads_dir = "payloads"
-    
-    logger.info(f"Starting compilation of search queries into {output_file}")
-    
+def load_urls_from_file(file_path):
+    """Load URLs from a text file."""
     try:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            example_counter = 1
-            
-            for filename in os.listdir(payloads_dir):
-                if filename.endswith('_payload.json'):
-                    file_path = os.path.join(payloads_dir, filename)
-                    logger.info(f"Processing file: {filename}")
-                    
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as json_file:
-                            payload = json.load(json_file)
-                            items = payload['data']['items']
-                            
-                            for item in items:
-                                title = item.get('Title', '')
-                                questions = item.get('Question', '')
-                                
-                                if title and questions:
-                                    entry = (
-                                        f"\n## Example {example_counter} - Original query about: '{title}'\n"
-                                        "* Response:\n"
-                                        "{\n"
-                                        f'    "WebSearchQuery": "{title}",\n'
-                                        f'    "UserReply": "{questions}"\n'
-                                        "}\n"
-                                    )
-                                    f.write(entry)
-                                    example_counter += 1
-                    
-                    except Exception as e:
-                        logger.error(f"Error processing file {filename}: {str(e)}")
-                        continue
-        
-        logger.info(f"Successfully compiled {example_counter-1} search queries into {output_file}")
-        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            urls = [line.strip() for line in f if line.strip()]
+        logger.info(f"Načteno {len(urls)} URL adres ze souboru {file_path}")
+        return urls
     except Exception as e:
-        logger.error(f"Error creating compiled search queries file: {str(e)}")
+        logger.error(f"Chyba při načítání URL adres ze souboru {file_path}: {str(e)}")
+        return []
 
-def main(skip_scraping, compile_only=False):
+def process_url_list(url_list):
+    """Process list of URLs without date filtering."""
+    processed_count = 0
+    skipped_count = 0
+    
+    for absolute_url in url_list:
+        try:
+            logger.info(f"=== Starting processing URL: {absolute_url} ===")
+            
+            # Skip date checking, directly process URL if not already in payloads
+            if check_url_in_payloads(absolute_url):
+                skipped_count += 1
+                continue
+                
+            # Get HTML content and metadata
+            html_content, metadata = get_html_content(absolute_url)
+            if not html_content:
+                logger.warning(f"Cannot get content for URL {absolute_url}")
+                continue
+
+            # Extract path components for categorization
+            path_components = urlparse(absolute_url).path.strip('/').split('/')
+            current_path = [comp.replace('-', ' ').title() for comp in path_components if comp]
+
+            # Get category using path-based categorization
+            categories = categorize_link_claude(current_path)
+            if not categories:
+                logger.warning(f"Cannot determine category for URL {absolute_url}")
+                continue
+
+            # Process QA content for this URL
+            if ENABLE_QA_PROCESSING:
+                primary_category = categories[0]
+                logger.info(f"Starting QA processing for URL {absolute_url} with category {primary_category}")
+                process_url_content(absolute_url, html_content, primary_category, metadata)
+
+            processed_count += 1
+            logger.info(f"=== URL {absolute_url} successfully processed ===")
+            
+        except Exception as e:
+            logger.error(f"Error processing URL {absolute_url}: {str(e)}", exc_info=True)
+            continue
+            
+    logger.info(f"Total URLs processed: {processed_count}")
+    logger.info(f"Total URLs skipped: {skipped_count}")
+
+def main(skip_scraping=0, compile_only=False):
     if compile_only:
         logger.info("Running search queries compilation only")
-        if COMPILE_SEARCH_QUERIES:
-            compile_search_queries_file()
-        else:
-            logger.warning("Search queries compilation is disabled (COMPILE_SEARCH_QUERIES = False)")
         return
 
     start_time = datetime.now()
     logger.info(f"Začátek zpracování: {start_time}")
-    
-    # Přidáno počítání existujících URL
-    existing_urls = count_existing_urls()
-    logger.info(f"Počet existujících URL v payloadech: {existing_urls}")
+    logger.info(f"Zvolený zdroj dat: {'sitemap' if USE_SITEMAP else 'seznam URL'}")
 
     # Create payloads directory immediately
     payload_dir = "payloads"
@@ -1321,76 +1395,32 @@ def main(skip_scraping, compile_only=False):
         os.makedirs(payload_dir)
         logger.info(f"Vytvořen adresář pro payloady: {payload_dir}")
 
-    if UPLOAD_IMMEDIATELY:
-        logger.info("UPLOAD_IMMEDIATELY je True - přeskakuji veškeré zpracování a nahrávám existující payloady")
-        payload_files = [f for f in os.listdir(payload_dir) if f.endswith('_payload.json')]
-        if not payload_files:
-            logger.error(f"V adresáři {payload_dir} nebyly nalezeny žádné payload soubory!")
-            return
-            
-        logger.info(f"Nalezeno {len(payload_files)} payload souborů k nahrání")
-        for file in payload_files:
-            file_path = os.path.join(payload_dir, file)
-            logger.info(f"Nahrávám soubor: {file}")
-            try:
-                upload_to_voiceflow(file_path)
-            except Exception as e:
-                logger.error(f"Chyba při nahrávání souboru {file}: {str(e)}")
-        
-        logger.info("Nahrávání dokončeno")
-        return
-
-    if skip_scraping:
-        logger.info("Přeskočit scraping, načítám payloady ze souborů")
-        payloads = load_payloads_from_files()
-    else:
-        try:
-            # Initialize empty categorized_links
-            categorized_links = {}
-            
-            # Get sitemap content and process URLs
+    try:
+        if USE_SITEMAP:
+            # Sitemap processing logic
             response = requests_retry_session().get(SITEMAP_URL, timeout=REQUEST_TIMEOUT)
             sitemap_content = response.text
-            
-            # Parse sitemap XML
             sitemap_soup = parse_sitemap(sitemap_content)
             if not sitemap_soup:
                 logger.error("Nepodařilo se zpracovat sitemapu.")
                 return
-            
-            # Process URLs from sitemap and save incrementally
-            categorized_links = extract_links_from_sitemap(sitemap_soup, categorized_links)
-            
-            # Final save to ensure everything is written
-            save_payloads_to_files(categorized_links)
-            
-            # Update last processed date after successful execution
+            extract_links_from_sitemap(sitemap_soup)
             update_last_processed_date()
+        else:
+            # URL list processing logic
+            urls = load_urls_from_file(URL_LIST_FILE)
+            if not urls:
+                logger.error("Nepodařilo se načíst URL adresy ze souboru")
+                return
+            process_url_list(urls)
             
-        except Exception as e:
-            logger.error(f"Došlo k chybě při zpracování: {str(e)}", exc_info=True)
-            return
-
-    logger.info("Nahrávání dat do Voiceflow")
-    for category in categorized_links.keys():
-        filename = f"payloads/{category.lower()}_table_payload.json"
-        if os.path.exists(filename):
-            upload_to_voiceflow(filename)
-    
-    # Add compilation of search queries if enabled
-    if COMPILE_SEARCH_QUERIES:
-        compile_search_queries_file()
+    except Exception as e:
+        logger.error(f"Došlo k chybě při zpracování: {str(e)}", exc_info=True)
+        return
 
     end_time = datetime.now()
     logger.info(f"Konec zpracování: {end_time}")
     logger.info(f"Celková doba zpracování: {end_time - start_time}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
-    parser.add_argument("--skip-scraping", type=int, choices=[0, 1], default=0,
-                        help="Skip scraping and upload existing payloads (0: no, 1: yes)")
-    parser.add_argument("--compile-only", action="store_true",
-                        help="Only compile search queries from existing payloads")
-    args = parser.parse_args()
-    
-    main(skip_scraping=args.skip_scraping, compile_only=args.compile_only)
+    main()
