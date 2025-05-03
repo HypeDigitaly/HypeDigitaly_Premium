@@ -27,8 +27,37 @@ LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
 # API KEYS
 # ============================================================================
 CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
+GROQ_API_KEY = "REMOVED-GROQ-KEY" # Added Groq API Key
 JINA_AI_API_KEY = "REMOVED-JINA-KEY"
 VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
+
+# ============================================================================
+# LLM PROVIDER CONFIGURATION
+# ============================================================================
+# Define available LLM providers with their configurations
+LLM_PROVIDERS = {
+    "1": {
+        "name": "anthropic",
+        "api_key": CLAUDE_API_KEY,
+        "model": "claude-3-7-sonnet-20250219", # Default Anthropic model (Haiku)
+        "api_url": "https://api.anthropic.com/v1/messages", # Added API URL
+        # "model": "claude-3-sonnet-20240229", # Alternative
+        # "model": "claude-3-opus-20240229",  # Alternative
+    },
+    "2": {
+        "name": "groq",
+        "api_key": GROQ_API_KEY,
+        "model": "meta-llama/llama-4-maverick-17b-128e-instruct", # Default Groq model
+        "api_url": "https://api.groq.com/openai/v1/chat/completions", # Added API URL
+        # "model": "mixtral-8x7b-32768", # Alternative
+        # "model": "gemma-7b-it",     # Alternative
+    }
+    # Add more providers here if needed, assigning unique IDs (e.g., "3")
+}
+
+#!====================!
+LLM_SEQUENCE = "1,2" 
+#!====================!
 
 # ============================================================================
 # URL CONFIGURATION
@@ -133,6 +162,179 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 console_handler.setLevel(logging.INFO)
 logger.addHandler(console_handler)
+
+# ============================================================================
+# UNIFIED LLM API CALLER
+# ============================================================================
+def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7, max_retries=MAX_RETRIES, initial_retry_delay=INITIAL_RETRY_DELAY, api_call_delay=API_CALL_DELAY):
+    """
+    Calls LLM provider APIs based on the LLM_SEQUENCE, with fallback.
+
+    Args:
+        messages (list): List of message dictionaries (e.g., [{'role': 'user', 'content': '...'}]).
+                         For Groq/OpenAI, if system_prompt is used, it should be the first message.
+        system_prompt (str, optional): System prompt text. Used directly by Anthropic,
+                                       prepended to messages for Groq/OpenAI.
+        max_tokens (int): Maximum tokens to generate.
+        temperature (float): Sampling temperature.
+        max_retries (int): Maximum retry attempts for EACH provider.
+        initial_retry_delay (int): Initial delay before retrying for EACH provider.
+        api_call_delay (int): Fixed delay after a successful API call.
+
+    Returns:
+        str: The content of the LLM's response, or None if all providers in sequence fail.
+    """
+    sequence_ids = [id.strip() for id in LLM_SEQUENCE.split(',') if id.strip()]
+    if not sequence_ids:
+        logger.error("LLM_SEQUENCE je prázdná nebo neplatná.")
+        return None
+
+    original_messages = messages[:] # Copy original messages for Groq prepending
+
+    for provider_id in sequence_ids:
+        provider_config = LLM_PROVIDERS.get(provider_id)
+        if not provider_config:
+            logger.warning(f"Provider ID '{provider_id}' ze sekvence nebyl nalezen v LLM_PROVIDERS. Přeskakuji.")
+            continue
+
+        provider_name = provider_config["name"]
+        api_key = provider_config["api_key"]
+        model = provider_config["model"]
+        api_url = provider_config.get("api_url") # Get the API URL
+        current_messages = original_messages[:] # Use a copy for this provider
+        current_system_prompt = system_prompt
+
+        logger.info(f"Pokus o volání LLM API s providerem ID: {provider_id} (Název: {provider_name}, Model: {model})")
+        # Log the target URL for clarity
+        if api_url:
+            logger.info(f"Cílová URL: {api_url} (Použito přímo pro Groq, implicitně pro Anthropic SDK)")
+        else:
+            logger.warning(f"API URL není definována pro providera ID: {provider_id}")
+            # Decide if we should skip or proceed; skipping for now if URL is crucial and missing
+            if provider_name == "groq": # Groq requires explicit URL
+                 logger.error(f"Groq (ID: {provider_id}) vyžaduje 'api_url' v konfiguraci. Přeskakuji.")
+                 continue
+
+        # Prepare provider-specific parameters
+        client = None
+        if provider_name == "anthropic":
+            if not api_key:
+                logger.error(f"Chybí CLAUDE_API_KEY pro providera {provider_id}. Přeskakuji.")
+                continue
+            client = anthropic.Anthropic(api_key=api_key)
+        elif provider_name == "groq":
+            if not api_key:
+                logger.error(f"Chybí GROQ_API_KEY pro providera {provider_id}. Přeskakuji.")
+                continue
+            # Groq uses OpenAI's message format, prepend system prompt if provided
+            if current_system_prompt:
+                current_messages = [{"role": "system", "content": current_system_prompt}] + current_messages
+                current_system_prompt = None # System prompt is now part of messages
+        else:
+            logger.error(f"Neznámý typ providera '{provider_name}' pro ID {provider_id}. Přeskakuji.")
+            continue
+
+        # Inner retry loop for the current provider
+        for attempt in range(max_retries):
+            try:
+                if provider_name == "anthropic":
+                    api_params = {
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "messages": current_messages
+                    }
+                    if current_system_prompt: # Anthropic specific parameter
+                        api_params["system"] = current_system_prompt
+                    
+                    message = client.messages.create(**api_params)
+                    response_text = message.content[0].text.strip()
+                    
+                elif provider_name == "groq":
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    }
+                    payload = {
+                        "model": model,
+                        "messages": current_messages, # Use potentially modified messages
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    }
+                    
+                    # Use the configured API URL for Groq
+                    if not api_url:
+                         logger.error(f"Chybí api_url pro Groq (ID: {provider_id}) v konfiguraci.")
+                         # Raise an error or break? Let's break the inner loop for this attempt.
+                         break # Stop retrying this provider if URL is missing
+                         
+                    response = requests_retry_session().post(api_url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+                    response.raise_for_status()
+                    
+                    response_json = response.json()
+                    logger.debug(f"Groq API Response JSON (ID: {provider_id}): {json.dumps(response_json, indent=2)}")
+
+                    if response_json.get("choices") and len(response_json["choices"]) > 0:
+                        response_text = response_json["choices"][0]["message"]["content"].strip()
+                    else:
+                        logger.error(f"Groq API (ID: {provider_id}) nevrátil platné 'choices': {response_json}")
+                        raise ValueError(f"Groq API (ID: {provider_id}) did not return valid choices")
+                
+                # Success! Apply delay and return.
+                time.sleep(api_call_delay)
+                logger.info(f"LLM API volání úspěšné (Provider ID: {provider_id}, Název: {provider_name})")
+                return response_text
+
+            except anthropic.APIError as e: 
+                logger.warning(f"Chyba Anthropic API (ID: {provider_id}, pokus {attempt + 1}/{max_retries}): {type(e).__name__} - {str(e)}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Nepodařilo se zavolat Anthropic API (ID: {provider_id}) po {max_retries} pokusech. Přecházím na dalšího providera (pokud existuje).")
+                    break # Break inner loop to try next provider
+                delay = initial_retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"Čekání {delay:.2f} sekund před dalším pokusem s providerem {provider_id}.")
+                time.sleep(delay)
+                
+            except requests.exceptions.RequestException as e:
+                status_code = e.response.status_code if e.response is not None else "N/A"
+                logger.warning(f"Chyba Groq API (ID: {provider_id}, HTTP {status_code}, pokus {attempt + 1}/{max_retries}): {str(e)}")
+                should_retry = False
+                if e.response is not None and (e.response.status_code == 429 or e.response.status_code >= 500):
+                    should_retry = True
+                elif e.response is not None:
+                     logger.error(f"Groq API (ID: {provider_id}) vrátilo neočekávaný HTTP status {status_code}, neprovádí se retry pro tohoto providera.")
+                     # No retry for this provider, break inner loop
+                else: # Network error or other non-HTTP error
+                    logger.error(f"Chyba sítě nebo jiná chyba při volání Groq API (ID: {provider_id}): {str(e)}")
+                    # Potentially retry network errors
+                    should_retry = True
+                         
+                if should_retry and attempt < max_retries - 1:
+                    delay = initial_retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Čekání {delay:.2f} sekund před dalším pokusem s providerem {provider_id}.")
+                    time.sleep(delay)
+                else: # Max retries reached for this provider OR non-retryable HTTP error
+                    logger.error(f"Nepodařilo se zavolat Groq API (ID: {provider_id}) po {max_retries} pokusech nebo došlo k neopravitelné chybě. Přecházím na dalšího providera (pokud existuje).")
+                    break # Break inner loop to try next provider
+                    
+            except Exception as e:
+                logger.error(f"Neočekávaná chyba při volání LLM API (ID: {provider_id}, Název: {provider_name}, pokus {attempt + 1}/{max_retries}): {type(e).__name__} - {str(e)}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Nepodařilo se provést volání LLM API (ID: {provider_id}) po {max_retries} pokusech kvůli neočekávané chybě. Přecházím na dalšího providera (pokud existuje).")
+                    break # Break inner loop to try next provider
+                delay = initial_retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"Čekání {delay:.2f} sekund před dalším pokusem s providerem {provider_id}.")
+                time.sleep(delay)
+        
+        # If the inner loop finished without returning (i.e., all retries failed for this provider), 
+        # the outer loop will continue to the next provider_id.
+
+    # If the outer loop finishes, all providers in the sequence failed.
+    logger.error(f"Všichni LLM provideři v sekvenci ({LLM_SEQUENCE}) selhali.")
+    return None
+
+# ============================================================================
+# HTML CONTENT & PARSING
+# ============================================================================
 
 def get_html_content(url, for_qa=False):
     logger.info(f"Získávání HTML obsahu z URL: {url}")
@@ -277,11 +479,11 @@ def parse_menu(html_content):
 
     return main_menu
 
-def categorize_link_claude(path):
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+def categorize_link(path):
+    """Categorizes a link path using the configured LLM provider."""
     path_string = ' > '.join(path)
     
-    prompt = f"""Dána je následující cesta menu z webových stránek města Teplice:
+    prompt = f"""Dána je následující cesta menu z webových stránek Královéhradeckého kraje:
 
 {path_string}
 
@@ -298,7 +500,7 @@ DŮLEŽITÉ INSTRUKCE:
    b) Pokud není nalezena, hledejte související témata
    c) Pokud stále není jasné, použijte nejobecnější související kategorii
 5. Použijte následující vodítka pro kategorizaci:
-   - Kontakt: 
+   - Kontakt:
      * lidé, osoby, krajský/městský úřad, organizační struktura
      * kontaktní informace, komise, výbory, zastupitelstvo, radní, zaměstnanci
      * všechna sportoviště, aquacentra, sportovní arény, sportovní zařízení
@@ -314,40 +516,35 @@ DŮLEŽITÉ INSTRUKCE:
 Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co nejpřesnější zařazení/zvolení dané kategorie ze vstupního seznamu. MUSÍTE vybrat jednu kategorii, i když si nejste zcela jisti - vyberte tu nejvíce odpovídající.
 """
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            message = client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=50,
-                temperature=0,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            category = message.content[0].text.strip()
-            
-            if category not in CATEGORIES and category != "Nezařazeno":
-                logger.warning(f"Claude vrátil neočekávanou kategorii: {category}. Použije se 'Nezařazeno'.")
-                return "Nezařazeno"
-            
-            # Apply fixed delay after successful API call
-            time.sleep(API_CALL_DELAY)
-            
-            return category
+    messages = [{"role": "user", "content": prompt}]
+    
+    # Note: system_prompt is not used here, messages contain the full instruction
+    category = call_llm_api(messages=messages, max_tokens=50, temperature=0)
+
+    if category is None: # Handle API call failure
+        logger.error(f"Nepodařilo se získat kategorii pro cestu: {path_string} po všech pokusech.")
+        return "Nezařazeno"
         
-        except (InternalServerError, RateLimitError) as e:
-            if attempt == MAX_RETRIES - 1:
-                logger.error(f"Nepodařilo se získat kategorii po {MAX_RETRIES} pokusech: {str(e)}")
-                return "Nezařazeno"
+    category = category.strip()
+    
+    if category not in CATEGORIES:
+        # Basic check if the response contains one of the categories maybe with extra text
+        found_category = None
+        for valid_cat in CATEGORIES:
+            if valid_cat in category:
+                found_category = valid_cat
+                logger.warning(f"LLM vrátil kategorii s extra textem: '{category}'. Extrahovaná platná kategorie: '{found_category}'.")
+                break
+        if found_category:
+            category = found_category
+        else:
+            logger.warning(f"LLM vrátil neočekávanou nebo neplatnou kategorii: '{category}'. Použije se 'Nezařazeno'.")
+            return "Nezařazeno"
             
-            # Calculate exponential backoff delay
-            delay = INITIAL_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
-            logger.warning(f"Chyba při kategorizaci, pokus {attempt + 1}/{MAX_RETRIES}. Čekání {delay:.2f} sekund před dalším pokusem.")
-            time.sleep(delay)
+    return category
 
 def generate_rag_question(path):
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    """Generates RAG questions using the configured LLM provider."""
     path_string = ' > '.join(path)
     
     prompt = f"""Based on the following absolute path from a website sitemap:
@@ -367,32 +564,17 @@ Output: "Kde najdu aktuality, články a důležité informace ke kotlíkovým d
 
 Return ONLY the question pair without any additional text or formatting."""
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            message = client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=200,
-                temperature=0,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            question = message.content[0].text.strip()
-            
-            # Apply fixed delay after successful API call
-            time.sleep(API_CALL_DELAY)
-            
-            return question
-            
-        except (InternalServerError, RateLimitError) as e:
-            if attempt == MAX_RETRIES - 1:
-                logger.error(f"Failed to generate RAG question after {MAX_RETRIES} attempts: {str(e)}")
-                return "Default question | Default question in English"
-            
-            delay = INITIAL_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
-            logger.warning(f"Error generating RAG question, attempt {attempt + 1}/{MAX_RETRIES}. Waiting {delay:.2f} seconds before retry.")
-            time.sleep(delay)
+    messages = [{"role": "user", "content": prompt}]
+    
+    question = call_llm_api(messages=messages, max_tokens=200, temperature=0)
+    
+    if question is None:
+        logger.error(f"Nepodařilo se vygenerovat RAG otázku pro cestu: {path_string} po všech pokusech.")
+        # Provide a generic fallback to avoid breaking downstream processes
+        fallback_title = path[-1] if path else "the page"
+        return f"Kde najdu informace o {fallback_title}? | Where can I find information about {fallback_title}?"
+
+    return question.strip()
 
 def extract_links(menu_item, path=[], categorized_links={}, url_last_modified_map={}, last_run_timestamp=None, process_missing=False):
     """
@@ -444,7 +626,7 @@ def extract_links(menu_item, path=[], categorized_links={}, url_last_modified_ma
                 logger.info(f"Proceeding with full processing for URL: {absolute_url}")
                 try:
                     # 3. Categorize URL
-                    category = categorize_link_claude(current_path)
+                    category = categorize_link(current_path)
                     logger.info(f"Assigned category: {category} based on path")
 
                     # 4. Generate RAG question
@@ -482,6 +664,10 @@ def extract_links(menu_item, path=[], categorized_links={}, url_last_modified_ma
                         # Append new entry
                         logger.info(f"Adding new entry for URL: {absolute_url} to category {category}")
                         categorized_links[category].append(link_data)
+
+                    # --- Save the updated category table payload incrementally --- 
+                    save_payloads_to_files(categorized_links, category_to_save=category)
+                    # ------------------------------------------------------------
 
                     # 8. Q/A Processing - only if enabled and not a sitemap
                     if ENABLE_QA_PROCESSING:
@@ -526,23 +712,51 @@ def extract_links(menu_item, path=[], categorized_links={}, url_last_modified_ma
     
     return categorized_links
 
-def save_payloads_to_files(categorized_links):
+def save_payloads_to_files(categorized_links, category_to_save=None):
+    """Saves categorized links to payload files.
+
+    Args:
+        categorized_links (dict): Dictionary containing the categorized links.
+        category_to_save (str, optional): If specified, only save the payload
+                                          for this specific category. Defaults to None.
+    """
     output_dir = "payloads"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    for category, links in categorized_links.items():
+    categories_to_process = {} 
+    if category_to_save:
+        if category_to_save in categorized_links:
+            categories_to_process = {category_to_save: categorized_links[category_to_save]}
+            logger.info(f"Saving incremental table payload for category: {category_to_save}")
+        else:
+            logger.warning(f"Category '{category_to_save}' not found in categorized_links. Cannot save incremental table payload.")
+            return # Do nothing if the specified category doesn't exist
+    else:
+        categories_to_process = categorized_links
+        logger.info("Saving final table payloads for all categories.")
+
+    for category, links in categories_to_process.items():
+        if not isinstance(links, list):
+            logger.error(f"Data for category '{category}' is not a list ({type(links)}). Skipping save for this category.")
+            continue
+            
         table_name = f"{category.lower()}_table"
-        filename = f"{output_dir}/{table_name}_payload.json"
+        filename = f"{output_dir}/{table_name}.json"
         
-        # Add Category, Question, and Navigation to each item
-        updated_links = [{
-            "Title": link["Title"],
-            "URL": link["URL"],
-            "Category": category,
-            "Question": link.get("Question", "Default question | Default question in English"),
-            "Navigation": link.get("Navigation", "")  # Add the Navigation field
-        } for link in links]
+        # Ensure each item has the required fields
+        updated_links = []
+        for link in links:
+            if not isinstance(link, dict):
+                logger.warning(f"Skipping non-dictionary item in category '{category}': {link}")
+                continue
+            updated_links.append({
+                "Title": link.get("Title", ""), # Provide default empty string
+                "URL": link.get("URL", ""),     # Provide default empty string
+                "Category": category,
+                "Question": link.get("Question", "Default question | Default question in English"),
+                "Navigation": link.get("Navigation", "")  # Add the Navigation field
+            })
         
         payload = {
             "data": {
@@ -551,12 +765,18 @@ def save_payloads_to_files(categorized_links):
                     "metadataFields": ["Category"]
                 },
                 "name": table_name,
-                "items": updated_links
+                "items": updated_links # Use the validated/updated list
             }
         }
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        logger.info(f"Updated payload for table '{table_name}' in file: {filename}")
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            if category_to_save:
+                 logger.info(f"Incrementally updated table payload for '{category}' in file: {filename}")
+            else:
+                 logger.info(f"Saved final table payload for '{category}' in file: {filename}")
+        except Exception as e:
+             logger.error(f"Error writing table payload file {filename}: {str(e)}")
 
 def load_payloads_from_files():
     """Loads existing categorized link data from payload JSON files."""
@@ -570,7 +790,8 @@ def load_payloads_from_files():
         
     for filename in os.listdir(payloads_dir):
         # Only process the category table payloads, not the QA ones
-        if filename.endswith('_table_payload.json'):
+        # Updated suffix check
+        if filename.endswith('_table.json'):
             file_path = os.path.join(payloads_dir, filename)
             logger.debug(f"Attempting to load file: {filename}")
             try:
@@ -583,8 +804,8 @@ def load_payloads_from_files():
                     category = None
                     
                     # Try to determine category from filename or metadata
-                    # Assuming filename format like "category_table_payload.json"
-                    category_from_filename = filename.replace('_table_payload.json', '').capitalize() # Simple extraction
+                    # Assuming filename format like "category_table.json"
+                    category_from_filename = filename.replace('_table.json', '').capitalize() # Simple extraction
                     
                     # Check if items exist and have a Category field
                     if items and isinstance(items, list) and items[0].get('Category'):
@@ -666,18 +887,34 @@ def truncate_content(content, max_tokens=199000):
     return content
 
 def save_payload_to_file(url, content, section, metadata):
-    title = metadata.get("title", "")
-    if not title:
-        title = url.replace("/", "_").replace(":", "_")
+    # Ensure the output directory exists
+    output_dir = "payloads"
+    os.makedirs(output_dir, exist_ok=True)
     
-    title = remove_accents(title)
-    title = re.sub(r"[<>:\"/\\|?*]", "_", title)
-    title = re.sub(r"\s+", "_", title)
-    title = re.sub(r"_+", "_", title)
-    title = title.strip("_")
-    title = title[:200]
+    # Generate a stable URL-based identifier for consistent filenames
+    # Parse the URL to extract a stable path component
+    from urllib.parse import urlparse
     
-    filename = f"payloads/{section.lower()}_{title}_payload.json"
+    parsed_url = urlparse(url)
+    url_path = parsed_url.path.strip('/')
+    
+    # If path is empty (homepage), use 'home'
+    if not url_path:
+        url_path = 'home'
+    
+    # Create a stable filename based on the URL path
+    # Reverted: Remove the category stripping logic, use the full path
+    url_based_name = url_path.replace('/', '_')
+
+    # Sanitize the final base name
+    url_based_name = remove_accents(url_based_name)
+    url_based_name = re.sub(r"[<>:\"/\\|?*]", "_", url_based_name)
+    url_based_name = re.sub(r"\s+", "_", url_based_name)
+    url_based_name = re.sub(r"_+", "_", url_based_name)
+    url_based_name = url_based_name.strip("_").lower()  # Ensure lowercase for consistency
+    url_based_name = url_based_name[:200]
+    
+    filename = f"payloads/{section.lower()}_{url_based_name}.json"
     
     # Přidání Category ke každému Q/A páru
     for item in content:
@@ -689,7 +926,7 @@ def save_payload_to_file(url, content, section, metadata):
                 "searchableFields": ["Question", "Answer"],
                 "metadataFields": ["Category"]
             },
-            "name": f"{section.lower()}_{title}",
+            "name": f"{section.lower()}_{url_based_name}",
             "items": content
         }
     }
@@ -732,8 +969,7 @@ def upload_to_voiceflow(filename):
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
 
 def convert_to_qa(content, title, category):
-    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-    
+    """Converts content to Q/A pairs using the configured LLM provider."""
     system_prompt = f"""Jste precizní právní poradce pro detailní extrakci informací. Striktně formátujete své odpovědi ve validním JSON formátu. Disponujete následujícími schopnostmi a dodržujete následující omezení:
 
 EXTRAKČNÍ SCHOPNOSTI:
@@ -901,14 +1137,14 @@ Proveďte VYČERPÁVAJÍCÍ extrakci dat z VÝŠE UVEDENÉHO ZDROJOVÉHO TEXTU a
 # PRAVIDLA VALIDNÍHO JSON:
 1. TECHNICKÁ PRAVIDLA JSON:
    - ŽÁDNÉ komentáře ani popisky před nebo za JSON strukturou
-   - ŽÁDNÉ formátování nebo vysvětlování před nebo po JSON
+   - ŽÁDNÉ formátování nebo vysvětlení před nebo po JSON
    - ŽÁDNÉ jednořádkové komentáře (// komentář)
    - ŽÁDNÉ víceřádkové komentáře (/* komentář */)
    - ŽÁDNÉ trailing commas (poslední položka nesmí mít čárku)
    - ŽÁDNÉ nezaobalené řetězce, vše musí být v uvozovkách
    - ŽÁDNÉ single quotes ('), použijte pouze double quotes (")
    - ŽÁDNÉ speciální znaky jako \\t, \\n mimo řetězce
-   - Escapování uvozovek uvnitř řetězce pomocí \\\\" - POZOR na escapování v Markdown odkazech v poli "Answer"!
+   - Escapování uvozovek uvnitř řetězce pomocí \\\" - POZOR na escapování v Markdown odkazech v poli "Answer"!
    - Speciální znaky v řetězcích musí být správně escapovány
 
 2. FORMÁT VÝSTUPU:
@@ -992,19 +1228,15 @@ DÉLKA ODPOVĚDI NENÍ OMEZENA! Pro tabulky kontaktních údajů je ABSOLUTNÍ P
 - ŽÁDNÉ vysvětlování nebo shrnutí před nebo po JSON
 """
 
+    messages = [{"role": "user", "content": user_prompt}]
+    # Pass system_prompt separately, call_llm_api will handle provider difference
+    response_text = call_llm_api(messages=messages, system_prompt=system_prompt, max_tokens=8192, temperature=0)
+    
+    if response_text is None:
+        logger.error(f"Nepodařilo se získat Q/A páry pro '{title}' po všech pokusech.")
+        return None # Indicate failure
+    
     try:
-        message = client.messages.create(
-            model="claude-3-7-sonnet-20250219",
-            max_tokens=8192,
-            temperature=0,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ]
-        )
-        
-        response_text = message.content[0].text.strip()
-        
         # Vylepšené zpracování JSON odpovědi
         try:
             # Odstranění možných markdown code block tagů
@@ -1725,21 +1957,30 @@ def is_url_already_processed(url, category, title):
     Args:
         url (str): The URL to check.
         category (str): The category of the URL.
-        title (str): The title used in filename generation.
+        title (str): The title used in filename generation (not used anymore).
         
     Returns:
         bool: True if the URL has already been processed, False otherwise.
     """
-    # Clean up the title for filename purposes (same logic as in save_payload_to_file)
-    title = remove_accents(title)
-    title = re.sub(r"[<>:\"/\\|?*]", "_", title)
-    title = re.sub(r"\s+", "_", title)
-    title = re.sub(r"_+", "_", title)
-    title = title.strip("_")
-    title = title[:MAX_FILENAME_LENGTH]
+    # Use the same URL-based naming logic as save_payload_to_file
+    from urllib.parse import urlparse
+    
+    parsed_url = urlparse(url)
+    url_path = parsed_url.path.strip('/')
+    
+    if not url_path:
+        url_path = 'home'
+    
+    url_based_name = url_path.replace('/', '_')
+    url_based_name = remove_accents(url_based_name)
+    url_based_name = re.sub(r"[<>:\"/\\|?*]", "_", url_based_name)
+    url_based_name = re.sub(r"\s+", "_", url_based_name)
+    url_based_name = re.sub(r"_+", "_", url_based_name)
+    url_based_name = url_based_name.strip("_").lower()  # Ensure lowercase for consistency
+    url_based_name = url_based_name[:MAX_FILENAME_LENGTH]
     
     # Check for the Q/A extraction file
-    qa_filename = f"payloads/{category.lower()}_{title}_payload.json"
+    qa_filename = f"payloads/{url_based_name}.json"
     
     return os.path.exists(qa_filename)
 
@@ -1781,7 +2022,7 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
             path = url_parts if url_parts and url_parts[0] else ["Home"]
             
             # 5. Categorize URL
-            category = categorize_link_claude(path)
+            category = categorize_link(path)
             logger.info(f"Assigned category: {category} based on path")
             
             # 6. Generate RAG question
@@ -1826,6 +2067,10 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
                 logger.info(f"Adding new entry for URL: {url} to category {category}")
                 categorized_links[category].append(link_data)
                 
+            # --- Save the updated category table payload incrementally --- 
+            save_payloads_to_files(categorized_links, category_to_save=category)
+            # ------------------------------------------------------------
+
             # 8. Q/A Processing - only if enabled
             if ENABLE_QA_PROCESSING:
                 # Check domain and skip if not exactly "www.khk.cz" or "khk.cz"
