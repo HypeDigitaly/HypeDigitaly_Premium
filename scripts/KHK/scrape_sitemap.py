@@ -71,9 +71,7 @@ XML_SITEMAP_URL = "https://www.khk.cz/sitemap.xml"
 # ============================================================================
 # When this list is not empty, the script will only process these URLs instead of scraping the sitemap
 # Example: ["https://www.khk.cz/page1", "https://www.khk.cz/page2"]
-CUSTOM_URLS = [
-    "https://khk.cz/urad/kontakty-telefonni-seznam"
-    ]
+CUSTOM_URLS = []
 
 # ============================================================================
 # API CALL SETTINGS
@@ -1013,7 +1011,7 @@ def convert_to_qa(content, title, category):
     qa_tool = [
         {
             "name": "extract_qa_pairs",
-            "description": "Extracts Question/Answer pairs from the provided text and formats them as a valid JSON object according to the specified schema. The only valid response is the 'qa_pairs' array. The key 'qa_pairs' MUST be ALWAYS present in the response.",
+            "description": "Extracts Question/Answer pairs from the provided text and formats them as a valid JSON object according to the specified schema.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1040,49 +1038,56 @@ def convert_to_qa(content, title, category):
     tool_choice = {"type": "tool", "name": "extract_qa_pairs"}
     
     # Revised system prompt focusing on extraction principles
-    system_prompt = f"""Jste precizní asistent pro extrakci informací. Vaším úkolem je analyzovat poskytnutý text a extrahovat z něj co nejvíce faktických informací ve formě párů Otázka/Odpověď. Použijte k tomu POUZE poskytnutý nástroj `extract_qa_pairs`. 
+    # Improved System Prompt
+    system_prompt = f"""# Tvá role: Jste ultra-precizní asistent pro extrakci informací. Vaším úkolem je analyzovat poskytnutý text a extrahovat z něj NAPROSTO VŠECHNY faktické informace ve formě párů Otázka/Odpověď. Použijte k tomu POUZE poskytnutý nástroj `extract_qa_pairs`. Klíčem je MAXIMÁLNÍ ÚPLNOST a DETAILNOST v poli "Answer".
 
-PRINCIPY EXTRAKCE:
-1. PŘESNOST: Extrahujte POUZE informace, které jsou explicitně uvedeny v textu. NIC si nedomýšlejte, neinterpretujte ani nepřidávejte.
-2. ÚPLNOST: Snažte se extrahovat VŠECHNY smysluplné informace. To zahrnuje:
-    - Všechny kontaktní údaje (jména, funkce, emaily, telefony, adresy, kanceláře).
-    - Všechny seznamy osob (členové, zaměstnanci, výbory atd.).
-    - Všechny číselné údaje (částky, procenta, počty, rozměry).
-    - Všechny časové údaje (data, termíny, lhůty, otevírací doby).
-    - Všechny odkazy (URL na stránky, dokumenty).
-    - Všechny odkazy na obrázky.
-    - Všechny názvy (organizace, místa, dokumenty).
-    - Všechny procedurální informace (postupy, kroky, návody).
-    - Všechny podmínky a požadavky.
-3. KONKRÉTNOST: Odpovědi musí být konkrétní a faktické, přímo vycházející ze zdrojového textu.
-4. KONTEXT: Zachovejte původní kontext extrahovaných informací.
-5. FORMÁTOVÁNÍ V ODPOVĚDI: V poli "Answer" VŽDY formátujte odkazy pomocí Markdown: `[Popisek](URL)` a obrázky jako `![Popisek](URL)`. Popisek by měl být co nejvýstižnější. Ostatní text v odpovědi by neměl obsahovat Markdown nebo HTML. ODPOVĚĎ MUSÍ BÝT V ČEŠTINĚ.
-6. KONTAKTY A SEZNAMY: Věnujte ZVLÁŠTNÍ pozornost extrakci kompletních seznamů osob (členové rady, zaměstnanci atd.) a jejich kontaktních údajů. Vytvořte komplexní Q/A pár pro každý takový seznam, ideálně s otázkou typu "Kdo jsou všichni členové X a jaké jsou jejich kontakty?" a odpovědí obsahující CELKOVÝ POČET a KOMPLETNÍ VÝČET všech osob a jejich detailů (včetně VŠECH telefonů, emailů atd.). Pro tyto seznamy IGNORUJTE délková omezení.
-7. OTÁZKY: Formulujte jasné otázky, které přímo vedou k extrahované odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu: `Hlavní česká otázka? | Další česká varianta? | English primary question? | Another English variation?`
-8. NÁSTROJ: Pro záznam výsledků MUSÍTE použít nástroj `extract_qa_pairs`. Neodpovídejte přímo textem.
+## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer"), které obsahují **každý detail** z textu. Odpovědi NESMÍ být stručné nebo sumarizované.
 
-Cílové téma textu je: '{title}'.""" # Removed Czech language constraint here as questions will be bilingual
+## PRINCIPY EXTRAKCE:
+1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v textu. NIC si nedomýšlejte, neinterpretujte, nepřidávejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu), včetně všech detailů. **Nezkracujte ani nesumarizujte.**
+2.  **MAXIMÁLNÍ ÚPLNOST:** Extrahujte **ABSOLUTNĚ VŠECHNY** smysluplné informace **BEZ VYNECHÁNÍ**. Buďte **EXTRÉMNĚ DŮKLADNÍ**. To zahrnuje, ale není omezeno na:
+    *   **Všechny** kontaktní údaje (jména, příjmení, tituly, funkce, oddělení, emaily, VŠECHNY telefony – mobilní i pevné, fax, adresy kanceláří, čísla dveří, poštovní adresy).
+    *   **Kompletní** seznamy osob (členové rady, zastupitelé, zaměstnanci, výbory, komise atd.) – **každá osoba**, **každý detail**.
+    *   **Všechny** číselné údaje (částky, procenta, počty, rozměry, kapacity).
+    *   **Všechny** časové údaje (data, celé datumy, časy, termíny, lhůty, kompletní otevírací/úřední hodiny).
+    *   **Všechny** odkazy (URL na stránky, dokumenty ke stažení).
+    *   **Všechny** odkazy na obrázky nebo názvy souborů.
+    *   **Všechny** názvy (organizace, odbory, instituce, místa, dokumenty, programy, projekty).
+    *   **Všechny** procedurální informace (přesné postupy, kroky, návody, požadavky).
+    *   **Všechny** podmínky, kritéria a požadavky.
+3.  **KONKRÉTNOST:** Odpovědi musí být konkrétní a faktické, **přímo citující** zdrojový text.
+4.  **KONTEXT:** Zachovejte původní kontext extrahovaných informací. Neizolujte data bez jejich významu.
+5.  **FORMÁTOVÁNÍ V ODPOVĚDI:**
+    *   V poli "Answer" formátujte odkazy pomocí Markdown: `[Popisek](URL)` a obrázky jako `![Popisek](URL)`. Popisek by měl být co nejvýstižnější (např. název dokumentu, jméno osoby).
+    *   **NEJDŮLEŽITĚJŠÍ:** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje, obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Prioritou je absolutní úplnost. Odpověď MUSÍ být v ČEŠTINĚ.
+6.  **KONTAKTY A SEZNAMY (!!!KLÍČOVÉ!!!):**
+    *   Věnujte **NEJVYŠŠÍ POZORNOST** extrakci **KOMPLETNÍCH, NEZKRÁCENÝCH** seznamů osob (např. členové rady, zastupitelstva, **zaměstnanci odborů**, členové komisí atd.) a **VŠECH** jejich kontaktních údajů uvedených v textu.
+    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců zmíněných v seznamu, spolu se **VŠEMI** jejich detaily (tituly PŘED i ZA jménem, plná funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo uvedené u osoby, **KAŽDÝ** email, číslo kanceláře, adresa atd.), přesně jak je to v textu.
+    *   **NEVYNECHÁVEJTE ŽÁDNÝ DETAIL U ŽÁDNÉ OSOBY!** I když se informace opakují.
+    *   Pro tyto seznamy **IGNORUJTE JAKÉKOLI VNÍMANÉ OMEZENÍ DÉLKY ODPOVĚDI**. Cílem je **100% ÚPLNOST** detailů pro každou osobu v seznamu.
+    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro celý seznam (např. Otázka: "Kdo jsou všichni členové Rady Královéhradeckého kraje a jaké jsou jejich kompletní kontaktní údaje?" a Odpověď obsahující **celý, nezměněný výpis** všech členů a jejich detailů z textu). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé členy seznamu.
+7.  **OTÁZKY:** Formulujte jasné otázky, které přímo vedou k extrahované **detailní** odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu: `Hlavní česká otázka? | Další česká varianta? | Detailní česká varianta? | English primary question? | Detailed English variation?`
+
+## POSTUP EXTRAKCE STEP-BY-STEP:
+1. Pečlivě analyzuj "ZDROJOVÝ TEXT K ANALÝZE" s cílem extrahovat **MAXIMUM** informativních Q/A párů.
+2. Identifikuj **VŠECHNY** klíčové informace, fakta, detaily, kontakty, seznamy, odkazy atd. **NIC NEPŘEHLÉDNI.**
+3. Pro každou identifikovanou informaci (nebo ucelený blok informací jako seznam) vytvořte pár Otázka/Odpověď.
+4. Dbejte na **ABSOLUTNÍ PŘESNOST A MAXIMÁLNÍ ÚPLNOST** extrakce. **NENECHÁVEJTE ŽÁDNÝ RELEVANTNÍ DETAIL** pozadu v poli "Answer".
+5. V odpovědích správně formátujte odkazy a obrázky pomocí Markdown. Jinak zachovejte text co nejblíže originálu.
+6. Vytvořte **VYČERPÁVAJÍCÍ** Q/A páry pro všechny seznamy osob a kontaktů, zachycující **každý jednotlivý detail**.
+
+## Cílové téma textu je: '{title}'. Zajistěte, aby odpovědi byly co nejkompletnější a nejpodrobnější."""
 
     # Revised user prompt focusing on the task and instructing tool use
+    # Improved User Prompt
     user_prompt = f"""# ZDROJOVÝ TEXT K ANALÝZE:
 
 ```
 {content}
 ```
 
-# VÁŠ ÚKOL: 
-Analyzujte výše uvedený text a extrahujte z něj maximum informativních Q/A párů. Dodržujte striktně principy extrakce uvedené v system promptu.
-
-# INSTRUKCE:
-1. Pečlivě si projděte celý text.
-2. Identifikujte všechny klíčové informace, fakta, detaily, kontakty, seznamy, odkazy atd.
-3. Pro každou identifikovanou informaci vytvořte pár Otázka/Odpověď.
-4. Dbejte na přesnost a úplnost extrakce.
-5. V odpovědích správně formátujte odkazy a obrázky pomocí Markdown.
-6. Vytvořte vyčerpávající Q/A páry pro všechny seznamy osob a kontaktů (pokud existují).
-7. Zaznamenejte VŠECHNY nalezené Q/A páry pomocí nástroje `extract_qa_pairs`.
-
-Nyní použijte nástroj `extract_qa_pairs` k zaznamenání výsledků.
+# TVŮJ AKTUÁLNÍ ÚKOL: **NYNÍ POUŽIJ NÁSTROJ `extract_qa_pairs`** pro extrakci Q/A párů ze "ZDROJOVÝ TEXT K ANALÝZE".
+**DŮRAZ:** Zaměř se na vytvoření **maximálně vyčerpávajících a detailních odpovědí ('Answer')**, jak je specifikováno v systémových instrukcích, zejména pro kontaktní informace a seznamy. **NEZKRACUJ** odpovědi.
 """
 
     messages = [{"role": "user", "content": user_prompt}]
