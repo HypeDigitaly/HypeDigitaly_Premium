@@ -72,7 +72,7 @@ XML_SITEMAP_URL = "https://www.khk.cz/sitemap.xml"
 # When this list is not empty, the script will only process these URLs instead of scraping the sitemap
 # Example: ["https://www.khk.cz/page1", "https://www.khk.cz/page2"]
 CUSTOM_URLS = [
-    
+    "https://khk.cz/urad/kontakty-telefonni-seznam"
     ]
 
 # ============================================================================
@@ -166,7 +166,7 @@ logger.addHandler(console_handler)
 # ============================================================================
 # UNIFIED LLM API CALLER
 # ============================================================================
-def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7, max_retries=MAX_RETRIES, initial_retry_delay=INITIAL_RETRY_DELAY, api_call_delay=API_CALL_DELAY):
+def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7, max_retries=MAX_RETRIES, initial_retry_delay=INITIAL_RETRY_DELAY, api_call_delay=API_CALL_DELAY, tools=None, tool_choice=None): # Added tools and tool_choice
     """
     Calls LLM provider APIs based on the LLM_SEQUENCE, with fallback.
 
@@ -180,9 +180,11 @@ def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7,
         max_retries (int): Maximum retry attempts for EACH provider.
         initial_retry_delay (int): Initial delay before retrying for EACH provider.
         api_call_delay (int): Fixed delay after a successful API call.
+        tools (list, optional): A list of tools the model can use (Anthropic specific).
+        tool_choice (dict, optional): Controls how the model uses tools (Anthropic specific).
 
     Returns:
-        str: The content of the LLM's response, or None if all providers in sequence fail.
+        str or dict: The content of the LLM's response (string), or the tool input dictionary if a tool was used by Anthropic. Returns None if all providers fail.
     """
     sequence_ids = [id.strip() for id in LLM_SEQUENCE.split(',') if id.strip()]
     if not sequence_ids:
@@ -246,10 +248,35 @@ def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7,
                     }
                     if current_system_prompt: # Anthropic specific parameter
                         api_params["system"] = current_system_prompt
-                    
+                    # Add tools and tool_choice if provided for Anthropic
+                    if tools:
+                        api_params["tools"] = tools
+                    if tool_choice:
+                        api_params["tool_choice"] = tool_choice
+
                     message = client.messages.create(**api_params)
-                    response_text = message.content[0].text.strip()
+                    logger.debug(f"Anthropic API Response object (ID: {provider_id}): {message}") # Log the full response object
+
+                    # Check for tool use in the response
+                    response_text = None
+                    tool_used = False
+                    if message.content and isinstance(message.content, list):
+                        for content_block in message.content:
+                             if content_block.type == "tool_use":
+                                 logger.info(f"Anthropic model (ID: {provider_id}) used tool: {content_block.name}")
+                                 response_text = content_block.input # Return the dictionary input to the tool
+                                 tool_used = True
+                                 break # Assume only one tool use for now
                     
+                    if not tool_used:
+                        # Default text extraction if no tool was used or content is different
+                        if message.content and isinstance(message.content, list) and message.content[0].type == "text":
+                             response_text = message.content[0].text.strip()
+                        else:
+                             logger.error(f"Anthropic API (ID: {provider_id}) response format unexpected or text content missing.")
+                             # Consider raising an error or returning None? Let's log and continue retrying for now.
+                             raise ValueError("Unexpected Anthropic response format or missing text content")
+
                 elif provider_name == "groq":
                     headers = {
                         "Authorization": f"Bearer {api_key}",
@@ -262,6 +289,11 @@ def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7,
                         "temperature": temperature,
                     }
                     
+                    # Note: Groq API (OpenAI compatible) might support tools differently or not at all.
+                    # This implementation currently focuses on Anthropic tool use. Groq calls remain unchanged.
+                    if tools or tool_choice:
+                        logger.warning(f"Parametry 'tools' nebo 'tool_choice' byly poskytnuty, ale Groq (ID: {provider_id}) je nemusí podporovat v tomto formátu. Ignoruji.")
+
                     # Use the configured API URL for Groq
                     if not api_url:
                          logger.error(f"Chybí api_url pro Groq (ID: {provider_id}) v konfiguraci.")
@@ -287,6 +319,12 @@ def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7,
 
             except anthropic.APIError as e: 
                 logger.warning(f"Chyba Anthropic API (ID: {provider_id}, pokus {attempt + 1}/{max_retries}): {type(e).__name__} - {str(e)}")
+                # Specific handling for potential tool use errors (though usually caught by general APIError)
+                if "tool_choice" in str(e):
+                     logger.error(f"Chyba související s tool_choice u Anthropic (ID: {provider_id}): {str(e)}. Zkontrolujte definici nástroje a tool_choice.")
+                     # Break inner loop for tool configuration errors
+                     break
+
                 if attempt == max_retries - 1:
                     logger.error(f"Nepodařilo se zavolat Anthropic API (ID: {provider_id}) po {max_retries} pokusech. Přecházím na dalšího providera (pokud existuje).")
                     break # Break inner loop to try next provider
@@ -969,342 +1007,197 @@ def upload_to_voiceflow(filename):
         logger.error(f"Chyba při nahrávání souboru '{filename}': {response.text}")
 
 def convert_to_qa(content, title, category):
-    """Converts content to Q/A pairs using the configured LLM provider."""
-    system_prompt = f"""Jste precizní právní poradce pro detailní extrakci informací. Striktně formátujete své odpovědi ve validním JSON formátu. Disponujete následujícími schopnostmi a dodržujete následující omezení:
+    """Converts content to Q/A pairs using the configured LLM provider, forcing structured JSON output for Anthropic."""
+    
+    # Define the tool schema for structured Q/A extraction
+    qa_tool = [
+        {
+            "name": "extract_qa_pairs",
+            "description": "Extracts Question/Answer pairs from the provided text and formats them as a valid JSON object according to the specified schema. The only valid response is the 'qa_pairs' array. The key 'qa_pairs' MUST be ALWAYS present in the response.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "qa_pairs": {
+                        "type": "array",
+                        "description": "An array of Question/Answer objects extracted from the text. This is of utmost importance and must be ALWAYS present no matter what. Presence of this array is life or death scenario.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "Question": {"type": "string", "description": "The question formulated from the text content, including multiple variations separated by ' | '."},
+                                "Answer": {"type": "string", "description": "The answer extracted verbatim from the text, including any relevant Markdown formatting for links and images."}, 
+                                "Category": {"type": "string", "description": "The category assigned to this Q/A pair."}
+                            },
+                            "required": ["Question", "Answer", "Category"]
+                        }
+                    }
+                },
+                "required": ["qa_pairs"]
+            }
+        }
+    ]
+    
+    # Force the model to use the defined tool
+    tool_choice = {"type": "tool", "name": "extract_qa_pairs"}
+    
+    # Revised system prompt focusing on extraction principles
+    system_prompt = f"""Jste precizní asistent pro extrakci informací. Vaším úkolem je analyzovat poskytnutý text a extrahovat z něj co nejvíce faktických informací ve formě párů Otázka/Odpověď. Použijte k tomu POUZE poskytnutý nástroj `extract_qa_pairs`. 
 
-EXTRAKČNÍ SCHOPNOSTI:
-1. Hloubková analýza textu pro nalezení všech informačních bodů
-2. Identifikace vzájemných souvislostí mezi informacemi
-3. Rozpoznávání různých datových typů a formátů
-4. Schopnost formulovat různé perspektivy na stejná data
-5. Expertní extrakce strukturovaných dat z tabulek
-6. Přesná identifikace všech kontaktních údajů v tabulkách i běžném textu
+PRINCIPY EXTRAKCE:
+1. PŘESNOST: Extrahujte POUZE informace, které jsou explicitně uvedeny v textu. NIC si nedomýšlejte, neinterpretujte ani nepřidávejte.
+2. ÚPLNOST: Snažte se extrahovat VŠECHNY smysluplné informace. To zahrnuje:
+    - Všechny kontaktní údaje (jména, funkce, emaily, telefony, adresy, kanceláře).
+    - Všechny seznamy osob (členové, zaměstnanci, výbory atd.).
+    - Všechny číselné údaje (částky, procenta, počty, rozměry).
+    - Všechny časové údaje (data, termíny, lhůty, otevírací doby).
+    - Všechny odkazy (URL na stránky, dokumenty).
+    - Všechny odkazy na obrázky.
+    - Všechny názvy (organizace, místa, dokumenty).
+    - Všechny procedurální informace (postupy, kroky, návody).
+    - Všechny podmínky a požadavky.
+3. KONKRÉTNOST: Odpovědi musí být konkrétní a faktické, přímo vycházející ze zdrojového textu.
+4. KONTEXT: Zachovejte původní kontext extrahovaných informací.
+5. FORMÁTOVÁNÍ V ODPOVĚDI: V poli "Answer" VŽDY formátujte odkazy pomocí Markdown: `[Popisek](URL)` a obrázky jako `![Popisek](URL)`. Popisek by měl být co nejvýstižnější. Ostatní text v odpovědi by neměl obsahovat Markdown nebo HTML. ODPOVĚĎ MUSÍ BÝT V ČEŠTINĚ.
+6. KONTAKTY A SEZNAMY: Věnujte ZVLÁŠTNÍ pozornost extrakci kompletních seznamů osob (členové rady, zaměstnanci atd.) a jejich kontaktních údajů. Vytvořte komplexní Q/A pár pro každý takový seznam, ideálně s otázkou typu "Kdo jsou všichni členové X a jaké jsou jejich kontakty?" a odpovědí obsahující CELKOVÝ POČET a KOMPLETNÍ VÝČET všech osob a jejich detailů (včetně VŠECH telefonů, emailů atd.). Pro tyto seznamy IGNORUJTE délková omezení.
+7. OTÁZKY: Formulujte jasné otázky, které přímo vedou k extrahované odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu: `Hlavní česká otázka? | Další česká varianta? | English primary question? | Another English variation?`
+8. NÁSTROJ: Pro záznam výsledků MUSÍTE použít nástroj `extract_qa_pairs`. Neodpovídejte přímo textem.
 
-OBLASTI EXTRAKCE:
-1. Všech číselných údajů (částky, data, procenta, rozměry, vzdálenosti)
-2. Všech URL odkazů (webové stránky, dokumenty, videa) - DŮLEŽITÉ: V odpovědi formátovat pomocí Markdown jako [Popisek odkazu](URL).
-3. Všech URL obrázků - DŮLEŽITÉ: V odpovědi formátovat jako Markdown obrázek: ![Popisek obrázku](URL).
-4. Všech kontaktních informací (emaily, telefony, adresy)
-5. Všech jmen (osoby, instituce, organizace)
-6. Všech lokací a míst
-7. Všech časových údajů (termíny, lhůty, otevírací doby)
-8. Všech procedurálních informací (postupy, procesy, návody)
-9. Všech právních a administrativních informací
-10. Všech podmínek a požadavků
-11. Všech služeb a jejich parametrů
-12. VŽDY klademe MAXIMÁLNÍ DŮRAZ na extrakci VŠECH seznamů osob, členů, radních, zastupitelů, zaměstnanců, komisí, výborů atd. s POVINNOU komplexní otázkou:
-   - "Kolik je celkový počet [název položky] a kdo jsou všichni [název položky]?" nebo
-   - "Jaký je kompletní počet všech [název položky] bez výjimky v období [časové období]?"
-   kde odpověď MUSÍ obsahovat jak přesný počet, tak kompletní výčet/seznam všech položek
+Cílové téma textu je: '{title}'.""" # Removed Czech language constraint here as questions will be bilingual
 
-KRITICKÁ PRAVIDLA PRO EXTRAKCI KONTAKTNÍCH TABULEK:
-1. Když narazíte na JAKOUKOLIV tabulku s kontaktními údaji osob, MUSÍTE:
-   - Extrahovat KAŽDOU osobu uvedenou v tabulce bez výjimky
-   - Zachovat VŠECHNY kontaktní údaje ke každé osobě (jméno, funkce, telefonní čísla, emaily, kanceláře, adresy)
-   - Zajistit, že u žádné osoby nejsou vynechány žádné dostupné údaje
-   - Zachovat přesnou strukturu a vztahy mezi údaji (např. který email patří ke kterému oddělení)
-   - Formátovat kontaktní údaje přehledně s využitím odrážek nebo strukturovaného textu
-   - Explicitně uvést celkový počet osob v tabulce na začátku odpovědi
-2. Pro seznamy osob musí odpověď VŽDY obsahovat:
-   - Celkový počet osob (např. "Celkem 9 členů rady kraje:")
-   - Jméno a příjmení každé osoby
-   - Všechny funkce/pozice k dané osobě
-   - Všechny telefonní kontakty (pevná linka, mobil) s jejich popisky
-   - Všechny emailové adresy
-   - Kancelář/pracoviště/umístění
-   - Úřední hodiny nebo dostupnost, pokud je uvedena
-   - Jakékoliv další specifické informace ke každé osobě
-3. IGNORUJTE délkové limity - pro kontaktní seznamy a tabulky je PRIORITOU úplnost dat
-4. Poskytněte data v co nejčitelnější formě pro konečného uživatele
-
-KRITICKÉ ZÁSADY PŘESNOSTI:
-1. POUZE extrahujete existující informace - NIKDY nic nepřidáváte ani nedomýšlíte
-2. Každá informace v odpovědi MUSÍ být explicitně uvedena ve vstupním textu
-3. NULOVÁ tolerance k jakýmkoliv předpokladům či odvozením
-4. Při nejistotě raději informaci VYNECHÁTE, než byste riskovali nepřesnost
-5. Veškeré číselné údaje, data, kontakty atd. musí být DOSLOVNĚ zkopírované ze zdroje, ALE URL odkazy a obrázky MUSÍ být formátovány pomocí Markdown v poli "Answer".
-
-POVOLENÉ OPERACE:
-1. Extrakce doslovných informací
-2. Reorganizace existujících informací do Q/A formátu
-3. Rozdělení komplexních informací na jednodušší celky
-4. Vytváření alternativních formulací otázek pro stejnou informaci
-5. Formátování URL odkazů a obrázků v poli "Answer" pomocí Markdown.
-6. Strukturování tabulkových dat do přehlednějšího formátu při zachování 100% obsahu
-
-ZAKÁZANÉ OPERACE:
-1. Přidávání jakýchkoliv nových informací
-2. Vyvozování či předpokládání souvislostí
-3. Doplňování chybějících detailů
-4. Aktualizace či modernizace informací
-5. Generalizace či zjednodušování
-6. Zkracování nebo vynechávání kontaktních údajů z důvodu délky
-
-FORMÁTOVÁNÍ ODKAZŮ A OBRÁZKŮ:
-- Formátování odkazů: Všechny extrahované URL odkazy (kromě obrázků) MUSÍ být v poli "Answer" formátovány pomocí Markdown syntaxe: [Popisek odkazu](URL). Text odkazu (Popisek odkazu) by měl být co nejvýstižnější z kontextu (např. text odkazu na stránce nebo název souboru).
-- Formátování obrázků: Všechny extrahované URL obrázky MUSÍ být v poli "Answer" formátovány pomocí Markdown syntaxe: ![Popisek obrázku](URL obrázku). Popisek obrázku by měl být stručný popis obrázku, pokud je dostupný (např. z alt textu), jinak obecný popis jako "Obrázek".
-
-ZPRACOVÁNÍ HTML OBSAHU:
-1. Při nalezení HTML tabulek ve zdrojovém obsahu:
-   - VŽDY extrahujte KAŽDÝ řádek a KAŽDÝ sloupec tabulky
-   - Pro tabulky s kontaktními údaji zachovejte 100% informací bez výjimky
-   - Převeďte tabulkovou strukturu na čitelný formát se zachováním všech dat
-   - NIKDY nezahrnujte surové HTML tagy do vašeho JSON výstupu
-   - Pro každou buňku tabulky zajistěte, že její obsah je plně zachován
-2. Pro HTML speciální znaky (jako &#160;):
-   - Převeďte je na jejich ekvivalenty v prostém textu
-   - Pokud si nejste jisti významem speciálního znaku, jednoduše ho vynechte
-3. Když vidíte obrázky ve formátu ![alt](url):
-   - Zachovejte tento přesný formát v poli "Answer"
-   - Zajistěte správné JSON escapování URL
-
-KRITICKÉ PRAVIDLO JSON:
-1. MUSÍTE vyprodukovat POUZE validní JSON objekt
-2. ŽÁDNÝ text či vysvětlování před nebo za JSON objektem
-3. ŽÁDNÉ komentáře v JSON
-4. ŽÁDNÉ formátovací značky (markdown, HTML) Mimo pole "Answer", kde jsou odkazy a obrázky vyžadovány v Markdown.
-5. POUZE holý validní JSON podle standardu RFC 8259
-6. Jen jeden kořenový objekt obsahující klíč "qa_pairs" s polem objektů
-
-Veškerý výstup musí být v češtině a přímo souviset s tématem '{title}'."""
-
+    # Revised user prompt focusing on the task and instructing tool use
     user_prompt = f"""# ZDROJOVÝ TEXT K ANALÝZE:
 
 ```
 {content}
 ```
 
-# VÁŠ KRITICKÝ ÚKOL: 
-Proveďte VYČERPÁVAJÍCÍ extrakci dat z VÝŠE UVEDENÉHO ZDROJOVÉHO TEXTU a vytvořte MAXIMÁLNÍ počet vysoce informativních Q/A párů při STRIKTNÍM dodržení pravidel přesnosti a formátování odkazů.
+# VÁŠ ÚKOL: 
+Analyzujte výše uvedený text a extrahujte z něj maximum informativních Q/A párů. Dodržujte striktně principy extrakce uvedené v system promptu.
 
-# STRIKTNÍ PRAVIDLA EXTRAKCE:
+# INSTRUKCE:
+1. Pečlivě si projděte celý text.
+2. Identifikujte všechny klíčové informace, fakta, detaily, kontakty, seznamy, odkazy atd.
+3. Pro každou identifikovanou informaci vytvořte pár Otázka/Odpověď.
+4. Dbejte na přesnost a úplnost extrakce.
+5. V odpovědích správně formátujte odkazy a obrázky pomocí Markdown.
+6. Vytvořte vyčerpávající Q/A páry pro všechny seznamy osob a kontaktů (pokud existují).
+7. Zaznamenejte VŠECHNY nalezené Q/A páry pomocí nástroje `extract_qa_pairs`.
 
-1. MNOŽSTVÍ A KOMPLEXNOST:
-   - Vytvořte ABSOLUTNĚ VŠECHNY možné smysluplné Q/A páry
-   - Každá extrahovaná informace = potenciální Q/A pár
-   - Minimální počet: 15 párů (pokud obsah umožňuje)
-   - I drobný detail může tvořit samostatný Q/A pár
-
-2. PŘESNOST A VĚRNOST:
-   - POUZE doslovně extrahované informace ze zdrojového textu
-   - ŽÁDNÉ domýšlení, předpoklady ani extrapolace
-   - Při nejistotě informaci VYNECHAT
-   - Zachovat PŘESNÉ znění čísel, dat, kontaktů
-   - NULOVÁ tolerance k opakování informací
-   - Každá otázka musí přinášet NOVOU informační hodnotu
-
-3. STRUKTURA Q/A:
-   - Otázka musí být zodpověditelná POUZE z extrahovaného textu
-   - Odpověď musí obsahovat POUZE informace ze zdrojového textu
-   - ŽÁDNÉ doplňující či vysvětlující informace mimo formátovaných odkazů/obrázků
-   - Zachovat původní terminologii a formulace
-
-4. FORMULACE OTÁZEK:
-   - Každá otázka musí mít 3 VÝZNAMNĚ ODLIŠNÉ formulace
-   - Využívejte různé typy otázek (co, kdy, kde, jak, proč, kolik...)
-   - Kombinujte různé perspektivy dotazování
-   - Otázky musí být zodpověditelné JEDINOU správnou odpovědí
-   - ŽÁDNÉ spekulativní či hypotetické otázky
-   - Otázky musí přímo směřovat k existující informaci
-
-5. PRIORITIZACE TABULKOVÝCH KONTAKTNÍCH ÚDAJŮ:
-   - Když narazíte na JAKOUKOLIV tabulku s kontaktními údaji osob:
-     * MUSÍTE vytvořit speciální Q/A pár, který zahrnuje VŠECHNY osoby z tabulky
-     * NIKDY nerozdělujte kontaktní tabulky do více Q/A párů (vše v jednom)
-     * Otázka musí být formulována jako "Kdo jsou všichni [typ osob] a jaké jsou jejich kompletní kontaktní údaje?"
-     * V odpovědi MUSÍ být uvedeny VŠECHNY osoby a VŠECHNY jejich kontaktní údaje
-     * V odpovědi MUSÍ být explicitně uveden celkový počet osob
-     * IGNORUJTE jakákoliv délková omezení - prioritou je úplnost dat
-     * Formátujte kontaktní údaje pro maximální čitelnost (odrážky, strukturovaný text)
-
-6. OBSAH ODPOVĚDÍ:
-   - MUSÍ obsahovat VŠECHNY relevantní URL odkazy, formátované jako Markdown: [Popisek](URL)
-   - MUSÍ obsahovat VŠECHNY relevantní URL obrázky, formátované jako Markdown: ![Popisek](URL)
-   - MUSÍ obsahovat VŠECHNY číselné údaje
-   - MUSÍ obsahovat VŠECHNY časové údaje
-   - MUSÍ obsahovat VŠECHNY kontaktní informace
-   - MUSÍ obsahovat VŠECHNY procesní informace
-   - NEJVYŠŠÍ PRIORITA: Pro KAŽDÝ seznamy/výčet osob, členů, radních, zastupitelů atd. MUSÍTE vytvořit MINIMÁLNĚ JEDEN obsáhlý Q/A pár, který bude obsahovat jak celkový počet, tak kompletní výčet. Preferovaný formát otázky je:
-      * "Kolik je celkový počet [název položky] a kdo jsou všichni [název položky]?" nebo 
-      * "Jaký je kompletní počet všech [název položky] bez výjimky v období [časové období]?"
-      s odpovědí, která VŽDY obsahuje jak přesný počet, tak kompletní výčet/seznam všech položek a ke každé položce detailní kontaktní údaje (email, telefon, atd. - pokud existují)
-   - Odpovědi musí být FAKTICKÉ a KONKRÉTNÍ
-   - Každá část odpovědi MUSÍ být dohledatelná ve zdroji
-   - ŽÁDNÉ zobecňování ani interpretace
-   - Zachovat původní kontext informace
-   - Při složených informacích zachovat všechny podmínky a souvislosti
-
-# PRAVIDLA VALIDNÍHO JSON:
-1. TECHNICKÁ PRAVIDLA JSON:
-   - ŽÁDNÉ komentáře ani popisky před nebo za JSON strukturou
-   - ŽÁDNÉ formátování nebo vysvětlení před nebo po JSON
-   - ŽÁDNÉ jednořádkové komentáře (// komentář)
-   - ŽÁDNÉ víceřádkové komentáře (/* komentář */)
-   - ŽÁDNÉ trailing commas (poslední položka nesmí mít čárku)
-   - ŽÁDNÉ nezaobalené řetězce, vše musí být v uvozovkách
-   - ŽÁDNÉ single quotes ('), použijte pouze double quotes (")
-   - ŽÁDNÉ speciální znaky jako \\t, \\n mimo řetězce
-   - Escapování uvozovek uvnitř řetězce pomocí \\\" - POZOR na escapování v Markdown odkazech v poli "Answer"!
-   - Speciální znaky v řetězcích musí být správně escapovány
-
-2. FORMÁT VÝSTUPU:
-   - VRÁTIT POUZE validní JSON objekt bez jakýchkoliv komentářů před nebo za
-   - ŽÁDNÝ úvod, žádný závěr, žádné vysvětlení - POUZE JSON
-   - NEPOUŽÍVAT markdownové značky (např. ```json) mimo pole "Answer"
-   - ŽÁDNÝ jiný text mimo JSON strukturu
-
-# PŘÍKLADY STRUKTURY Q/A:
-
-## Příklad 1 - Kontaktní informace:
-{{
-  "qa_pairs": [
-    {{
-      "Question": "Jaké jsou úřední hodiny městského úřadu? | Kdy mohu navštívit městský úřad? | V jakých časech je otevřena radnice? | úřední hodiny městského úřadu | otevírací doba městský úřad | otvírací hodiny městského úřadu",
-      "Answer": "Městský úřad Teplice má následující úřední hodiny: [DOSLOVNÁ CITACE Z TEXTU]. Více informací naleznete na [oficiálních stránkách](https://www.teplice.cz).",
-      "Category": "Kontakt"
-    }}
-  ]
-}}
-
-## Příklad 2 - Procedurální informace s obrázkem:
-{{
-  "qa_pairs": [
-    {{
-      "Question": "Jak si mohu vyřídit nový občanský průkaz? | Jaký je postup pro získání občanského průkazu? | Co potřebuji k vyřízení OP? | vyřízení občanského průkazu | nový OP postup | doklady pro OP",
-      "Answer": "[DOSLOVNÁ CITACE POSTUPU Z TEXTU]. Podívejte se na vzorový formulář: ![Vzor OP formuláře](https://example.com/formular_op.png).",
-      "Category": "Administrativa_Uredni_Zalezitosti"
-    }}
-  ]
-}}
-
-## Příklad 3 - Tabulka kontaktních údajů (POVINNÝ DETAILNÍ FORMÁT):
-{{
-  "qa_pairs": [
-    {{
-      "Question": "Kdo jsou všichni členové rady kraje a jaké jsou jejich kompletní kontaktní údaje? | Jaký je úplný seznam všech radních včetně jejich kontaktních informací? | Kolik je celkový počet členů rady kraje a jaké jsou jejich detailní kontaktní údaje? | kompletní seznam členů rady kraje kontakty | radní kraje kontaktní informace | rrada kraje členové a kontakty",
-      "Answer": "Rada Královéhradeckého kraje má celkem 9 členů. Kompletní seznam včetně všech kontaktních údajů:\n\n1. Mgr. Martin Červíček - hejtman\n   - Telefon: 495 817 222\n   - Mobil: 607 939 758\n   - E-mail: mcervicek@kr-kralovehradecky.cz\n   - Kancelář: N2.820\n   - Úřední hodiny: pondělí a středa 8:00-17:00\n\n2. Mgr. Martina Berdychová - 1. náměstkyně hejtmana\n   - Telefon: 495 817 823\n   - Mobil: 601 376 380\n   - E-mail: mberdychova@kr-kralovehradecky.cz\n   - Kancelář: N2.818\n\n[... pokračování pro všechny členy s kompletními údaji pro každého, včetně všech dostupných kontaktních informací]",
-      "Category": "Kontakt"
-    }}
-  ]
-}}
-
-# OČEKÁVANÝ JSON FORMÁT (TOTO JE PŘESNÝ FORMÁT VÝSTUPU):
-{{
-  "qa_pairs": [
-    {{
-      "Question": "Hlavní otázka? | Alternativní pohled? | Jiná perspektiva? | vyhledávací fráze 1 | vyhledávací fráze 2 | vyhledávací fráze 3",
-      "Answer": "Doslovně extrahovaná odpověď, která MUSÍ obsahovat odkazy jako [tento text](https://example.com) a obrázky jako ![popisek](https://example.com/img.jpg), pokud jsou ve zdrojovém textu.",
-      "Category": "{category}"
-    }}
-  ]
-}}
-
-# ZÁSADNÍ PRAVIDLO PRO KONTAKTNÍ TABULKY A SEZNAMY:
-DÉLKA ODPOVĚDI NENÍ OMEZENA! Pro tabulky kontaktních údajů je ABSOLUTNÍ PRIORITOU zachování VŠECH údajů o VŠECH osobách BEZ VÝJIMKY. Ignorujte jakákoliv délková omezení a zahrňte všechny detaily.
-
-# KRITÉRIA KONTROLY PŘED ODESLÁNÍM:
-1. Lze každou část odpovědi DOSLOVNĚ najít ve zdrojovém textu (s výjimkou Markdown formátování URL)?
-2. Neobsahuje odpověď ŽÁDNÉ dodatečné informace?
-3. Je každá otázka zodpověditelná POUZE z dostupného textu?
-4. Jsou zachovány VŠECHNY původní formulace a termíny?
-5. Nejsou nikde použity předpoklady či dedukce?
-6. Jsou všechny číselné údaje, URL a kontakty PŘESNĚ zkopírované (URL převedeny do Markdown)?
-7. Je každá informace uvedena v původním kontextu?
-8. Je výstup validní JSON bez jakýchkoliv dodatečných komentářů?
-9. Neobsahuje výstup žádné formátovací značky (markdown, HTML) mimo pole "Answer"?
-10. Jsou všechna speciální slova a znaky správně escapované (včetně těch v Markdown v poli "Answer")?
-11. Jsou VŠECHNY odkazy a obrázky v poli "Answer" správně formátovány pomocí Markdown?
-12. JSOU VŠECHNY KONTAKTNÍ TABULKY A SEZNAMY OSOB ZAHRNUTY V ODPOVĚDÍCH KOMPLETNĚ BEZ VYNECHÁNÍ JEDINÉHO ÚDAJE?
-13. NEJDŮLEŽITĚJŠÍ KONTROLA: Pro KAŽDÝ seznam osob, členů, radních, zastupitelů, apod. vytvořen ALESPOŇ JEDEN obsáhlý Q/A pár:
-    - Otázka musí kombinovat dotaz na počet i kompletní seznam (např. "Kolik je celkový počet členů rady kraje a kdo jsou všichni radní?" nebo "Jaký je kompletní počet všech členů rady kraje bez výjimky v období XY?")
-    - Odpověď MUSÍ obsahovat jak přesný celkový počet, tak úplný výčet všech položek/osob včetně VŠECH jejich kontaktních údajů
-
-# DALŠÍ POŽADAVKY:
-- VRÁTIT JEN validní JSON, nic jiného
-- ŽÁDNÉ úvody nebo komentáře (jako "Zde je výsledek..." nebo "JSON odpověď:")
-- ŽÁDNÉ formátovací značky (jako ```json nebo <pre>) Mimo pole "Answer"
-- ŽÁDNÉ víceřádkové komentáře /* ... */
-- ŽÁDNÉ jednořádkové komentáře // ...
-- ŽÁDNÉ vysvětlování nebo shrnutí před nebo po JSON
+Nyní použijte nástroj `extract_qa_pairs` k zaznamenání výsledků.
 """
 
     messages = [{"role": "user", "content": user_prompt}]
-    # Pass system_prompt separately, call_llm_api will handle provider difference
-    response_text = call_llm_api(messages=messages, system_prompt=system_prompt, max_tokens=8192, temperature=0)
     
-    if response_text is None:
-        logger.error(f"Nepodařilo se získat Q/A páry pro '{title}' po všech pokusech.")
+    # Call the API, providing the tool definition and forcing its use for Anthropic
+    # The response should now be the dictionary from the tool_use input if successful
+    response_data = call_llm_api(
+        messages=messages, 
+        system_prompt=system_prompt, 
+        max_tokens=8192, # Max tokens suitable for large extractions
+        temperature=0,     # Low temperature for factual extraction
+        tools=qa_tool,     # Provide the tool definition
+        tool_choice=tool_choice # Force the model to use the tool
+    )
+
+    if response_data is None:
+        logger.error(f"Nepodařilo se získat Q/A páry pro '{title}' (API volání selhalo nebo nevrátilo data). ")
         return None # Indicate failure
-    
-    try:
-        # Vylepšené zpracování JSON odpovědi
-        try:
-            # Odstranění možných markdown code block tagů
-            response_text = re.sub(r'^```(?:json)?|```$', '', response_text.strip())
-            
-            # Odstranění možných vysvětlujících textů před JSON
-            json_start = response_text.find('{')
-            if json_start > 0:
-                response_text = response_text[json_start:]
-                
-            # Odstranění možných vysvětlujících textů za JSON
-            json_end = response_text.rfind('}') + 1
-            if json_end < len(response_text):
-                response_text = response_text[:json_end]
-            
-            # Pokus o přímé parsování upravené odpovědi
-            qa_data = json.loads(response_text)
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Chyba parsování JSON: {str(e)}")
-            logger.debug(f"Problematický JSON: {response_text}")
-            
-            # Agresivnější extrakce JSON části pomocí regex
-            json_pattern = r'({[^}]*"qa_pairs"[^}]*})'
-            matches = re.search(json_pattern, response_text, re.DOTALL)
-            
-            if matches:
-                potential_json = matches.group(1)
-                logger.debug(f"Extrahovaný potenciální JSON: {potential_json}")
-                try:
-                    qa_data = json.loads(potential_json)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Nelze parsovat extrahovaný JSON: {str(e)}")
-                    return None
+
+    # --- Revised Handling of Tool Response ---
+    qa_pairs = None # Initialize qa_pairs
+
+    if isinstance(response_data, dict):
+        if 'qa_pairs' in response_data:
+            potential_pairs = response_data['qa_pairs']
+            if isinstance(potential_pairs, list):
+                # Now, validate the structure of items within the list BEFORE assigning category
+                validated_internal_pairs = []
+                valid_structure = True
+                for item in potential_pairs:
+                    if not isinstance(item, dict):
+                        logger.error(f"Položka v 'qa_pairs' není slovník pro '{title}': {item}")
+                        valid_structure = False
+                        break
+                    # Check for REQUIRED keys ('Question', 'Answer') based on the simplified schema
+                    if "Question" not in item or not isinstance(item.get("Question"), str):
+                        logger.error(f"Chybí klíč 'Question' nebo není string v položce pro '{title}': {item}")
+                        valid_structure = False
+                        break
+                    if "Answer" not in item or not isinstance(item.get("Answer"), str):
+                        logger.error(f"Chybí klíč 'Answer' nebo není string v položce pro '{title}': {item}")
+                        valid_structure = False
+                        break
+                    # If structure is okay so far for this item
+                    # Only keep the required keys the model was asked to generate
+                    validated_internal_pairs.append({"Question": item["Question"], "Answer": item["Answer"]})
+
+                if valid_structure:
+                    qa_pairs = validated_internal_pairs # SUCCESS: Found list with correct internal structure
+                    logger.info(f"Úspěšně extrahováno a validováno {len(qa_pairs)} Q/A párů pomocí nástroje (klíč 'qa_pairs') pro '{title}'.")
+                else:
+                    # List found, but internal items have wrong structure/missing keys
+                    logger.error(f"Seznam 'qa_pairs' nalezen pro '{title}', ale vnitřní struktura položek neodpovídá schématu ['Question', 'Answer'].")
+                    # qa_pairs remains None
             else:
-                logger.error(f"Nelze najít JSON strukturu v odpovědi")
-                return None
-        
-        qa_pairs = qa_data.get('qa_pairs', [])
-        
-        # Rozšířená validace Q/A párů
-        if not isinstance(qa_pairs, list):
-            logger.error(f"Neplatná struktura Q/A párů - není seznam")
-            return None
-        
-        # Kontrola platnosti každého Q/A páru a oprava běžných chyb
-        valid_pairs = []
+                # Found 'qa_pairs' key, but the value is NOT a list
+                logger.error(f"Klíč 'qa_pairs' nalezen v odpovědi nástroje pro '{title}', ale hodnota není seznam (typ: {type(potential_pairs)}). Data: {response_data}")
+        else:
+            # The dictionary exists, but doesn't contain the 'qa_pairs' key
+            logger.error(f"Odpověď nástroje pro '{title}' je slovník, ale neobsahuje očekávaný klíč 'qa_pairs'. Klíče: {list(response_data.keys())}. Data: {response_data}")
+
+    elif isinstance(response_data, str):
+         # This case should ideally not happen with tool_choice force, but handle just in case
+         logger.warning(f"Model vrátil textovou odpověď místo očekávaného JSON z nástroje pro '{title}'. Text: {response_data[:200]}...")
+         # Attempt to parse the string as JSON as a fallback (though unlikely to be correct)
+         try:
+             qa_data = json.loads(response_data)
+             # Check structure again after parsing
+             if isinstance(qa_data, dict) and 'qa_pairs' in qa_data and isinstance(qa_data['qa_pairs'], list):
+                 # Validate internal structure after parsing
+                 potential_pairs = qa_data['qa_pairs']
+                 validated_internal_pairs = []
+                 valid_structure = True
+                 for item in potential_pairs:
+                     # Check for REQUIRED keys and types after parsing
+                     if not isinstance(item, dict) or "Question" not in item or not isinstance(item.get("Question"), str) or "Answer" not in item or not isinstance(item.get("Answer"), str):
+                         logger.error(f"Položka v parsovaných 'qa_pairs' neodpovídá schématu ['Question', 'Answer'] pro '{title}': {item}")
+                         valid_structure = False
+                         break
+                     # Only keep the required keys
+                     validated_internal_pairs.append({"Question": item["Question"], "Answer": item["Answer"]})
+
+                 if valid_structure:
+                     qa_pairs = validated_internal_pairs
+                     logger.info(f"Úspěšně parsováno a validováno {len(qa_pairs)} Q/A párů z textové odpovědi pro '{title}'.")
+                 else:
+                      logger.error(f"Textovou odpověď se podařilo parsovat, ale vnitřní struktura 'qa_pairs' neodpovídá schématu ['Question', 'Answer']. Parsed data: {qa_data}")
+             else:
+                 logger.error(f"Textovou odpověď nelze parsovat do očekávané struktury {{'qa_pairs': [...]}}. Parsed data: {qa_data}")
+         except json.JSONDecodeError:
+             logger.error(f"Textovou odpověď nelze parsovat jako JSON.")
+         # If parsing fails or structure is wrong, qa_pairs remains None
+
+    else:
+        # Response was not None, not dict, not str - very unexpected
+        logger.error(f"Neočekávaný typ odpovědi ({type(response_data)}) z call_llm_api pro '{title}'. Data: {response_data}")
+
+    # If we successfully extracted a list of pairs, add the category
+    if qa_pairs is not None: # Check if qa_pairs is a list (could be empty)
+        valid_pairs_with_category = []
         for pair in qa_pairs:
-            if not isinstance(pair, dict):
-                logger.warning(f"Přeskakuji neplatný pár, není slovník: {pair}")
-                continue
-                
-            if "Question" not in pair or "Answer" not in pair:
-                logger.warning(f"Přeskakuji neplatný pár bez Question/Answer: {pair}")
-                continue
-                
-            # Přidání kategorie ke každému Q/A páru
-            pair['Category'] = category
-            valid_pairs.append(pair)
+             # Add category to the validated pairs
+             pair['Category'] = category # Add the external category
+             valid_pairs_with_category.append(pair)
         
-        if not valid_pairs:
-            logger.error(f"Žádné platné Q/A páry nebyly nalezeny")
-            return None
-            
-        return valid_pairs
-            
-    except Exception as e:
-        logger.error(f"Chyba při generování Q/A párů pro {title}: {str(e)}")
+        # Return the list (could be empty if no pairs were found but structure was valid)
+        # Log if we are returning an empty list due to no content, but valid structure
+        if not valid_pairs_with_category and isinstance(response_data, dict) and 'qa_pairs' in response_data and response_data['qa_pairs'] == []:
+             logger.info(f"Model vrátil validní prázdný seznam 'qa_pairs' pro '{title}', protože nebyly nalezeny žádné relevantní informace.")
+
+        return valid_pairs_with_category
+    else:
+        # If qa_pairs is still None, it means extraction or validation failed. Trigger fallback.
+        logger.warning(f"Nepodařilo se extrahovat platný seznam Q/A párů z odpovědi modelu/nástroje pro '{title}'. Spouští se fallback.")
+        # Fallback logic (will be handled by the calling function `process_url_content`)
         return None
 
 def process_url_content(url, html_content, category, metadata):
