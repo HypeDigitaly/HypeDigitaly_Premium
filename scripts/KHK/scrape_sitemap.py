@@ -30,6 +30,7 @@ CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
 GROQ_API_KEY = "REMOVED-GROQ-KEY" # Added Groq API Key
 JINA_AI_API_KEY = "REMOVED-JINA-KEY"
 VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
+FIRECRAWL_API_KEY = "REMOVED-FIRECRAWL-KEY" # Placeholder - Replace with your actual key
 
 # ============================================================================
 # LLM PROVIDER CONFIGURATION
@@ -56,8 +57,30 @@ LLM_PROVIDERS = {
 }
 
 #!====================!
-LLM_SEQUENCE = "1,2" 
+LLM_SEQUENCE = "1,2"
 #!====================!
+
+# ============================================================================
+# MARKDOWN CONTENT PROVIDER CONFIGURATION
+# ============================================================================
+# Define available Markdown content providers
+MARKDOWN_PROVIDERS = {
+    "jina": {
+        "name": "jina",
+        "api_key": JINA_AI_API_KEY,
+        "api_url_template": "https://r.jina.ai/{url}",
+    },
+    "firecrawl": {
+        "name": "firecrawl",
+        "api_key": FIRECRAWL_API_KEY,
+        "api_url": "https://api.firecrawl.dev/v1/scrape",
+    }
+    # Add more providers here if needed
+}
+
+#!=================================!
+MARKDOWN_PROVIDER_SEQUENCE = "firecrawl,jina" # Comma-separated IDs from MARKDOWN_PROVIDERS
+#!=================================!
 
 # ============================================================================
 # URL CONFIGURATION
@@ -71,7 +94,9 @@ XML_SITEMAP_URL = "https://www.khk.cz/sitemap.xml"
 # ============================================================================
 # When this list is not empty, the script will only process these URLs instead of scraping the sitemap
 # Example: ["https://www.khk.cz/page1", "https://www.khk.cz/page2"]
-CUSTOM_URLS = []
+CUSTOM_URLS = [
+    "https://www.khk.cz/kraj/rada/komise-rady"
+]
 
 # ============================================================================
 # API CALL SETTINGS
@@ -101,6 +126,7 @@ REQUEST_BACKOFF_FACTOR = 0.3
 # ============================================================================
 MAX_TOKENS = 199000  # Maximum tokens for content processing
 MAX_FILENAME_LENGTH = 200  # Maximum length for generated filenames
+# MAX_CHUNK_SIZE = 4000  # Deprecated: Chunking is now based on headers only
 
 # ============================================================================
 # CATEGORIES
@@ -369,135 +395,274 @@ def call_llm_api(messages, system_prompt=None, max_tokens=1024, temperature=0.7,
     return None
 
 # ============================================================================
-# HTML CONTENT & PARSING
+# HTML/MARKDOWN CONTENT & PARSING
 # ============================================================================
 
-def get_html_content(url, for_qa=False):
-    logger.info(f"Získávání HTML obsahu z URL: {url}")
-    logger.info(f"Režim Q/A: {for_qa}")
-    api_url = f"https://r.jina.ai/{url}"
-    
-    if for_qa:
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {JINA_AI_API_KEY}",
-            "X-Return-Format": "markdown",
-            "X-Engine": "browser",
-            "X-Target-Selector": "#block-khk-content, #block-khk-sectionmenu"
-        }
+def get_content(url, content_format="html", target_selector=".sitemap"):
+    """
+    Fetches content (HTML or Markdown) from a URL using configured providers.
+
+    Args:
+        url (str): The URL to fetch content from.
+        content_format (str): The desired format ('html' or 'markdown').
+        target_selector (str): CSS selector for the target content area.
+                                Used differently by providers (Jina uses it directly,
+                                Firecrawl uses includeTags).
+
+    Returns:
+        tuple: (content, metadata) or (None, None) if all providers fail.
+               content is the HTML string or Markdown string.
+               metadata is a dictionary with 'title', 'url', etc.
+    """
+    logger.info(f"Získávání obsahu (formát: {content_format}) z URL: {url}")
+
+    sequence_ids = []
+    provider_configs = {}
+    if content_format == "markdown":
+        sequence_ids = [id.strip() for id in MARKDOWN_PROVIDER_SEQUENCE.split(',') if id.strip()]
+        provider_configs = MARKDOWN_PROVIDERS
+        logger.info(f"Použije se sekvence providerů pro Markdown: {MARKDOWN_PROVIDER_SEQUENCE}")
+    elif content_format == "html":
+        # Currently only Jina supports HTML for sitemap parsing as needed
+        sequence_ids = ["jina"] # Hardcode Jina for HTML sitemap
+        provider_configs = {"jina": MARKDOWN_PROVIDERS["jina"]} # Only provide Jina config
+        logger.info("Použije se Jina pro HTML obsah sitemapu.")
     else:
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {JINA_AI_API_KEY}",
-            "X-Engine": "browser",
-            "X-Return-Format": "html",
-            "X-Target-Selector": ".sitemap"
-        }
-    
-    logger.debug(f"Volání Jina.AI API s hlavičkami: {headers}")
-    
-    # Add specific retry logic for timeout errors
-    for retry_attempt in range(REQUEST_RETRY_COUNT + 1):  # +1 for the initial attempt
-        try:
+        logger.error(f"Nepodporovaný formát obsahu: {content_format}")
+        return None, None
+
+    if not sequence_ids:
+        logger.error(f"Sekvence providerů pro {content_format} je prázdná nebo neplatná.")
+        return None, None
+
+    for provider_id in sequence_ids:
+        config = provider_configs.get(provider_id)
+        if not config:
+            logger.warning(f"Provider ID '{provider_id}' ze sekvence nebyl nalezen v konfiguraci. Přeskakuji.")
+            continue
+
+        provider_name = config["name"]
+        api_key = config.get("api_key")
+
+        logger.info(f"Pokus o získání obsahu s providerem ID: {provider_id} (Název: {provider_name})")
+
+        if not api_key:
+            logger.error(f"Chybí API klíč pro providera '{provider_name}' (ID: {provider_id}). Přeskakuji.")
+            continue
+
+        # Inner retry loop for the current provider
+        for retry_attempt in range(REQUEST_RETRY_COUNT + 1):  # +1 for the initial attempt
             if retry_attempt > 0:
-                logger.warning(f"Retry attempt {retry_attempt}/{REQUEST_RETRY_COUNT} for URL: {url}")
-                # Add exponential backoff between retries
+                logger.warning(f"Retry attempt {retry_attempt}/{REQUEST_RETRY_COUNT} for URL: {url} with {provider_name}")
                 backoff_time = REQUEST_BACKOFF_FACTOR * (2 ** (retry_attempt - 1))
                 logger.info(f"Waiting {backoff_time:.2f} seconds before retry...")
                 time.sleep(backoff_time)
-            
-            response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
-            logger.debug(f"Status code: {response.status_code}")
-            logger.debug(f"Response headers: {response.headers}")
-            
+
             try:
-                response_text = response.text
-                logger.debug(f"Raw response: {response_text[:500]}...")
-                # Log full response to console for debugging
-                print(f"\n=== JINA AI API RESPONSE ===")
-                print(f"URL: {url}")
-                print(f"Status Code: {response.status_code}")
-                print(f"Response Preview: {response_text[:300]}...")
-                print("===========================\n")
-                
-                data = response.json()
-                logger.debug(f"Parsed JSON response: {json.dumps(data, indent=2, ensure_ascii=False)}")
-                logger.info(f"Jina AI API Response: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}...")
-                
-                if data["status"] == 20000 and "data" in data:
-                    if for_qa:
-                        content = data["data"].get("content", "")
-                        # Log markdown content preview to console for Q/A
-                        print(f"\n=== Q/A MARKDOWN CONTENT PREVIEW FOR {url} ===")
-                        print(f"{content[:500]}...\n")
-                        logger.info(f"Q/A Markdown content preview: {content[:500]}...")
-                    else:
-                        content = data["data"].get("html", "")
-                    
-                    if content:
-                        logger.debug(f"Získaný obsah ({len(content)} znaků): {content[:200]}...")
-                        if not for_qa:
-                            # Safely extract title with better error handling
-                            title = ""
-                            try:
-                                soup = BeautifulSoup(content, "html.parser")
-                                title_element = soup.title
-                                if title_element and title_element.string:
-                                    title = title_element.string
+                content, metadata = None, None
+
+                if provider_name == "jina":
+                    api_url = config.get("api_url_template", "").format(url=url)
+                    if not api_url:
+                        logger.error(f"Chybí 'api_url_template' pro Jina. Přeskakuji.")
+                        break # Skip Jina if URL template is missing
+
+                    headers = {
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                        "X-Engine": "browser", # Use browser engine for potentially better results
+                    }
+                    if content_format == "markdown":
+                        headers["X-Return-Format"] = "markdown"
+                        headers["X-Target-Selector"] = ""
+                    else: # html
+                        headers["X-Return-Format"] = "html"
+                        headers["X-Target-Selector"] = target_selector # Use passed selector for sitemap
+
+                    logger.debug(f"Volání Jina API: URL={api_url}, Headers={headers}")
+                    response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
+                    logger.debug(f"Jina status code: {response.status_code}")
+
+                    try:
+                        response_text = response.text
+                        data = response.json()
+                        logger.debug(f"Jina Raw Response: {response_text[:500]}...")
+                        logger.debug(f"Jina Parsed JSON: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}...")
+
+                        if response.status_code == 200 and data.get("data"):
+                            if content_format == "markdown":
+                                content = data["data"].get("content", "")
+                                metadata = {
+                                    "title": data["data"].get("title", url.split('/')[-1]),
+                                    "url": data["data"].get("url", url)
+                                }
+                                if content:
+                                     print(f"\n=== JINA MARKDOWN CONTENT PREVIEW FOR {url} ===")
+                                     print(f"{content[:500]}...\n")
+                            else: # html
+                                content = data["data"].get("html", "")
+                                # Extract title from HTML for sitemap parsing
+                                title = "Sitemap"
+                                try:
+                                    soup = BeautifulSoup(content, "html.parser")
+                                    title_element = soup.title
+                                    if title_element and title_element.string:
+                                        title = title_element.string
+                                except Exception as e:
+                                    logger.warning(f"Error extracting title from Jina HTML: {str(e)}")
+                                metadata = {
+                                    "title": title,
+                                    "url": data["data"].get("url", url)
+                                }
+
+                            if content:
+                                logger.info(f"Úspěšně získán obsah ({content_format}) od Jina.")
+                                return content, metadata
+                            else:
+                                logger.error(f"Jina API vrátilo úspěšný status, ale obsah ({content_format}) chybí.")
+                                # Don't retry if content is missing, maybe the page is empty
+                                break # Go to next provider
+                        else:
+                            error_message = data.get("error", {}).get("message", f"HTTP Status {response.status_code}")
+                            logger.error(f"Chyba Jina API: {error_message}")
+                            # Retry on server errors or rate limits
+                            if response.status_code >= 500 or response.status_code == 429:
+                                if retry_attempt < REQUEST_RETRY_COUNT:
+                                    logger.warning("Retrying due to Jina API error...")
+                                    continue
                                 else:
-                                    logger.warning(f"No title element found in HTML content for URL: {url}")
-                            except Exception as e:
-                                logger.warning(f"Error extracting title from HTML: {str(e)}")
-                                
-                            metadata = {
-                                "title": title,
-                                "url": data["data"].get("url", url)
-                            }
-                            return content, metadata
-                        return content, {"url": url}
-                    else:
-                        logger.error("Obsah nebyl nalezen v odpovědi API")
-                        logger.debug(f"Data struktura: {data}")
+                                    logger.error("Max retries reached for Jina.")
+                                    break # Go to next provider after max retries
+                            else:
+                                logger.warning(f"Non-retryable Jina error ({response.status_code}).")
+                                break # Go to next provider
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Chyba při parsování JSON odpovědi od Jina: {str(e)}")
+                        logger.error(f"Kompletní response text: {response_text}")
                         if retry_attempt < REQUEST_RETRY_COUNT:
-                            logger.warning("Retrying due to missing content...")
+                            logger.warning("Retrying due to Jina JSON parse error...")
                             continue
-                        raise ValueError("Obsah chybí v odpovědi API")
-                else:
-                    error_message = data.get("status", "Neznámá chyba")
-                    logger.error(f"Chyba při získávání obsahu: {error_message}")
-                    logger.debug(f"Kompletní response data: {data}")
-                    if retry_attempt < REQUEST_RETRY_COUNT:
-                        logger.warning(f"Retrying due to API error: {error_message}...")
-                        continue
-                    raise ValueError(f"Chyba API: {error_message}")
-                    
-            except json.JSONDecodeError as e:
-                logger.error(f"Chyba při parsování JSON: {str(e)}")
-                logger.error(f"Kompletní response text: {response_text}")
+                        break # Go to next provider
+                    except requests.exceptions.RequestException as e:
+                        logger.error(f"Chyba při volání Jina API: {str(e)}")
+                        if retry_attempt < REQUEST_RETRY_COUNT:
+                           logger.warning("Retrying due to Jina request exception...")
+                           continue
+                        break # Go to next provider
+
+                elif provider_name == "firecrawl":
+                    # Firecrawl only supports markdown format in this implementation
+                    if content_format != "markdown":
+                        logger.warning("Firecrawl provider currently only supports 'markdown' format. Skipping.")
+                        break # Skip Firecrawl if HTML is requested
+
+                    api_url = config.get("api_url")
+                    if not api_url:
+                        logger.error(f"Chybí 'api_url' pro Firecrawl. Přeskakuji.")
+                        break # Skip Firecrawl if URL is missing
+
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Bearer {api_key}'
+                    }
+                    # Adapt target_selector to Firecrawl's includeTags
+                    # Split selector string into a list of tags
+                    include_tags = [tag.strip() for tag in target_selector.split(',') if tag.strip()]
+                    # Payload matching the user's simple curl example
+                    payload = {
+                        "url": url,
+                        "formats": ["markdown"],
+                        "includeTags": include_tags
+                    }
+
+                    logger.debug(f"Volání Firecrawl API: URL={api_url}, Headers={headers}, Payload={json.dumps(payload)}")
+                    response = requests_retry_session().post(api_url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+                    logger.debug(f"Firecrawl status code: {response.status_code}")
+
+                    try:
+                        response_text = response.text
+                        data = response.json()
+                        logger.debug(f"Firecrawl Raw Response: {response_text[:500]}...")
+                        logger.debug(f"Firecrawl Parsed JSON: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}...")
+
+                        if response.status_code == 200 and data.get("success") and data.get("data"):
+                            content = data["data"].get("markdown", "")
+                            # Use metadata from Firecrawl if available
+                            fc_metadata = data["data"].get("metadata", {})
+                            metadata = {
+                                "title": fc_metadata.get("title", url.split('/')[-1]),
+                                "url": fc_metadata.get("sourceURL", url),
+                                "description": fc_metadata.get("description"),
+                                "language": fc_metadata.get("language")
+                            }
+                            if content:
+                                print(f"\n=== FIRECRAWL MARKDOWN CONTENT PREVIEW FOR {url} ===")
+                                print(f"{content[:500]}...\n")
+                                logger.info("Úspěšně získán obsah (markdown) od Firecrawl.")
+                                return content, metadata
+                            else:
+                                logger.error("Firecrawl API vrátilo úspěšný status, ale markdown obsah chybí.")
+                                # Don't retry if content is missing
+                                break # Go to next provider
+                        else:
+                            error_message = data.get("error", f"HTTP Status {response.status_code} or success=false")
+                            logger.error(f"Chyba Firecrawl API: {error_message}")
+                            # Retry on server errors or rate limits
+                            if response.status_code >= 500 or response.status_code == 429:
+                                if retry_attempt < REQUEST_RETRY_COUNT:
+                                    logger.warning("Retrying due to Firecrawl API error...")
+                                    continue
+                                else:
+                                    logger.error("Max retries reached for Firecrawl.")
+                                    break # Go to next provider after max retries
+                            else:
+                                logger.warning(f"Non-retryable Firecrawl error ({response.status_code}).")
+                                break # Go to next provider
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Chyba při parsování JSON odpovědi od Firecrawl: {str(e)}")
+                        logger.error(f"Kompletní response text: {response_text}")
+                        if retry_attempt < REQUEST_RETRY_COUNT:
+                            logger.warning("Retrying due to Firecrawl JSON parse error...")
+                            continue
+                        break # Go to next provider
+                    except requests.exceptions.RequestException as e:
+                        logger.error(f"Chyba při volání Firecrawl API: {str(e)}")
+                        if retry_attempt < REQUEST_RETRY_COUNT:
+                           logger.warning("Retrying due to Firecrawl request exception...")
+                           continue
+                        break # Go to next provider
+
+                # --- End of Provider Specific Logic --- #
+
+            except requests.exceptions.Timeout as e:
+                logger.error(f"Timeout při volání {provider_name} API (pokus {retry_attempt+1}/{REQUEST_RETRY_COUNT+1}): {str(e)}")
                 if retry_attempt < REQUEST_RETRY_COUNT:
-                    logger.warning("Retrying due to JSON parse error...")
+                    logger.warning(f"Retrying {provider_name} after timeout...")
                     continue
-                raise
-                
-        except requests.exceptions.Timeout as e:
-            logger.error(f"Timeout při volání Jina AI API (pokus {retry_attempt+1}/{REQUEST_RETRY_COUNT+1}): {str(e)}")
-            if retry_attempt < REQUEST_RETRY_COUNT:
-                logger.warning(f"Retrying after timeout...")
-                continue
-            logger.error(f"Max retries reached for timeout. Giving up on URL: {url}")
-            raise
-            
-        except requests.RequestException as e:
-            logger.error(f"Chyba při volání Jina AI API: {str(e)}")
-            logger.error(f"Request URL: {api_url}")
-            logger.error(f"Request headers: {headers}")
-            if retry_attempt < REQUEST_RETRY_COUNT:
-                logger.warning("Retrying due to request exception...")
-                continue
-            raise
-            
-        # If we reach here, the request was successful, so break the retry loop
-        break
+                logger.error(f"Max retries reached for timeout with {provider_name}. Trying next provider.")
+                break # Go to next provider
+
+            except Exception as e:
+                logger.error(f"Neočekávaná chyba při zpracování s providerem {provider_name}: {str(e)}", exc_info=True)
+                if retry_attempt < REQUEST_RETRY_COUNT:
+                    logger.warning(f"Retrying {provider_name} after unexpected error...")
+                    continue
+                logger.error(f"Max retries reached after unexpected error with {provider_name}. Trying next provider.")
+                break # Go to next provider
+
+        # If the inner loop finished without returning (all retries failed for this provider),
+        # the outer loop continues to the next provider_id.
+
+    # If the outer loop finishes, all providers in the sequence failed.
+    logger.error(f"Nepodařilo se získat obsah ({content_format}) pro URL {url} od žádného providera v sekvenci.")
+    return None, None
+
+# --- Keep the old function name for calls that specifically need HTML via Jina --- 
+# --- This avoids refactoring the sitemap parsing logic extensively now --- 
+def get_html_content_via_jina(url, target_selector=".sitemap"):
+    return get_content(url, content_format="html", target_selector=target_selector)
 
 def parse_menu(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -749,70 +914,154 @@ def extract_links(menu_item, path=[], categorized_links={}, url_last_modified_ma
     return categorized_links
 
 def save_payloads_to_files(categorized_links, category_to_save=None):
-    """Saves categorized links to payload files.
+    """Saves categorized links table payloads to JSON files.
+
+    If category_to_save is specified, it performs an incremental update/add
+    for only the links associated with that specific category within the 
+    categorized_links dictionary (assumed to be the newly processed links).
+    Otherwise, it saves the complete payload for all categories.
 
     Args:
-        categorized_links (dict): Dictionary containing the categorized links.
-        category_to_save (str, optional): If specified, only save the payload
-                                          for this specific category. Defaults to None.
+        categorized_links (dict): Dictionary containing categorized links.
+                                  If category_to_save is set, this dictionary
+                                  should ideally only contain the links for that category.
+        category_to_save (str, optional): If specified, only process this category incrementally.
     """
     output_dir = "payloads"
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    categories_to_process = {} 
-    if category_to_save:
-        if category_to_save in categorized_links:
-            categories_to_process = {category_to_save: categorized_links[category_to_save]}
-            logger.info(f"Saving incremental table payload for category: {category_to_save}")
-        else:
-            logger.warning(f"Category '{category_to_save}' not found in categorized_links. Cannot save incremental table payload.")
-            return # Do nothing if the specified category doesn't exist
-    else:
-        categories_to_process = categorized_links
-        logger.info("Saving final table payloads for all categories.")
+    os.makedirs(output_dir, exist_ok=True)
 
-    for category, links in categories_to_process.items():
-        if not isinstance(links, list):
-            logger.error(f"Data for category '{category}' is not a list ({type(links)}). Skipping save for this category.")
-            continue
+    if category_to_save:
+        # --- Incremental Update Logic --- 
+        if category_to_save not in categorized_links:
+            logger.warning(f"Category '{category_to_save}' not found for incremental save.")
+            return
+
+        category = category_to_save
+        current_links_for_category = categorized_links[category]
+        if not isinstance(current_links_for_category, list):
+            logger.error(f"Data for category '{category}' is not a list ({type(current_links_for_category)}). Skipping incremental save.")
+            return
             
         table_name = f"{category.lower()}_table"
         filename = f"{output_dir}/{table_name}.json"
         
-        # Ensure each item has the required fields
-        updated_links = []
-        for link in links:
-            if not isinstance(link, dict):
-                logger.warning(f"Skipping non-dictionary item in category '{category}': {link}")
-                continue
-            updated_links.append({
-                "Title": link.get("Title", ""), # Provide default empty string
-                "URL": link.get("URL", ""),     # Provide default empty string
-                "Category": category,
-                "Question": link.get("Question", "Default question | Default question in English"),
-                "Navigation": link.get("Navigation", "")  # Add the Navigation field
-            })
+        # Load existing data
+        existing_items = []
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    existing_payload = json.load(f)
+                    if (isinstance(existing_payload, dict) and 
+                        'data' in existing_payload and 
+                        'items' in existing_payload['data'] and
+                        isinstance(existing_payload['data']['items'], list)):
+                        existing_items = existing_payload['data']['items']
+                        logger.info(f"Loaded {len(existing_items)} existing items from {filename} for incremental update.")
+                    else:
+                        logger.warning(f"Existing file {filename} has invalid structure. Will be overwritten.")
+                        existing_items = [] # Start fresh if structure is bad
+            except Exception as e:
+                logger.warning(f"Error reading existing file {filename}: {str(e)}. Will create new file.")
+                existing_items = []
+
+        # Create a dictionary of existing items by URL for quick lookup
+        existing_items_dict = {item.get('URL'): item for item in existing_items if isinstance(item, dict) and item.get('URL')}
         
+        updated_count = 0
+        added_count = 0
+
+        # Process only the links passed in for the specific category
+        for link_data in current_links_for_category:
+            if not isinstance(link_data, dict):
+                logger.warning(f"Skipping non-dictionary item during incremental save for category '{category}': {link_data}")
+                continue
+                
+            url = link_data.get('URL')
+            if not url:
+                logger.warning(f"Skipping item without URL during incremental save for category '{category}': {link_data}")
+                continue
+
+            # Create the standardized item structure
+            new_item = {
+                "Title": link_data.get("Title", ""), 
+                "URL": url,
+                "Category": category,
+                "Question": link_data.get("Question", "Default question | Default question in English"),
+                "Navigation": link_data.get("Navigation", "")
+            }
+
+            # Check if URL exists and update/add in the dictionary
+            if url in existing_items_dict:
+                existing_items_dict[url] = new_item # Update
+                updated_count += 1
+            else:
+                existing_items_dict[url] = new_item # Add
+                added_count += 1
+
+        # Convert the dictionary back to a list for the final payload
+        final_items = list(existing_items_dict.values())
+
+        # Create the final payload structure
         payload = {
             "data": {
                 "schema": {
-                    "searchableFields": ["Title", "URL", "Question", "Navigation"],  # Add Navigation to searchable fields
+                    "searchableFields": ["Title", "URL", "Question", "Navigation"],
                     "metadataFields": ["Category"]
                 },
                 "name": table_name,
-                "items": updated_links # Use the validated/updated list
+                "items": final_items
             }
         }
+
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
-            if category_to_save:
-                 logger.info(f"Incrementally updated table payload for '{category}' in file: {filename}")
-            else:
-                 logger.info(f"Saved final table payload for '{category}' in file: {filename}")
+            logger.info(f"Incrementally updated table payload for '{category}' in file: {filename} (Updated: {updated_count}, Added: {added_count}, Total: {len(final_items)})")
         except Exception as e:
-             logger.error(f"Error writing table payload file {filename}: {str(e)}")
+            logger.error(f"Error writing table payload file {filename}: {str(e)}")
+
+    else:
+        # --- Full Save Logic (for all categories) --- 
+        logger.info("Saving final table payloads for all categories.")
+        for category, links in categorized_links.items():
+            if not isinstance(links, list):
+                logger.error(f"Data for category '{category}' is not a list ({type(links)}). Skipping this category.")
+                continue
+                
+            table_name = f"{category.lower()}_table"
+            filename = f"{output_dir}/{table_name}.json"
+            
+            final_items = []
+            for link_data in links:
+                if not isinstance(link_data, dict):
+                    logger.warning(f"Skipping non-dictionary item during final save for category '{category}': {link_data}")
+                    continue
+                
+                final_items.append({
+                    "Title": link_data.get("Title", ""), 
+                    "URL": link_data.get("URL", ""),
+                    "Category": category,
+                    "Question": link_data.get("Question", "Default question | Default question in English"),
+                    "Navigation": link_data.get("Navigation", "")
+                })
+            
+            payload = {
+                "data": {
+                    "schema": {
+                        "searchableFields": ["Title", "URL", "Question", "Navigation"],
+                        "metadataFields": ["Category"]
+                    },
+                    "name": table_name,
+                    "items": final_items
+                }
+            }
+
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                logger.info(f"Saved final table payload for '{category}' in file: {filename} (Total items: {len(final_items)})")
+            except Exception as e:
+                logger.error(f"Error writing final table payload file {filename}: {str(e)}")
 
 def load_payloads_from_files():
     """Loads existing categorized link data from payload JSON files."""
@@ -862,7 +1111,7 @@ def load_payloads_from_files():
                             loaded_data[category] = []
                             
                         # Append items, checking for duplicates based on URL
-                        existing_urls = {item.get('URL') for item in loaded_data[category] if item.get('URL')}
+                        existing_urls = {item.get('URL', '') for item in loaded_data[category] if item.get('URL')}
                         new_items_count = 0
                         for item in items:
                              if isinstance(item, dict) and item.get('URL') and item['URL'] not in existing_urls:
@@ -923,12 +1172,20 @@ def truncate_content(content, max_tokens=199000):
     return content
 
 def save_payload_to_file(url, content, section, metadata):
+    """Saves the provided content (list of QA pairs) to a JSON file,
+    always overwriting the existing file.
+
+    Args:
+        url (str): The URL the content is associated with (used for filename).
+        content (list): The list of QA pair dictionaries to save.
+        section (str): The category/section (used for filename and metadata).
+        metadata (dict): Metadata (currently unused in this simplified version).
+    """
     # Ensure the output directory exists
     output_dir = "payloads"
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate a stable URL-based identifier for consistent filenames
-    # Parse the URL to extract a stable path component
     from urllib.parse import urlparse
     
     parsed_url = urlparse(url)
@@ -939,7 +1196,6 @@ def save_payload_to_file(url, content, section, metadata):
         url_path = 'home'
     
     # Create a stable filename based on the URL path
-    # Reverted: Remove the category stripping logic, use the full path
     url_based_name = url_path.replace('/', '_')
 
     # Sanitize the final base name
@@ -948,42 +1204,76 @@ def save_payload_to_file(url, content, section, metadata):
     url_based_name = re.sub(r"\s+", "_", url_based_name)
     url_based_name = re.sub(r"_+", "_", url_based_name)
     url_based_name = url_based_name.strip("_").lower()  # Ensure lowercase for consistency
-    url_based_name = url_based_name[:200]
+    url_based_name = url_based_name[:MAX_FILENAME_LENGTH] # Use MAX_FILENAME_LENGTH constant
     
+    # QA payload filename format: {section}_{url_based_name}.json
     filename = f"payloads/{section.lower()}_{url_based_name}.json"
     
-    # Přidání Category ke každému Q/A páru
+    # Ensure category is added to each item in the *incoming* content list
     for item in content:
-        item["Category"] = section
+        if isinstance(item, dict):
+            item["Category"] = section
+        else:
+            logger.warning(f"Skipping non-dictionary item during category assignment: {item}")
+
+    # --- Always Overwrite Logic --- 
+    logger.info(f"Performing full save (overwrite) to: {filename}")
+    final_items = content # Use the provided content directly
     
+    # Construct the final payload structure
     payload = {
         "data": {
             "schema": {
                 "searchableFields": ["Question", "Answer"],
                 "metadataFields": ["Category"]
             },
-            "name": f"{section.lower()}_{url_based_name}",
-            "items": content
+            "name": f"{section.lower()}_{url_based_name}", # Schema name consistency
+            "items": final_items # Use the validated items
         }
     }
     
+    # --- Final Validation and Saving --- 
     # Dodatečná validace struktury payloadu
     if not isinstance(payload["data"]["items"], list):
-        raise ValueError("Content must be a list")
+        logger.error(f"Critical Error: Payload items is not a list before saving {filename}. Aborting save.")
+        return None # Indicate save failure
+        
+    valid_items_count = 0
+    validated_items = []
     for item in payload["data"]["items"]:
         if not isinstance(item, dict):
-            raise ValueError("Each item must be a dictionary")
-        for key in payload["data"]["schema"]["searchableFields"]:
+            logger.warning(f"Skipping non-dictionary item during final validation: {item}")
+            continue
+        valid = True
+        for key in payload["data"]["schema"]["searchableFields"] + payload["data"]["schema"]["metadataFields"]:
             if key not in item:
-                raise ValueError(f"Missing required key: {key}")
+                logger.warning(f"Missing required key '{key}' in item: {item}. Skipping item.")
+                valid = False
+                break
+        if valid:
+            validated_items.append(item)
+            valid_items_count += 1
+            
+    payload["data"]["items"] = validated_items # Use only validated items
     
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    
-    logger.info(f"Uložen payload pro URL '{url}' do souboru: {filename}")
-    logger.debug(f"Payload content: {json.dumps(payload, indent=2, ensure_ascii=False)}")
-    print(f"Vytvořen nový payload: {filename}")
-    return filename
+    # Determine if we should skip saving:
+    # Skip ONLY if the final list is empty AND the original input content was NOT empty.
+    # This means validation failed on all items that were actually passed in.
+    # We allow saving if the final list is empty BECAUSE the original input was empty (initialization).
+    if not validated_items and bool(content):
+        logger.warning(f"No valid Q/A items found after validation for {filename}. Skipping file save as all originally provided items were invalid.")
+        return None # Indicate save failure due to validation removing all items
+
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Successfully saved/overwritten payload for URL '{url}' ({len(payload['data']['items'])} items) to file: {filename}")
+        print(f"Payload saved/overwritten: {filename}")
+        return filename # Return filename on success
+    except Exception as e:
+        logger.error(f"Error writing payload file {filename}: {str(e)}")
+        return None # Indicate save failure
 
 def upload_to_voiceflow(filename):
     logger.info(f"Nahrávání souboru '{filename}' do Voiceflow")
@@ -1039,44 +1329,67 @@ def convert_to_qa(content, title, category):
     
     # Revised system prompt focusing on extraction principles
     # Improved System Prompt
-    system_prompt = f"""# Tvá role: Jste ultra-precizní asistent pro extrakci informací. Vaším úkolem je analyzovat poskytnutý text a extrahovat z něj NAPROSTO VŠECHNY faktické informace ve formě párů Otázka/Odpověď. Použijte k tomu POUZE poskytnutý nástroj `extract_qa_pairs`. Klíčem je MAXIMÁLNÍ ÚPLNOST a DETAILNOST v poli "Answer".
+    system_prompt = f"""# Tvá role: Jste ultra-precizní asistent pro extrakci informací specializovaný na obsah webových stránek. Vaším úkolem je analyzovat poskytnutý text (fragment webové stránky) a extrahovat z něj POUZE informace **přímo související s hlavním tématem stránky: '{title}'**. Výstup MUSÍ být ve formě párů Otázka/Odpověď pomocí poskytnutého nástroje `extract_qa_pairs`. Ignorujte obecné navigační prvky, patičky, záhlaví a nesouvisející postranní panely.
 
-## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer"), které obsahují **každý detail** z textu. Odpovědi NESMÍ být stručné nebo sumarizované.
+## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer") obsahující **každý relevantní detail** z textu **k tématu '{title}'**. Odpovědi NESMÍ být stručné nebo sumarizované.
 
-## PRINCIPY EXTRAKCE:
-1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v textu. NIC si nedomýšlejte, neinterpretujte, nepřidávejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu), včetně všech detailů. **Nezkracujte ani nesumarizujte.**
-2.  **MAXIMÁLNÍ ÚPLNOST:** Extrahujte **ABSOLUTNĚ VŠECHNY** smysluplné informace **BEZ VYNECHÁNÍ**. Buďte **EXTRÉMNĚ DŮKLADNÍ**. To zahrnuje, ale není omezeno na:
-    *   **Všechny** kontaktní údaje (jména, příjmení, tituly, funkce, oddělení, emaily, VŠECHNY telefony – mobilní i pevné, fax, adresy kanceláří, čísla dveří, poštovní adresy).
-    *   **Kompletní** seznamy osob (členové rady, zastupitelé, zaměstnanci, výbory, komise atd.) – **každá osoba**, **každý detail**.
-    *   **Všechny** číselné údaje (částky, procenta, počty, rozměry, kapacity).
-    *   **Všechny** časové údaje (data, celé datumy, časy, termíny, lhůty, kompletní otevírací/úřední hodiny).
-    *   **Všechny** odkazy (URL na stránky, dokumenty ke stažení).
-    *   **Všechny** odkazy na obrázky nebo názvy souborů.
-    *   **Všechny** názvy (organizace, odbory, instituce, místa, dokumenty, programy, projekty).
-    *   **Všechny** procedurální informace (přesné postupy, kroky, návody, požadavky).
-    *   **Všechny** podmínky, kritéria a požadavky.
+## KLÍČOVÉ ZAMĚŘENÍ:
+*   **POUZE Téma '{title}':** Extrahujte informace **VÝHRADNĚ** se týkající **'{title}'**. Pokud text obsahuje sekce (např. telefonní seznam rozdělený podle oddělení), extrahujte informace pro každou tuto podsekci tématu.
+*   **IGNORUJTE Boilerplate:** **NEEXTRAHUJTE** informace z:
+    *   Hlavních navigačních menu (pokud nejsou specifické pro '{title}').
+    *   Obecných záhlaví a patiček stránky.
+    *   Postranních panelů s odkazy na nesouvisející portály nebo sekce.
+    *   Cookie lišt a podobných obecných prvků webu.
+*   **STRUKTURA (např. Telefonní seznam):** Pokud je hlavní téma strukturované (jako telefonní seznam podle oddělení), zachovejte tuto strukturu v odpovědích. Pro každé oddělení/sekci v rámci tématu '{title}' vytvořte Q/A páry obsahující **VŠECHNY** osoby a jejich **KOMPLETNÍ** kontaktní údaje (viz bod 6 níže).
+
+## KROK 0: POVINNÉ PŘEDZPRACOVÁNÍ ZDROJOVÉHO TEXTU
+PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel níže, MUSÍTE nejprve upravit "ZDROJOVÝ TEXT K ANALÝZE" následovně:
+- V celém textu nahraďte KAŽDÝ VÝSKYT jakéhokoli typu jednoduché nebo dvojité uvozovky (například: `\"", `"`, `"`, `"`, `'`, `'`, `'`, `'`) PŘESNĚ dvěma jednoduchými apostrofy (`''`).
+- Toto pravidlo se vztahuje na VŠECHNY uvozovky, které najdete. Cílem je, aby výsledný text, který budete dále analyzovat pro Q/A extrakci, neobsahoval žádné původní uvozovky, ale pouze `''` na jejich místě.
+- Tento krok je kriticky důležitý pro zajištění správného formátu JSON výstupu.
+
+## PRINCIPY EXTRAKCE (pro relevantní obsah k '{title}' PO KROKU 0):
+1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v relevantním textu (již upraveném dle Kroku 0). NIC si nedomýšlejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu). **Nezkracujte ani nesumarizujte.**
+2.  **MAXIMÁLNÍ ÚPLNOST (v rámci tématu):** Extrahujte **ABSOLUTNĚ VŠECHNY** smysluplné informace **k tématu '{title}'**. To zahrnuje (ale není omezeno na):
+    *   **Všechny** kontaktní údaje (jména, příjmení, tituly, funkce, oddělení, emaily, VŠECHNY telefony, fax, adresy kanceláří, čísla dveří) **osob relevantních k '{title}'**.
+    *   **Kompletní** seznamy osob (členové výborů, zaměstnanci oddělení atd.) **patřící k '{title}'**.
+    *   **Všechny** číselné údaje, časové údaje, odkazy, názvy **související s '{title}'**.
+    *   **Všechny** procedurální informace, podmínky, kritéria **týkající se '{title}'**.
 3.  **KONKRÉTNOST:** Odpovědi musí být konkrétní a faktické, **přímo citující** zdrojový text.
-4.  **KONTEXT:** Zachovejte původní kontext extrahovaných informací. Neizolujte data bez jejich významu.
-5.  **FORMÁTOVÁNÍ V ODPOVĚDI:**
-    *   V poli "Answer" formátujte odkazy pomocí Markdown: `[Popisek](URL)` a obrázky jako `![Popisek](URL)`. Popisek by měl být co nejvýstižnější (např. název dokumentu, jméno osoby).
-    *   **NEJDŮLEŽITĚJŠÍ:** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje, obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Prioritou je absolutní úplnost. Odpověď MUSÍ být v ČEŠTINĚ.
-6.  **KONTAKTY A SEZNAMY (!!!KLÍČOVÉ!!!):**
-    *   Věnujte **NEJVYŠŠÍ POZORNOST** extrakci **KOMPLETNÍCH, NEZKRÁCENÝCH** seznamů osob (např. členové rady, zastupitelstva, **zaměstnanci odborů**, členové komisí atd.) a **VŠECH** jejich kontaktních údajů uvedených v textu.
-    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců zmíněných v seznamu, spolu se **VŠEMI** jejich detaily (tituly PŘED i ZA jménem, plná funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo uvedené u osoby, **KAŽDÝ** email, číslo kanceláře, adresa atd.), přesně jak je to v textu.
-    *   **NEVYNECHÁVEJTE ŽÁDNÝ DETAIL U ŽÁDNÉ OSOBY!** I když se informace opakují.
-    *   Pro tyto seznamy **IGNORUJTE JAKÉKOLI VNÍMANÉ OMEZENÍ DÉLKY ODPOVĚDI**. Cílem je **100% ÚPLNOST** detailů pro každou osobu v seznamu.
-    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro celý seznam (např. Otázka: "Kdo jsou všichni členové Rady Královéhradeckého kraje a jaké jsou jejich kompletní kontaktní údaje?" a Odpověď obsahující **celý, nezměněný výpis** všech členů a jejich detailů z textu). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé členy seznamu.
-7.  **OTÁZKY:** Formulujte jasné otázky, které přímo vedou k extrahované **detailní** odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu: `Hlavní česká otázka? | Další česká varianta? | Detailní česká varianta? | English primary question? | Detailed English variation?`
+4.  **KONTEXT:** Zachovejte původní kontext extrahovaných informací v rámci tématu '{title}'.
+5.  **FORMÁTOVÁNÍ V ODPOVĚDI A ZAJIŠTĚNÍ VALIDNÍHO JSON VÝSTUPU:**
+    *   **Markdown v "Answer":** V poli "Answer" formátujte odkazy pomocí Markdown: `[Popisek](URL)`.
+    *   **Kritické Pravidlo (JSON Escaping pro "Question" a "Answer"):** Pole "Question" a "Answer" jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí. Dodržujte striktně následující pravidla pro escapování:
+        *   **Dvojité uvozovky (`"`)**: KAŽDÝ VÝSKYT znaku dvojité uvozovky (`"`) uvnitř textu, který vkládáte do pole "Question" nebo "Answer", MUSÍ být escapován jako `\\"`.
+            *   **Velmi Důležitá Poznámka k "KROKU 0"**: Váš stávající "KROK 0" nařizuje nahrazení VŠECH typů uvozovek ve VSTUPNÍM textu za dva jednoduché apostrofy (`''`). Pokud je tento krok proveden na textu PŘED jeho extrakcí pomocí LLM, pak LLM neuvidí žádné původní dvojité uvozovky (`"`) ve vstupním textu. V důsledku toho LLM nemůže tyto původní dvojité uvozovky escapovat jako `\\"`. Pokud je vaším cílem mít ve výsledném JSONu `\\"` tam, kde byly původně dvojité uvozovky, pak "KROK 0" by měl být upraven tak, aby nenahrazoval dvojité uvozovky, které mají být součástí extrahovaného obsahu (nebo by měl být vynechán pro tyto případy). Pokud "KROK 0" zůstane v platnosti tak, jak je, pak se toto pravidlo (`" -> \\"`) uplatní pouze na dvojité uvozovky, které by LLM samo nějakým způsobem generovalo do obsahu polí "Question" nebo "Answer", což by nemělo být běžné, pokud se drží principu verbatim extrakce.
+        *   **Zpětné lomítko (`\\`)**: KAŽDÝ VÝSKYT znaku zpětného lomítka (`\\`) MUSÍ být escapován jako `\\\\`.
+        *   **Lomítko (`/`)**: KAŽDÝ VÝSKYT znaku lomítka (`/`) MUSÍ být escapován jako `\\/`.
+        *   **Backspace**: Pokud se vyskytne, escapujte jako `\\b`.
+        *   **Form feed (`\\f`)**: Pokud se vyskytne, escapujte jako `\\f`.
+        *   **Newline (`\\n`)**: KAŽDÝ VÝSKYT znaku nového řádku MUSÍ být escapován jako `\\n`.
+        *   **Carriage return (`\\r`)**: KAŽDÝ VÝSKYT znaku carriage return MUSÍ být escapován jako `\\r`.
+        *   **Tab (`\\t`)**: KAŽDÝ VÝSKYT znaku tabulátoru MUSÍ být escapován jako `\\t`.
+        *   **Ostatní kontrolní znaky (Unicode U+0000 až U+001F)**: Všechny tyto znaky MUSÍ být escapovány pomocí `\\uXXXX` notace (např. `\\u000B` pro vertikální tabulátor).
+    *   **Obsah "Answer":** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje **k tématu '{title}'** (přičemž na tento extrahovaný text byla aplikována výše uvedená pravidla JSON escapování). Toto platí obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Odpověď MUSÍ být v ČEŠTINĚ.
+    *   **Struktura Výstupu:** Celý váš výstup MUSÍ být POUZE JEDEN validní JSON objekt, který přesně odpovídá schématu definovanému pro nástroj `extract_qa_pairs`. Žádný další text, poznámky, vysvětlení nebo formátování (např. Markdown bloky ```json ... ```) nesmí být přítomno mimo tento jediný JSON objekt.
+6.  **KONTAKTY A SEZNAMY (v rámci tématu '{title}'):**
+    *   Věnujte **NEJVYŠŠÍ POZORNOST** extrakci **KOMPLETNÍCH, NEZKRÁCENÝCH** seznamů osob (např. zaměstnanci odborů v telefonním seznamu) a **VŠECH** jejich kontaktních údajů.
+    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců v dané sekci tématu, spolu se **VŠEMI** jejich detaily (tituly, funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo, **KAŽDÝ** email, číslo kanceláře atd.), přesně jak je to v textu.
+    *   **NEVYNECHÁVEJTE ŽÁDNÝ DETAIL U ŽÁDNÉ OSOBY!**
+    *   Pro tyto seznamy **IGNORUJTE JAKÉKOLI VNÍMANÉ OMEZENÍ DÉLKY ODPOVĚDI**. Cílem je **100% ÚPLNOST** detailů pro každou osobu v seznamu relevantním k '{title}'.
+    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro každou logickou podsekci tématu (např. pro každý odbor v telefonním seznamu: Otázka: "Kdo pracuje v [Název odboru] a jaké jsou jejich kompletní kontakty?" a Odpověď obsahující **celý, nezměněný výpis** všech osob a detailů z dané sekce textu). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé osoby v seznamu.
+7.  **OTÁZKY:** Formulujte jasné otázky **specifické pro téma '{title}'**, které přímo vedou k extrahované **detailní** odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu pro telefonní seznam: `Jaké jsou kontakty na Odbor kancelář hejtmana? | Kdo pracuje v Kanceláři hejtmana a jak je kontaktovat? | Telefonní seznam Kanceláře hejtmana | What are the contacts for the Governor's Office Department? | Who works at the Governor's Office and what are their contact details?`
 
 ## POSTUP EXTRAKCE STEP-BY-STEP:
-1. Pečlivě analyzuj "ZDROJOVÝ TEXT K ANALÝZE" s cílem extrahovat **MAXIMUM** informativních Q/A párů.
-2. Identifikuj **VŠECHNY** klíčové informace, fakta, detaily, kontakty, seznamy, odkazy atd. **NIC NEPŘEHLÉDNI.**
-3. Pro každou identifikovanou informaci (nebo ucelený blok informací jako seznam) vytvořte pár Otázka/Odpověď.
-4. Dbejte na **ABSOLUTNÍ PŘESNOST A MAXIMÁLNÍ ÚPLNOST** extrakce. **NENECHÁVEJTE ŽÁDNÝ RELEVANTNÍ DETAIL** pozadu v poli "Answer".
-5. V odpovědích správně formátujte odkazy a obrázky pomocí Markdown. Jinak zachovejte text co nejblíže originálu.
-6. Vytvořte **VYČERPÁVAJÍCÍ** Q/A páry pro všechny seznamy osob a kontaktů, zachycující **každý jednotlivý detail**.
+1.  Pečlivě analyzuj "ZDROJOVÝ TEXT K ANALÝZE" s cílem extrahovat **MAXIMUM** informativních Q/A párů **k tématu '{title}'**.
+2.  Identifikuj **VŠECHNY** klíčové informace, fakta, detaily, kontakty, seznamy **relevantní k '{title}'**. **IGNORUJ** obsah nesouvisející s tímto tématem.
+3.  Pro každou identifikovanou informaci (nebo ucelený blok informací jako sekce telefonního seznamu) vytvořte pár Otázka/Odpověď.
+4.  Pokuste se generovat Q/A páry v pořadí, v jakém se informace objevují v textu.
+5.  Dbejte na **ABSOLUTNÍ PŘESNOST A MAXIMÁLNÍ ÚPLNOST** extrakce v rámci tématu. **NENECHÁVEJTE ŽÁDNÝ RELEVANTNÍ DETAIL** pozadu v poli "Answer".
+6.  V odpovědích správně formátujte odkazy pomocí Markdown.
+7.  Vytvořte **VYČERPÁVAJÍCÍ** Q/A páry pro všechny seznamy osob a kontaktů **v rámci tématu '{title}'**.
 
-## Cílové téma textu je: '{title}'. Zajistěte, aby odpovědi byly co nejkompletnější a nejpodrobnější."""
+## Cílové téma tohoto textového fragmentu je: '{title}'. Zaměřte se POUZE na extrakci informací k tomuto tématu."""
 
     # Revised user prompt focusing on the task and instructing tool use
     # Improved User Prompt
@@ -1088,6 +1401,7 @@ def convert_to_qa(content, title, category):
 
 # TVŮJ AKTUÁLNÍ ÚKOL: **NYNÍ POUŽIJ NÁSTROJ `extract_qa_pairs`** pro extrakci Q/A párů ze "ZDROJOVÝ TEXT K ANALÝZE".
 **DŮRAZ:** Zaměř se na vytvoření **maximálně vyčerpávajících a detailních odpovědí ('Answer')**, jak je specifikováno v systémových instrukcích, zejména pro kontaktní informace a seznamy. **NEZKRACUJ** odpovědi.
+**KLÍČOVÁ POŽADAVKA NA FORMÁT:** Ujistěte se, že celý JSON výstup je striktně validní. Všechny textové hodnoty v JSONu (zejména v polích "Question" a "Answer") MUSÍ mít korektně escapované všechny speciální znaky (jako jsou uvozovky, zpětná lomítka, nové řádky atd.) podle standardu JSON a dle detailních pravidel uvedených v systémových instrukcích. Výstup nesmí obsahovat žádný text mimo samotný JSON objekt.
 """
 
     messages = [{"role": "user", "content": user_prompt}]
@@ -1103,9 +1417,58 @@ def convert_to_qa(content, title, category):
         tool_choice=tool_choice # Force the model to use the tool
     )
 
+    # Debug logging for problematic Claude QA responses
+    log_full_response_for_debug = False
+    problematic_qa_pairs_source_string = None # Stores the string that was problematic
+
     if response_data is None:
         logger.error(f"Nepodařilo se získat Q/A páry pro '{title}' (API volání selhalo nebo nevrátilo data). ")
-        return None # Indicate failure
+        # No response_data to log in this case as it is None.
+    elif isinstance(response_data, dict):
+        if 'qa_pairs' in response_data:
+            potential_pairs_val = response_data['qa_pairs']
+            if isinstance(potential_pairs_val, str):
+                problematic_qa_pairs_source_string = potential_pairs_val # Store the string for logging
+                # Check if this string leads to extract_json_from_text returning a placeholder
+                # for a genuinely unparseable string.
+                parsed_val_for_check = extract_json_from_text(potential_pairs_val)
+                # Condition: placeholder returned AND original string wasn't a trivial empty list/object.
+                if parsed_val_for_check == {"qa_pairs": []} and \
+                   potential_pairs_val.strip().lower() not in ('[]', '{"qa_pairs": []}', '{"qa_pairs":null}', '{"qa_pairs": ""}','{}'):
+                    log_full_response_for_debug = True
+                    logger.warning(f"QA EXTRACTION DEBUG TRIGGER: 'qa_pairs' was a string that extract_json_from_text likely converted to placeholder for '{title}'.")
+            # If potential_pairs_val is not a string (e.g., already a list), it's less likely to be the source of the user's specific type of warning.
+        else: # 'qa_pairs' key missing in the response dictionary
+            log_full_response_for_debug = True
+            logger.warning(f"QA EXTRACTION DEBUG TRIGGER: 'qa_pairs' key missing in response_data dictionary for '{title}'.")
+    elif isinstance(response_data, str): # The entire response_data is a string, not a tool_use dictionary
+        log_full_response_for_debug = True
+        problematic_qa_pairs_source_string = response_data # The entire response is the "problematic string"
+        logger.warning(f"QA EXTRACTION DEBUG TRIGGER: Entire response_data from LLM was a string for '{title}'.")
+    else: # Unexpected type for response_data
+        log_full_response_for_debug = True
+        logger.warning(f"QA EXTRACTION DEBUG TRIGGER: Unexpected response_data type received from LLM for '{title}'. Type: {type(response_data)}")
+
+    if log_full_response_for_debug:
+        logger.info(f"======== QA EXTRACTION DEBUG: RAW LLM RESPONSE FOR '{title}' ========")
+        try:
+            if isinstance(response_data, dict):
+                 logger.info(f"Full response_data (dict): {json.dumps(response_data, ensure_ascii=False, indent=2)}")
+            elif isinstance(response_data, str): # Already captured as problematic_qa_pairs_source_string if it's the whole response
+                 logger.info(f"Full response_data (string): {response_data}")
+            else:
+                 logger.info(f"Full response_data (type {type(response_data)}): {str(response_data)}")
+            
+            # If the problematic part was specifically the qa_pairs string inside a dict, and it wasn't the entire response
+            if problematic_qa_pairs_source_string and problematic_qa_pairs_source_string is not response_data:
+                logger.info(f"Problematic 'qa_pairs' source string content: {problematic_qa_pairs_source_string}")
+            
+            print(f"QA EXTRACTION DEBUG: Full LLM API response for '{title}' logged to detailed log due to a processing issue (see log for details).")
+        except Exception as e:
+            logger.error(f"QA EXTRACTION DEBUG: Error encountered while trying to log full response_data: {str(e)}")
+            # Attempt to log a snippet if json.dumps or str() fails for some reason
+            logger.info(f"Problematic response_data (snippet if full logging failed): {str(response_data)[:1000]}...")
+        logger.info(f"======== END QA EXTRACTION DEBUG: RAW LLM RESPONSE FOR '{title}' ========")
 
     # --- Revised Handling of Tool Response ---
     qa_pairs = None # Initialize qa_pairs
@@ -1113,6 +1476,31 @@ def convert_to_qa(content, title, category):
     if isinstance(response_data, dict):
         if 'qa_pairs' in response_data:
             potential_pairs = response_data['qa_pairs']
+
+            # <<< FIX: Check if potential_pairs is a string and try to parse it >>>
+            if isinstance(potential_pairs, str):
+                logger.info(f"Model returned qa_pairs as a string for '{title}'. Attempting robust parsing.")
+                # Use the more robust JSON extraction function
+                parsed_data = extract_json_from_text(potential_pairs)
+                # Check if the robust parser returned the placeholder or actual data
+                if parsed_data and isinstance(parsed_data, dict) and 'qa_pairs' in parsed_data and parsed_data['qa_pairs'] is not None:
+                    # Check if the placeholder wasn't returned (meaning parsing was likely successful)
+                    # We check against the specific placeholder structure returned by extract_json_from_text on complete failure
+                    # Modify this check if the placeholder structure in extract_json_from_text changes
+                    is_placeholder = (parsed_data == {"qa_pairs": []}) and '[TABLE DATA]' not in potential_pairs # Crude check if it's the placeholder
+                    
+                    potential_pairs = parsed_data['qa_pairs'] # Extract the list
+                    if not is_placeholder:
+                        logger.info(f"Successfully parsed string using extract_json_from_text for '{title}'.")
+                    else:
+                        logger.warning(f"extract_json_from_text returned placeholder for '{title}'. Original string likely unparseable.")
+                        # Keep potential_pairs as [] from the placeholder
+                else:
+                    logger.error(f"Failed to parse JSON string robustly for 'qa_pairs' for '{title}'. Input string preview: {potential_pairs[:500]}...")
+                    potential_pairs = None # Indicate parsing failure
+
+            # <<< End of FIX >>>
+
             if isinstance(potential_pairs, list):
                 # Now, validate the structure of items within the list BEFORE assigning category
                 validated_internal_pairs = []
@@ -1205,71 +1593,274 @@ def convert_to_qa(content, title, category):
         # Fallback logic (will be handled by the calling function `process_url_content`)
         return None
 
-def process_url_content(url, html_content, category, metadata):
+def process_url_content(url, category, metadata):
+    """Processes the markdown content of a single URL to extract Q/A pairs.
+    Clears the QA file at the start, saves incrementally (overwriting),
+    and uploads the final file to Voiceflow only once at the end.
+
+    Args:
+        url (str): The URL to process.
+        category (str): The assigned category.
+        metadata (dict): Metadata associated with the URL (e.g., title).
+    """
+    accumulated_pairs_this_run = [] # Accumulate Q/A pairs for this run
+    final_filename = None # Store the name of the file to be uploaded
+
     try:
-        # Always get markdown content for Q/A - we don't need the html_content parameter anymore
+        # --- Step 1: Clear/Create the file at the start of processing this URL ---
+        logger.info(f"Initializing/Clearing Q/A file for URL: {url}")
+        # Call save_payload_to_file with an empty list to ensure the file is overwritten/created fresh
+        initial_filename = save_payload_to_file(url, [], category, metadata)
+        if not initial_filename:
+            # If we can't even create the empty file, log error and stop processing this URL
+            logger.error(f"Failed to initialize/clear Q/A file for {url}. Aborting Q/A extraction for this URL.")
+            return
+        logger.info(f"Successfully initialized/cleared file: {initial_filename}")
+        final_filename = initial_filename # Keep track of the latest valid filename
+        # No initial upload needed for an empty file
+        # ----------------------------------------------------------------------
+
+        # --- Step 2: Get Content ---
         try:
-            qa_content, _ = get_html_content(url, for_qa=True)
+            # Specify markdown format and the selectors needed for Q/A
+            qa_content, fetched_metadata = get_content(
+                url,
+                content_format="markdown",
+                target_selector="#block-khk-content, #block-khk-sectionmenu"
+            )
+            if not qa_content:
+                logger.error(f"Failed to retrieve markdown content for URL {url} from all providers.")
+                raise ValueError("No markdown content returned from get_content")
+
+            if fetched_metadata and fetched_metadata.get('title'):
+                 metadata['title'] = fetched_metadata['title'] # Update title
+
         except requests.exceptions.Timeout as e:
             logger.error(f"Timeout during Q/A content retrieval for URL {url}: {str(e)}")
-            logger.warning(f"Skipping Q/A extraction for URL {url} due to timeout")
-            print(f"\n=== Q/A EXTRACTION ERROR ===")
-            print(f"URL: {url}")
-            print(f"Error: Timeout during content retrieval")
-            print(f"Q/A Extraction: SKIPPED")
-            print("============================\n")
-            return
+            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: Timeout during content retrieval\nQ/A Extraction: SKIPPED\n============================\n")
+            return # Skip Q/A extraction for this URL
         except Exception as e:
             logger.error(f"Error during Q/A content retrieval for URL {url}: {str(e)}")
-            logger.warning(f"Skipping Q/A extraction for URL {url}")
-            print(f"\n=== Q/A EXTRACTION ERROR ===")
-            print(f"URL: {url}")
-            print(f"Error: {str(e)}")
-            print(f"Q/A Extraction: SKIPPED")
-            print("============================\n")
-            return
-        
-        # Add preprocessing step
-        qa_content = preprocess_html_content(qa_content)
-        
-        # Try to generate Q/A pairs
-        qa_pairs = convert_to_qa(qa_content, metadata.get('title', ''), category)
-        
-        # If conversion failed, create basic fallback QA pairs
-        if not qa_pairs:
-            logger.warning(f"QA conversion failed, creating fallback QA pair for {url}")
+            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: SKIPPED\n============================\n")
+            return # Skip Q/A extraction for this URL
+        # ---------------------------
+
+        qa_content = preprocess_markdown_content(qa_content)
+        content_chunks = chunk_content(qa_content)
+        logger.info(f"Split content into {len(content_chunks)} chunks for processing")
+
+        # --- Step 3: Process Chunks Incrementally ---
+        for i, chunk in enumerate(content_chunks):
+            logger.info(f"Processing chunk {i+1}/{len(content_chunks)} ({len(chunk)} characters)")
+            chunk_qa_pairs = convert_to_qa(chunk, metadata.get('title', 'Unknown Page') + f" (part {i+1})", category)
+
+            # If conversion succeeded and returned pairs for this chunk
+            if chunk_qa_pairs:
+                logger.info(f"Successfully extracted {len(chunk_qa_pairs)} Q/A pairs from chunk {i+1}")
+                accumulated_pairs_this_run.extend(chunk_qa_pairs) # Add pairs from this chunk
+
+                # Deduplicate the *current* accumulated list
+                seen_qa = set()
+                deduplicated_items = []
+                for item in reversed(accumulated_pairs_this_run):
+                     qa_tuple = (item.get('Question'), item.get('Answer'))
+                     if qa_tuple not in seen_qa:
+                         seen_qa.add(qa_tuple)
+                         deduplicated_items.append(item)
+                accumulated_pairs_this_run = list(reversed(deduplicated_items))
+                logger.info(f"Total accumulated items after adding chunk {i+1} and deduplicating: {len(accumulated_pairs_this_run)}")
+
+                # Save the *current accumulated* list, overwriting the previous state of the file
+                incremental_filename = save_payload_to_file(url, accumulated_pairs_this_run, category, metadata)
+
+                # Update the final filename if save was successful
+                if incremental_filename:
+                    final_filename = incremental_filename
+                else:
+                    # Log error if saving failed, but continue processing other chunks
+                    logger.error(f"Failed to save incremental payload after chunk {i+1} for URL {url}. Upload might use older file state if no further saves succeed.")
+            else:
+                # Log failure for this specific chunk
+                logger.warning(f"Failed to extract Q/A pairs from chunk {i+1} or no pairs found.")
+        # --- End Chunk Loop ---
+
+        # --- Step 4: Handle Fallback (only if NO pairs were ever accumulated) ---
+        if not accumulated_pairs_this_run:
+            logger.warning(f"No QA pairs were accumulated from any chunk for {url}. Creating fallback QA pair.")
             title = metadata.get('title', 'Unknown page')
-            qa_pairs = [{
+            fallback_qa_pairs = [{
                 "Question": f"Co najdu na stránce {title}? | What can I find on the {title} page? | Jaké informace obsahuje stránka {title}?",
                 "Answer": f"Na stránce najdete informace o {title}. Pro podrobnosti navštivte přímo [webovou stránku]({url}).",
                 "Category": category
             }]
-        
-        # Create the payload structure
-        payload = {
-            "data": {
-                "schema": {
-                    "searchableFields": ["Question", "Answer"],
-                    "metadataFields": ["Category"]
-                },
-                "name": f"{category.lower()}_qa",
-                "items": qa_pairs
-            }
-        }
-        
-        # Save the payload to a file
-        filename = save_payload_to_file(url, qa_pairs, category, metadata)
-        
-        # Upload to Voiceflow
-        upload_to_voiceflow(filename)
-        
+
+            # Save the fallback payload (this will overwrite the initial empty file or last saved state)
+            fallback_filename = save_payload_to_file(url, fallback_qa_pairs, category, metadata)
+
+            # Update the final filename if fallback save was successful
+            if fallback_filename:
+                final_filename = fallback_filename
+            else:
+                 logger.error(f"Failed to save fallback payload for URL {url}. No file will be uploaded.")
+                 final_filename = None # Ensure no upload happens if fallback save fails
+
+        # --- Step 5: Final Upload (after loop and fallback check) ---
+        if final_filename:
+            logger.info(f"All chunks processed for URL {url}. Proceeding to upload final file: {final_filename}")
+            upload_to_voiceflow(final_filename)
+        else:
+            logger.error(f"No final file available to upload for URL {url} (either initial save, incremental saves, or fallback save failed).")
+        # --- End Upload ---
+
     except Exception as e:
-        logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}")
-        print(f"\n=== Q/A EXTRACTION ERROR ===")
-        print(f"URL: {url}")
-        print(f"Error: {str(e)}")
-        print(f"Q/A Extraction: FAILED")
-        print("============================\n")
+        # Catch any unexpected errors during the entire process for this URL
+        logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}", exc_info=True)
+        print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: FAILED (Overall processing)\n============================\n")
+
+def chunk_content(content):
+    """
+    Split content into chunks based solely on Markdown headers (# to ######).
+    Chunks are not limited by size.
+
+    Args:
+        content (str): The full markdown content
+
+    Returns:
+        list: List of content chunks, split by headers. Returns a single chunk if no headers are found.
+    """
+    # Initialize empty list to hold chunks
+    processed_chunks = []
+
+    # Skip processing if content is empty or None
+    if not content or not content.strip():
+        logger.warning("Empty or None content received, skipping chunking")
+        return []
+
+    # Log the content size for context
+    logger.info(f"Content length before chunking: {len(content)} characters")
+
+    # --- Split by any Markdown Header (# to ######) ---
+    # Use regex that captures the header line itself and splits before it
+    header_split_pattern = r'(\n#{1,6}\s+[^\n]+\n)'
+    # Ensure content has leading newline for pattern matching at the start
+    if not content.startswith('\n'):
+        content = '\n' + content
+    header_split = re.split(header_split_pattern, content)
+
+    if len(header_split) > 1: # Found Markdown headers
+        num_headers = (len(header_split) - 1) // 2
+        logger.info(f"Splitting content by {num_headers} Markdown headers ('#' to '######').")
+        # The regex split results in [before_header, header1, after_header1_before_header2, header2, ...]
+        # We need to combine header with the text that follows it
+
+        # Handle text before the first header if it exists
+        text_before_first_header = header_split[0].strip()
+        if text_before_first_header:
+            processed_chunks.append(text_before_first_header)
+
+        # Combine headers with their following text
+        for i in range(1, len(header_split), 2):
+            header = header_split[i].strip() # Remove leading/trailing whitespace from header line
+            following_text = header_split[i+1] if i+1 < len(header_split) else ""
+            
+            # Create chunk starting with the header
+            current_chunk = header + "\n" + following_text.strip() # Add newline after header, trim following text
+            
+            # Add the combined chunk if it has content
+            if current_chunk.strip():
+                processed_chunks.append(current_chunk.strip())
+
+    else:
+        # --- No Headers Found ---
+        logger.info("No Markdown headers found. Returning the entire content as a single chunk.")
+        processed_chunks.append(content.strip()) # Return the whole content as one chunk
+
+    # Final validation (remove any potentially empty chunks created during processing)
+    validated_chunks = [chunk for chunk in processed_chunks if chunk]
+
+    logger.info(f"Final number of chunks created: {len(validated_chunks)}")
+
+    # Log each chunk for inspection
+    for i, chunk in enumerate(validated_chunks):
+        logger.info(f"--- Chunk {i+1}/{len(validated_chunks)} --- ({len(chunk)} characters) ---")
+        # Log a preview of the chunk
+        preview_start = chunk[:200].replace('\n', ' ')
+        preview_end = chunk[-100:].replace('\n', ' ')
+        logger.info(f"Chunk {i+1} Preview: {preview_start}... ...{preview_end}")
+
+    return validated_chunks
+
+def simple_chunk_by_size(text, max_size):
+    """
+    Simple and reliable fallback chunking method that splits text into chunks
+    of maximum size, trying to break at paragraph or sentence boundaries.
+    (This function is no longer used by chunk_content but kept for potential future use or reference)
+    
+    Args:
+        text (str): Text to split
+        max_size (int): Maximum size of each chunk
+
+    Returns:
+        list: List of text chunks
+    """
+    chunks = []
+    
+    # First try to split by paragraphs
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    current_chunk = ""
+    for para in paragraphs:
+        if len(para.strip()) == 0:
+            continue
+            
+        # If this paragraph alone exceeds max size, split it by sentences
+        if len(para) > max_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+                
+            # Split paragraph by sentences and add them
+            sentences = re.split(r'([.!?]\s+)', para)
+            sentence_chunk = ""
+            
+            for i in range(0, len(sentences), 2):
+                sentence = sentences[i]
+                # Add the punctuation back if it exists
+                if i+1 < len(sentences):
+                    sentence += sentences[i+1]
+                    
+                if len(sentence_chunk) + len(sentence) > max_size:
+                    if sentence_chunk:
+                        chunks.append(sentence_chunk.strip())
+                    # If a single sentence is too long, just force split it by size
+                    if len(sentence) > max_size:
+                        sentence_parts = [sentence[i:i+max_size] for i in range(0, len(sentence), max_size)]
+                        chunks.extend([p.strip() for p in sentence_parts if p.strip()])
+                        sentence_chunk = ""
+                    else:
+                        sentence_chunk = sentence
+                else:
+                    sentence_chunk += sentence
+            
+            # Add the final sentence chunk
+            if sentence_chunk.strip():
+                chunks.append(sentence_chunk.strip())
+        
+        # Normal case - add paragraph to current chunk if it fits
+        elif len(current_chunk) + len(para) + 2 > max_size:  # +2 for the newlines
+            chunks.append(current_chunk.strip())
+            current_chunk = para
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + para
+            else:
+                current_chunk = para
+    
+    # Add the final chunk
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
 
 def compile_search_queries_file():
     """
@@ -1785,12 +2376,16 @@ def main(skip_scraping, compile_only=False, process_missing=False, custom_urls=N
         else:
             # Standard sitemap processing
             logger.info(f"No custom URLs provided, proceeding with sitemap scraping from: {SITEMAP_URL}")
-            
+
             try:
-                # This is the ONLY place we should call get_html_content with for_qa=False
-                html_content, _ = get_html_content(SITEMAP_URL)
+                # Use the specific Jina HTML function for sitemap
+                html_content, _ = get_html_content_via_jina(SITEMAP_URL)
+                if not html_content:
+                    logger.error(f"Failed to get HTML sitemap content from {SITEMAP_URL}. Aborting.")
+                    return
+
                 main_menu = parse_menu(html_content)
-                
+
                 if not main_menu:
                     logger.error("Nepodařilo se najít hlavní menu na stránce.")
                     return
@@ -1827,7 +2422,7 @@ def main(skip_scraping, compile_only=False, process_missing=False, custom_urls=N
         logger.error(f"Payload directory '{payload_dir}' does not exist. Cannot upload.")
     else:
         for filename in os.listdir(payload_dir):
-            if filename.endswith('_table_payload.json'): # Only upload category tables
+            if filename.endswith('_table.json'): # Correct suffix check
                 file_path = os.path.join(payload_dir, filename)
                 logger.info(f"Uploading file: {filename}")
                 try:
@@ -1889,7 +2484,7 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
     
     Args:
         custom_urls (list): List of URLs to process
-        categorized_links (dict): Dictionary holding the categorized links
+        categorized_links (dict): Dictionary holding the categorized links (used for initial loading and final state)
         url_last_modified_map (dict): Dictionary mapping URLs to their last modified dates
         last_run_timestamp (datetime): The timestamp of the last script run
         
@@ -1898,6 +2493,8 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
     """
     logger.info(f"Processing {len(custom_urls)} custom URLs instead of scraping sitemap")
     
+    processed_categorized_links = {} # Store processed links for incremental saving
+
     for url in custom_urls:
         logger.info(f"\n=== Starting processing for custom URL: {url} ===")
         
@@ -1910,12 +2507,10 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
                 logger.info(f"Skipping all further processing for URL {url} as it hasn't changed.")
                 continue
             
-            # 3. Get metadata - we'll use only the URL as title initially
-            # The actual content will be retrieved in Q/A processing
+            # 3. Get metadata
             metadata = {"title": url.split("/")[-1], "url": url}
             
-            # 4. For categorization, we need a path
-            # Create a simple path based on URL parts
+            # 4. Create path for categorization
             url_parts = url.replace(BASE_URL, "").strip("/").split("/")
             path = url_parts if url_parts and url_parts[0] else ["Home"]
             
@@ -1927,25 +2522,12 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
             rag_question = generate_rag_question(path)
             logger.info(f"Generated RAG question: {rag_question}")
             
-            # 7. Add or Update in categorized_links
-            if category not in categorized_links:
-                categorized_links[category] = []
-                
             # Create readable title from URL
             title = url.split("/")[-1].replace("-", " ").replace("_", " ").capitalize()
             if not title:
                 title = url.split("/")[-2] if len(url.split("/")) > 2 else "Homepage"
                 
-            # Check if URL already exists
-            existing_entry = None
-            entry_index = -1
-            for i, entry in enumerate(categorized_links[category]):
-                if entry.get("URL") == url:
-                    existing_entry = entry
-                    entry_index = i
-                    break
-                    
-            # Create navigation path from URL parts
+            # Create navigation path
             navigation = " > ".join([part.replace("-", " ").replace("_", " ").capitalize() for part in path])
                     
             link_data = {
@@ -1956,26 +2538,39 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
                 "Navigation": navigation
             }
             
-            if existing_entry:
-                # Update existing entry
-                logger.info(f"Updating existing entry for URL: {url} in category {category}")
-                categorized_links[category][entry_index] = link_data
-            else:
-                # Append new entry
-                logger.info(f"Adding new entry for URL: {url} to category {category}")
-                categorized_links[category].append(link_data)
+            # --- Update the main categorized_links dictionary --- 
+            if category not in categorized_links:
+                categorized_links[category] = []
                 
-            # --- Save the updated category table payload incrementally --- 
-            save_payloads_to_files(categorized_links, category_to_save=category)
-            # ------------------------------------------------------------
+            existing_entry_index = -1
+            for i, entry in enumerate(categorized_links[category]):
+                if entry.get("URL") == url:
+                    existing_entry_index = i
+                    break
+            
+            if existing_entry_index != -1:
+                logger.info(f"Updating entry for URL: {url} in main dictionary (Category: {category})")
+                categorized_links[category][existing_entry_index] = link_data
+            else:
+                logger.info(f"Adding new entry for URL: {url} to main dictionary (Category: {category})")
+                categorized_links[category].append(link_data)
+            # ------------------------------------------------------
+
+            # --- Store processed link for incremental save --- 
+            if category not in processed_categorized_links:
+                processed_categorized_links[category] = []
+            processed_categorized_links[category].append(link_data)
+            # -------------------------------------------------
+
+            # --- Save ONLY the currently processed link data incrementally --- 
+            save_payloads_to_files({category: [link_data]}, category_to_save=category)
+            # -------------------------------------------------------------------
 
             # 8. Q/A Processing - only if enabled
             if ENABLE_QA_PROCESSING:
-                # Check domain and skip if not exactly "www.khk.cz" or "khk.cz"
+                # ... (rest of Q/A processing logic remains the same) ...
                 parsed_url = urlparse(url)
                 domain = parsed_url.netloc.lower()
-                
-                # Skip Q/A extraction for sitemaps, subdomains, or non-khk.cz domains
                 is_sitemap = "mapa-stranek" in url.lower() or "sitemap" in url.lower()
                 is_main_domain = domain == "www.khk.cz" or domain == "khk.cz"
                 
@@ -1984,9 +2579,9 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
                 elif not is_main_domain:
                     logger.info(f"Přeskakuji Q/A extrakci pro subdoménu nebo jinou doménu: {domain}")
                 else:
-                    # Direct Q/A content processing
                     logger.info("Spouštím Q/A extrakci (URL processing check passed)...")
-                    process_url_content(url, None, category, metadata)
+                    # Corrected call: remove the None argument
+                    process_url_content(url, category, metadata)
             else:
                 logger.info("Q/A zpracování je vypnuto")
                 
@@ -1996,16 +2591,14 @@ def process_custom_urls(custom_urls, categorized_links, url_last_modified_map, l
             logger.error(f"Chyba při zpracování URL {url}: {str(e)}")
             logger.error("Pokračuji na další URL...")
     
+    # Return the fully updated categorized_links dictionary for potential final save if needed
     return categorized_links
 
-def preprocess_html_content(content):
-    """Clean and simplify HTML content before sending to Claude"""
-    # Convert HTML tables to simpler markdown tables
-    content = re.sub(r'<table[^>]*>.*?</table>', 
-                     lambda m: convert_html_table_to_markdown(m.group(0)), 
-                     content, flags=re.DOTALL)
+def preprocess_markdown_content(content):
+    """Clean and simplify markdown content before sending to Claude"""
+    # Basic cleanup for markdown - more might be needed depending on source
     
-    # Replace common HTML special characters
+    # Replace common HTML special characters that might remain
     html_special_chars = {
         '&#160;': ' ',  # non-breaking space
         '&nbsp;': ' ',  # non-breaking space
@@ -2027,72 +2620,19 @@ def preprocess_html_content(content):
     # Remove any remaining HTML entity references (like &#xxxx;)
     content = re.sub(r'&#\d+;', '', content)
     
-    # Ensure proper handling of Markdown images
-    # This preserves the ![alt](url) format while ensuring proper JSON escaping
-    content = re.sub(r'!\[(.*?)\]\((.*?)\)', 
-                    lambda m: f"![{m.group(1)}]({m.group(2)})", 
-                    content)
+    # Normalize whitespace - replace multiple spaces/newlines with single ones
+    # Be careful not to destroy markdown structure too much
+    content = re.sub(r'[ \t]+', ' ', content) # Replace multiple spaces/tabs with single space
+    content = re.sub(r'\n{3,}', '\n\n', content) # Replace 3+ newlines with 2 (preserve paragraphs)
     
-    # Remove any remaining HTML tags
-    content = re.sub(r'<[^>]+>', ' ', content)
+    # Remove leading/trailing whitespace from each line
+    lines = [line.strip() for line in content.split('\n')]
+    content = '\n'.join(lines)
     
-    # Clean up excessive whitespace
-    content = re.sub(r'\s+', ' ', content).strip()
+    # Remove lines that are purely whitespace
+    content = re.sub(r'^\s*$\n', '', content, flags=re.MULTILINE)
     
-    return content
-
-def convert_html_table_to_markdown(html_table):
-    """
-    Convert an HTML table to a simplified text description focusing on content, not format.
-    Extracts key information in a readable format rather than preserving table structure.
-    """
-    try:
-        # First try to extract headers
-        headers = []
-        header_row = re.search(r'<th[^>]*>(.*?)</th>', html_table, re.DOTALL)
-        if header_row:
-            headers = re.findall(r'<th[^>]*>(.*?)</th>', html_table, re.DOTALL)
-            headers = [re.sub(r'<[^>]+>', '', header).strip() for header in headers]
-        
-        # Extract all rows
-        rows = re.findall(r'<tr>(.*?)</tr>', html_table, re.DOTALL)
-        if not rows:
-            return "Tabulka s neextrahovaným obsahem"
-        
-        # Process each row and create meaningful descriptions
-        result = []
-        
-        for row in rows:
-            # Skip empty rows
-            if re.search(r'<td[^>]*>(.*?)</td>', row, re.DOTALL):
-                cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
-                # Clean cell content (remove HTML tags)
-                cells = [re.sub(r'<[^>]+>', '', cell).strip() for cell in cells]
-                
-                # If we have headers and the same number of cells, create key-value pairs
-                if headers and len(headers) == len(cells):
-                    row_data = []
-                    for i, header in enumerate(headers):
-                        if cells[i].strip():  # Only include non-empty cells
-                            row_data.append(f"{header}: {cells[i]}")
-                    
-                    if row_data:
-                        result.append("; ".join(row_data))
-                else:
-                    # Without matching headers, just join the cell contents
-                    row_text = "; ".join([cell for cell in cells if cell.strip()])
-                    if row_text.strip():
-                        result.append(row_text)
-        
-        # Join all processed rows with line breaks
-        if result:
-            return "\n".join(result)
-        else:
-            return "Tabulka bez textového obsahu"
-    
-    except Exception as e:
-        logger.error(f"Error converting HTML table: {str(e)}")
-        return "Tabulka (chyba při konverzi)"
+    return content.strip()
 
 def extract_json_from_text(text):
     """Extract valid JSON from potentially malformed text"""
@@ -2114,11 +2654,21 @@ def extract_json_from_text(text):
             # Try to fix common JSON errors
             fixed_text = re.sub(r',\s*\}', '}', text)  # Remove trailing commas
             fixed_text = re.sub(r',\s*\]', ']', fixed_text)
-            return json.loads(fixed_text)
-        except:
+            # Attempt to parse the fixed text
+            # Added check to ensure it's a dictionary with 'qa_pairs' list
+            parsed = json.loads(fixed_text)
+            if isinstance(parsed, dict) and 'qa_pairs' in parsed and isinstance(parsed['qa_pairs'], list):
+                return parsed 
+        except json.JSONDecodeError:
+            # If fixing common errors didn't work, proceed to last resort
             pass
+        except Exception as e:
+             logger.error(f"Unexpected error during JSON fixing/parsing: {str(e)}")
+             # Proceed to last resort
+             pass
         
-        # Last resort - basic structure with empty pairs
+        # Last resort - basic structure with empty pairs if all else fails
+        logger.warning(f"Could not extract valid JSON structure from text. Returning empty list placeholder.")
         return {"qa_pairs": []}
 
 def convert_to_qa_with_retry(content, title, category, max_retries=3):
