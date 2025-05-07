@@ -30,7 +30,7 @@ CLAUDE_API_KEY = "REMOVED-ANTHROPIC-KEY"
 GROQ_API_KEY = "REMOVED-GROQ-KEY" # Added Groq API Key
 JINA_AI_API_KEY = "REMOVED-JINA-KEY"
 VOICEFLOW_API_KEY = "REMOVED-VOICEFLOW-KEY"
-FIRECRAWL_API_KEY = "REMOVED-FIRECRAWL-KEY" # Placeholder - Replace with your actual key
+FIRECRAWL_API_KEY = "REMOVED-FIRECRAWL-KEY" 
 
 # ============================================================================
 # LLM PROVIDER CONFIGURATION
@@ -80,6 +80,7 @@ MARKDOWN_PROVIDERS = {
 
 #!=================================!
 MARKDOWN_PROVIDER_SEQUENCE = "firecrawl,jina" # Comma-separated IDs from MARKDOWN_PROVIDERS
+#MARKDOWN_PROVIDER_SEQUENCE = "jina, firecrawl" # Comma-separated IDs from MARKDOWN_PROVIDERS
 #!=================================!
 
 # ============================================================================
@@ -95,13 +96,14 @@ XML_SITEMAP_URL = "https://www.khk.cz/sitemap.xml"
 # When this list is not empty, the script will only process these URLs instead of scraping the sitemap
 # Example: ["https://www.khk.cz/page1", "https://www.khk.cz/page2"]
 CUSTOM_URLS = [
-    "https://www.khk.cz/kraj/rada/komise-rady"
+
 ]
 
 # ============================================================================
 # API CALL SETTINGS
 # ============================================================================
-API_CALL_DELAY = 5  # Fixed delay between API calls in seconds
+API_CALL_DELAY = 10  # Fixed delay between API calls in seconds
+VOICEFLOW_UPLOAD_DELAY = 60 # Delay between Voiceflow upload API calls in seconds
 MAX_RETRIES = 3  # Maximum number of retry attempts
 INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 
@@ -110,8 +112,9 @@ INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 # ============================================================================
 ENABLE_QA_PROCESSING = True  # Enable Q/A processing
 UPLOAD_IMMEDIATELY = False  # Skip processing and only upload existing payloads
-COMPILE_SEARCH_QUERIES = True  # Enable compilation of search queries into TXT file
+COMPILE_SEARCH_QUERIES = False  # Enable compilation of search queries into TXT file
 CHECK_LAST_MODIFIED = True  # Check last modified date from sitemap.xml before Q/A extraction
+ENABLE_CONTENT_CHUNKING = True # NEW: Enable/disable content chunking for Q/A
 
 # ============================================================================
 # HTTP REQUEST SETTINGS
@@ -127,6 +130,9 @@ REQUEST_BACKOFF_FACTOR = 0.3
 MAX_TOKENS = 199000  # Maximum tokens for content processing
 MAX_FILENAME_LENGTH = 200  # Maximum length for generated filenames
 # MAX_CHUNK_SIZE = 4000  # Deprecated: Chunking is now based on headers only
+MAX_CHUNK_CHAR_LIMIT = 6000 # NEW: Maximum characters per chunk before sub-chunking
+MARKDOWN_CONTENT_SELECTORS = ["#block-khk-content", "#block-khk-sectionmenu"] # Default CSS selectors for Markdown content fetching
+HTML_SITEMAP_SELECTOR = ".sitemap" # Default CSS selector for the HTML sitemap page
 
 # ============================================================================
 # CATEGORIES
@@ -155,7 +161,10 @@ CATEGORIES = [
 # ============================================================================
 # FILE PATHS
 # ============================================================================
-LAST_RUN_FILE = "last_run_timestamp.txt"  # File to store the last run timestamp
+LAST_RUN_FILE = "scrape_sitemap_last_run_time.txt"  # File to store the last run timestamp
+
+# Global set to track table files modified in the current run
+modified_table_files_this_run = set()
 
 # Create log directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -474,7 +483,11 @@ def get_content(url, content_format="html", target_selector=".sitemap"):
                     }
                     if content_format == "markdown":
                         headers["X-Return-Format"] = "markdown"
-                        headers["X-Target-Selector"] = ""
+                        # Use global MARKDOWN_CONTENT_SELECTORS for Jina when format is markdown
+                        if MARKDOWN_CONTENT_SELECTORS:
+                            headers["X-Target-Selector"] = ",".join(MARKDOWN_CONTENT_SELECTORS)
+                        else:
+                            headers["X-Target-Selector"] = "" # Fallback to empty if global list is empty
                     else: # html
                         headers["X-Return-Format"] = "html"
                         headers["X-Target-Selector"] = target_selector # Use passed selector for sitemap
@@ -566,14 +579,13 @@ def get_content(url, content_format="html", target_selector=".sitemap"):
                         'Content-Type': 'application/json',
                         'Authorization': f'Bearer {api_key}'
                     }
-                    # Adapt target_selector to Firecrawl's includeTags
-                    # Split selector string into a list of tags
-                    include_tags = [tag.strip() for tag in target_selector.split(',') if tag.strip()]
-                    # Payload matching the user's simple curl example
+                    # Use global MARKDOWN_CONTENT_SELECTORS for Firecrawl includeTags
+                    # Firecrawl expects a list of strings, which MARKDOWN_CONTENT_SELECTORS is.
+                    effective_include_tags = MARKDOWN_CONTENT_SELECTORS if MARKDOWN_CONTENT_SELECTORS else []
                     payload = {
                         "url": url,
                         "formats": ["markdown"],
-                        "includeTags": include_tags
+                        "includeTags": effective_include_tags
                     }
 
                     logger.debug(f"Volání Firecrawl API: URL={api_url}, Headers={headers}, Payload={json.dumps(payload)}")
@@ -661,8 +673,10 @@ def get_content(url, content_format="html", target_selector=".sitemap"):
 
 # --- Keep the old function name for calls that specifically need HTML via Jina --- 
 # --- This avoids refactoring the sitemap parsing logic extensively now --- 
-def get_html_content_via_jina(url, target_selector=".sitemap"):
-    return get_content(url, content_format="html", target_selector=target_selector)
+def get_html_content_via_jina(url, target_selector=None):
+    # Use the global HTML_SITEMAP_SELECTOR if no specific target_selector is provided
+    effective_target_selector = target_selector if target_selector is not None else HTML_SITEMAP_SELECTOR
+    return get_content(url, content_format="html", target_selector=effective_target_selector)
 
 def parse_menu(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -887,7 +901,7 @@ def extract_links(menu_item, path=[], categorized_links={}, url_last_modified_ma
                         else:
                             # Direct Q/A content processing without redundant HTML call
                             logger.info("Spouštím Q/A extrakci (URL processing check passed)...")
-                            process_url_content(absolute_url, None, category, metadata)
+                            process_url_content(absolute_url, category, metadata)
                     else:
                         logger.info("Q/A zpracování je vypnuto")
 
@@ -1017,6 +1031,7 @@ def save_payloads_to_files(categorized_links, category_to_save=None):
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             logger.info(f"Incrementally updated table payload for '{category}' in file: {filename} (Updated: {updated_count}, Added: {added_count}, Total: {len(final_items)})")
+            modified_table_files_this_run.add(os.path.basename(filename)) # Track modified file
         except Exception as e:
             logger.error(f"Error writing table payload file {filename}: {str(e)}")
 
@@ -1060,6 +1075,7 @@ def save_payloads_to_files(categorized_links, category_to_save=None):
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
                 logger.info(f"Saved final table payload for '{category}' in file: {filename} (Total items: {len(final_items)})")
+                modified_table_files_this_run.add(os.path.basename(filename)) # Track modified file
             except Exception as e:
                 logger.error(f"Error writing final table payload file {filename}: {str(e)}")
 
@@ -1171,7 +1187,7 @@ def truncate_content(content, max_tokens=199000):
         return content[:max_chars] + "..."
     return content
 
-def save_payload_to_file(url, content, section, metadata):
+def save_payload_to_file(url, content, section):
     """Saves the provided content (list of QA pairs) to a JSON file,
     always overwriting the existing file.
 
@@ -1179,7 +1195,6 @@ def save_payload_to_file(url, content, section, metadata):
         url (str): The URL the content is associated with (used for filename).
         content (list): The list of QA pair dictionaries to save.
         section (str): The category/section (used for filename and metadata).
-        metadata (dict): Metadata (currently unused in this simplified version).
     """
     # Ensure the output directory exists
     output_dir = "payloads"
@@ -1301,7 +1316,7 @@ def convert_to_qa(content, title, category):
     qa_tool = [
         {
             "name": "extract_qa_pairs",
-            "description": "Extracts Question/Answer pairs from the provided text and formats them as a valid JSON object according to the specified schema.",
+            "description": "Extracts Question/Answer pairs from the provided text and assesses for contact information, formatting them as a valid JSON object according to the specified schema.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1317,9 +1332,13 @@ def convert_to_qa(content, title, category):
                             },
                             "required": ["Question", "Answer", "Category"]
                         }
+                    },
+                    "contains_contact_info": {
+                        "type": "boolean",
+                        "description": "Set to true if the analyzed text contains identifiable human contact details (names, emails, phone numbers, job titles), otherwise false."
                     }
                 },
-                "required": ["qa_pairs"]
+                "required": ["qa_pairs", "contains_contact_info"]
             }
         }
     ]
@@ -1329,12 +1348,13 @@ def convert_to_qa(content, title, category):
     
     # Revised system prompt focusing on extraction principles
     # Improved System Prompt
-    system_prompt = f"""# Tvá role: Jste ultra-precizní asistent pro extrakci informací specializovaný na obsah webových stránek. Vaším úkolem je analyzovat poskytnutý text (fragment webové stránky) a extrahovat z něj POUZE informace **přímo související s hlavním tématem stránky: '{title}'**. Výstup MUSÍ být ve formě párů Otázka/Odpověď pomocí poskytnutého nástroje `extract_qa_pairs`. Ignorujte obecné navigační prvky, patičky, záhlaví a nesouvisející postranní panely.
+    system_prompt = f"""# Tvá role: Jste ultra-precizní asistent pro extrakci informací specializovaný na obsah webových stránek. Vaším úkolem je analyzovat poskytnutý text (fragment webové stránky) a extrahovat z něj POUZE informace **přímo související s hlavním tématem stránky: '{title}'** A ZÁROVEŇ posoudit, zda text obsahuje kontaktní informace na konkrétní osoby. Výstup MUSÍ být ve formě párů Otázka/Odpověď a indikace přítomnosti kontaktů pomocí poskytnutého nástroje `extract_qa_pairs`. Ignorujte obecné navigační prvky, patičky, záhlaví a nesouvisející postranní panely.
 
-## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer") obsahující **každý relevantní detail** z textu **k tématu '{title}'**. Odpovědi NESMÍ být stručné nebo sumarizované.
+## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer") obsahující **každý relevantní detail** z textu **k tématu '{title}'**. Odpovědi NESMÍ být stručné nebo sumarizované. Současně POSUĎTE, zda text obsahuje kontaktní údaje na identifikovatelné osoby (jména, příjmení, e-maily, telefony, pracovní pozice) a nastavte pole `contains_contact_info` na `true` nebo `false`.
 
 ## KLÍČOVÉ ZAMĚŘENÍ:
 *   **POUZE Téma '{title}':** Extrahujte informace **VÝHRADNĚ** se týkající **'{title}'**. Pokud text obsahuje sekce (např. telefonní seznam rozdělený podle oddělení), extrahujte informace pro každou tuto podsekci tématu.
+*   **POSOUZENÍ KONTAKTŮ:** Pečlivě analyzujte text na přítomnost kontaktních údajů na konkrétní osoby. Pokud najdete jména ve spojení s emaily, telefony, funkcemi apod., nastavte `contains_contact_info` na `true`. Pokud text obsahuje pouze obecné kontakty na instituci (např. info@domena.cz, centrální telefonní číslo bez uvedení osoby), nebo vůbec žádné kontakty, nastavte na `false`.
 *   **IGNORUJTE Boilerplate:** **NEEXTRAHUJTE** informace z:
     *   Hlavních navigačních menu (pokud nejsou specifické pro '{title}').
     *   Obecných záhlaví a patiček stránky.
@@ -1344,52 +1364,55 @@ def convert_to_qa(content, title, category):
 
 ## KROK 0: POVINNÉ PŘEDZPRACOVÁNÍ ZDROJOVÉHO TEXTU
 PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel níže, MUSÍTE nejprve upravit "ZDROJOVÝ TEXT K ANALÝZE" následovně:
-- V celém textu nahraďte KAŽDÝ VÝSKYT jakéhokoli typu jednoduché nebo dvojité uvozovky (například: `\"", `"`, `"`, `"`, `'`, `'`, `'`, `'`) PŘESNĚ dvěma jednoduchými apostrofy (`''`).
-- Toto pravidlo se vztahuje na VŠECHNY uvozovky, které najdete. Cílem je, aby výsledný text, který budete dále analyzovat pro Q/A extrakci, neobsahoval žádné původní uvozovky, ale pouze `''` na jejich místě.
-- Tento krok je kriticky důležitý pro zajištění správného formátu JSON výstupu.
+- V celém textu nahraďte KAŽDÝ VÝSKYT **jakéhokoli typu uvozovky** (například: `\"`, `"`, `"`, `"`, `'`, `'`, `'`, `'`, `„`, `"`, `‚`, `'` atd.) **PŘESNĚ JEDNÍM standardním jednoduchým apostrofem (`'`)**.
+- Toto pravidlo se vztahuje na VŠECHNY uvozovky, které najdete, bez výjimky. Cílem je, aby výsledný text, který budete dále analyzovat pro Q/A extrakci, obsahoval místo jakýchkoli původních uvozovek pouze jednoduché apostrofy (`'`).
+- Tento krok je **ABSOLUTNĚ KRITICKY DŮLEŽITÝ** pro zajištění správného formátu JSON výstupu a pro zamezení chyb při parsování JSONu.
 
 ## PRINCIPY EXTRAKCE (pro relevantní obsah k '{title}' PO KROKU 0):
-1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v relevantním textu (již upraveném dle Kroku 0). NIC si nedomýšlejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu). **Nezkracujte ani nesumarizujte.**
+1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v relevantním textu (již upraveném dle Kroku 0). NIC si nedomýšlejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu, který nyní obsahuje pouze jednoduché apostrofy místo původních uvozovek). **Nezkracujte ani nesumarizujte.**
 2.  **MAXIMÁLNÍ ÚPLNOST (v rámci tématu):** Extrahujte **ABSOLUTNĚ VŠECHNY** smysluplné informace **k tématu '{title}'**. To zahrnuje (ale není omezeno na):
     *   **Všechny** kontaktní údaje (jména, příjmení, tituly, funkce, oddělení, emaily, VŠECHNY telefony, fax, adresy kanceláří, čísla dveří) **osob relevantních k '{title}'**.
     *   **Kompletní** seznamy osob (členové výborů, zaměstnanci oddělení atd.) **patřící k '{title}'**.
     *   **Všechny** číselné údaje, časové údaje, odkazy, názvy **související s '{title}'**.
     *   **Všechny** procedurální informace, podmínky, kritéria **týkající se '{title}'**.
-3.  **KONKRÉTNOST:** Odpovědi musí být konkrétní a faktické, **přímo citující** zdrojový text.
-4.  **KONTEXT:** Zachovejte původní kontext extrahovaných informací v rámci tématu '{title}'.
-5.  **FORMÁTOVÁNÍ V ODPOVĚDI A ZAJIŠTĚNÍ VALIDNÍHO JSON VÝSTUPU:**
+3.  **POČET POLOŽEK V SEZNAMECH:** Pokud text obsahuje seznamy položek (např. kontaktní osoby, projekty, dokumenty), jedna z Q/A dvojic se MUSÍ dotazovat na CELKOVÝ POČET těchto položek a odpověď MUSÍ obsahovat tento číselný údaj. Například: 'Kolik zaměstnanců pracuje v odboru X?' Odpověď: 'V odboru X pracuje celkem Y zaměstnanců.'
+4.  **KONKRÉTNÍ NÁKLADY/ALOKACE:** Pokud text zmiňuje jakékoli konkrétní finanční částky, náklady, alokace, rozpočty nebo podobné číselné údaje o penězích, jedna z Q/A dvojic se MUSÍ explicitně ptát na PŘESNOU VÝŠI této částky a odpověď ji MUSÍ obsahovat. Například: 'Jaká je výše dotace pro projekt Y?' Odpověď: 'Dotace pro projekt Y činí Z Kč.'
+5.  **KONKRÉTNOST:** Odpovědi musí být konkrétní a faktické, **přímo citující** zdrojový text (s uvozovkami převedenými na `'`).
+6.  **KONTEXT:** Zachovejte původní kontext extrahovaných informací v rámci tématu '{title}'.
+7.  **FORMÁTOVÁNÍ V ODPOVĚDI A ZAJIŠTĚNÍ VALIDNÍHO JSON VÝSTUPU:**
     *   **Markdown v "Answer":** V poli "Answer" formátujte odkazy pomocí Markdown: `[Popisek](URL)`.
-    *   **Kritické Pravidlo (JSON Escaping pro "Question" a "Answer"):** Pole "Question" a "Answer" jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí. Dodržujte striktně následující pravidla pro escapování:
-        *   **Dvojité uvozovky (`"`)**: KAŽDÝ VÝSKYT znaku dvojité uvozovky (`"`) uvnitř textu, který vkládáte do pole "Question" nebo "Answer", MUSÍ být escapován jako `\\"`.
-            *   **Velmi Důležitá Poznámka k "KROKU 0"**: Váš stávající "KROK 0" nařizuje nahrazení VŠECH typů uvozovek ve VSTUPNÍM textu za dva jednoduché apostrofy (`''`). Pokud je tento krok proveden na textu PŘED jeho extrakcí pomocí LLM, pak LLM neuvidí žádné původní dvojité uvozovky (`"`) ve vstupním textu. V důsledku toho LLM nemůže tyto původní dvojité uvozovky escapovat jako `\\"`. Pokud je vaším cílem mít ve výsledném JSONu `\\"` tam, kde byly původně dvojité uvozovky, pak "KROK 0" by měl být upraven tak, aby nenahrazoval dvojité uvozovky, které mají být součástí extrahovaného obsahu (nebo by měl být vynechán pro tyto případy). Pokud "KROK 0" zůstane v platnosti tak, jak je, pak se toto pravidlo (`" -> \\"`) uplatní pouze na dvojité uvozovky, které by LLM samo nějakým způsobem generovalo do obsahu polí "Question" nebo "Answer", což by nemělo být běžné, pokud se drží principu verbatim extrakce.
-        *   **Zpětné lomítko (`\\`)**: KAŽDÝ VÝSKYT znaku zpětného lomítka (`\\`) MUSÍ být escapován jako `\\\\`.
-        *   **Lomítko (`/`)**: KAŽDÝ VÝSKYT znaku lomítka (`/`) MUSÍ být escapován jako `\\/`.
+    *   **Kritické Pravidlo (JSON Escaping pro "Question" a "Answer"):** Pole "Question" a "Answer" jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat následující speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí:
+        *   **Jednoduché apostrofy (`'`)**: Díky "KROKU 0" budou všechny původní uvozovky v textu převedeny na jednoduché apostrofy. Tyto jednoduché apostrofy (`'`) jsou **validní** uvnitř JSON řetězce definovaného dvojitými uvozovkami (např. `"Answer": "Text s 'apostrofem' uvnitř."`) a **NENÍ NUTNÉ JE SAMOTNÉ DÁLE ESCOPOVAT** v kontextu JSON řetězce. Zaměřte se na ostatní speciální znaky.
+        *   **Dvojité uvozovky (`"`)**: Tyto by se **NEMĚLY** vyskytovat v extrahovaném textu, protože KROK 0 je všechny převedl na jednoduché apostrofy. Pokud byste je z nějakého důvodu generovali, MUSÍ být escapovány jako `\\"`. **Ale primárně se spolehněte na KROK 0.**
+        *   **Zpětné lomítko (`\\`)**: KAŽDÝ VÝSKYT znaku zpětného lomítka (`\\`) MUSÍ být escapován jako `\\\\`. (Např. text `c:\\path` se stane `"c:\\\\path"`)
+        *   **Lomítko (`/`)**: KAŽDÝ VÝSKYT znaku lomítka (`/`) MUSÍ být escapován jako `\\/`. (Např. text `http://example.com` se stane `"http:\\/\\/example.com"`)
         *   **Backspace**: Pokud se vyskytne, escapujte jako `\\b`.
         *   **Form feed (`\\f`)**: Pokud se vyskytne, escapujte jako `\\f`.
         *   **Newline (`\\n`)**: KAŽDÝ VÝSKYT znaku nového řádku MUSÍ být escapován jako `\\n`.
         *   **Carriage return (`\\r`)**: KAŽDÝ VÝSKYT znaku carriage return MUSÍ být escapován jako `\\r`.
         *   **Tab (`\\t`)**: KAŽDÝ VÝSKYT znaku tabulátoru MUSÍ být escapován jako `\\t`.
         *   **Ostatní kontrolní znaky (Unicode U+0000 až U+001F)**: Všechny tyto znaky MUSÍ být escapovány pomocí `\\uXXXX` notace (např. `\\u000B` pro vertikální tabulátor).
-    *   **Obsah "Answer":** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje **k tématu '{title}'** (přičemž na tento extrahovaný text byla aplikována výše uvedená pravidla JSON escapování). Toto platí obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Odpověď MUSÍ být v ČEŠTINĚ.
+    *   **Obsah "Answer":** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje **k tématu '{title}'** (kde všechny původní uvozovky jsou nyní jednoduché apostrofy a ostatní speciální znaky jsou escapovány dle výše uvedených pravidel). Toto platí obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Odpověď MUSÍ být v ČEŠTINĚ.
     *   **Struktura Výstupu:** Celý váš výstup MUSÍ být POUZE JEDEN validní JSON objekt, který přesně odpovídá schématu definovanému pro nástroj `extract_qa_pairs`. Žádný další text, poznámky, vysvětlení nebo formátování (např. Markdown bloky ```json ... ```) nesmí být přítomno mimo tento jediný JSON objekt.
 6.  **KONTAKTY A SEZNAMY (v rámci tématu '{title}'):**
     *   Věnujte **NEJVYŠŠÍ POZORNOST** extrakci **KOMPLETNÍCH, NEZKRÁCENÝCH** seznamů osob (např. zaměstnanci odborů v telefonním seznamu) a **VŠECH** jejich kontaktních údajů.
-    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců v dané sekci tématu, spolu se **VŠEMI** jejich detaily (tituly, funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo, **KAŽDÝ** email, číslo kanceláře atd.), přesně jak je to v textu.
+    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců v dané sekci tématu, spolu se **VŠEMI** jejich detaily (tituly, funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo, **KAŽDÝ** email, číslo kanceláře atd.), přesně jak je to v textu (s uvozovkami převedenými na `'`).
     *   **NEVYNECHÁVEJTE ŽÁDNÝ DETAIL U ŽÁDNÉ OSOBY!**
     *   Pro tyto seznamy **IGNORUJTE JAKÉKOLI VNÍMANÉ OMEZENÍ DÉLKY ODPOVĚDI**. Cílem je **100% ÚPLNOST** detailů pro každou osobu v seznamu relevantním k '{title}'.
-    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro každou logickou podsekci tématu (např. pro každý odbor v telefonním seznamu: Otázka: "Kdo pracuje v [Název odboru] a jaké jsou jejich kompletní kontakty?" a Odpověď obsahující **celý, nezměněný výpis** všech osob a detailů z dané sekce textu). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé osoby v seznamu.
+    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro každou logickou podsekci tématu (např. pro každý odbor v telefonním seznamu: Otázka: "Kdo pracuje v [Název odboru] a jaké jsou jejich kompletní kontakty?" a Odpověď obsahující **celý, nezměněný výpis** všech osob a detailů z dané sekce textu, s uvozovkami jako `'`). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé osoby v seznamu.
 7.  **OTÁZKY:** Formulujte jasné otázky **specifické pro téma '{title}'**, které přímo vedou k extrahované **detailní** odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu pro telefonní seznam: `Jaké jsou kontakty na Odbor kancelář hejtmana? | Kdo pracuje v Kanceláři hejtmana a jak je kontaktovat? | Telefonní seznam Kanceláře hejtmana | What are the contacts for the Governor's Office Department? | Who works at the Governor's Office and what are their contact details?`
 
 ## POSTUP EXTRAKCE STEP-BY-STEP:
-1.  Pečlivě analyzuj "ZDROJOVÝ TEXT K ANALÝZE" s cílem extrahovat **MAXIMUM** informativních Q/A párů **k tématu '{title}'**.
+1.  Pečlivě analyzuj "ZDROJOVÝ TEXT K ANALÝZE" (po aplikaci KROKU 0) s cílem extrahovat **MAXIMUM** informativních Q/A párů **k tématu '{title}'** A ZÁROVEŇ POSOUDIT přítomnost kontaktů.
 2.  Identifikuj **VŠECHNY** klíčové informace, fakta, detaily, kontakty, seznamy **relevantní k '{title}'**. **IGNORUJ** obsah nesouvisející s tímto tématem.
 3.  Pro každou identifikovanou informaci (nebo ucelený blok informací jako sekce telefonního seznamu) vytvořte pár Otázka/Odpověď.
 4.  Pokuste se generovat Q/A páry v pořadí, v jakém se informace objevují v textu.
 5.  Dbejte na **ABSOLUTNÍ PŘESNOST A MAXIMÁLNÍ ÚPLNOST** extrakce v rámci tématu. **NENECHÁVEJTE ŽÁDNÝ RELEVANTNÍ DETAIL** pozadu v poli "Answer".
 6.  V odpovědích správně formátujte odkazy pomocí Markdown.
 7.  Vytvořte **VYČERPÁVAJÍCÍ** Q/A páry pro všechny seznamy osob a kontaktů **v rámci tématu '{title}'**.
+8.  Na základě analýzy textu nastavte hodnotu `contains_contact_info` na `true` nebo `false`.
 
-## Cílové téma tohoto textového fragmentu je: '{title}'. Zaměřte se POUZE na extrakci informací k tomuto tématu."""
+## Cílové téma tohoto textového fragmentu je: '{title}'. Zaměřte se POUZE na extrakci informací k tomuto tématu a posouzení přítomnosti kontaktů."""
 
     # Revised user prompt focusing on the task and instructing tool use
     # Improved User Prompt
@@ -1472,8 +1495,16 @@ PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel ní�
 
     # --- Revised Handling of Tool Response ---
     qa_pairs = None # Initialize qa_pairs
+    contains_contact_info = False # Initialize contains_contact_info
 
     if isinstance(response_data, dict):
+        # Extract contains_contact_info first
+        contains_contact_info = response_data.get('contains_contact_info', False)
+        if not isinstance(contains_contact_info, bool):
+            logger.warning(f"Hodnota 'contains_contact_info' není boolean: {contains_contact_info}. Nastavuji na False.")
+            contains_contact_info = False
+        logger.info(f"Assessment for contains_contact_info for '{title}': {contains_contact_info}")
+
         if 'qa_pairs' in response_data:
             potential_pairs = response_data['qa_pairs']
 
@@ -1586,209 +1617,192 @@ PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel ní�
         if not valid_pairs_with_category and isinstance(response_data, dict) and 'qa_pairs' in response_data and response_data['qa_pairs'] == []:
              logger.info(f"Model vrátil validní prázdný seznam 'qa_pairs' pro '{title}', protože nebyly nalezeny žádné relevantní informace.")
 
-        return valid_pairs_with_category
+        return valid_pairs_with_category, contains_contact_info # Return both qa_pairs and the flag
     else:
         # If qa_pairs is still None, it means extraction or validation failed. Trigger fallback.
         logger.warning(f"Nepodařilo se extrahovat platný seznam Q/A párů z odpovědi modelu/nástroje pro '{title}'. Spouští se fallback.")
         # Fallback logic (will be handled by the calling function `process_url_content`)
-        return None
+        return None, contains_contact_info # Return None for qa_pairs, but still return the assessed flag
 
-def process_url_content(url, category, metadata):
-    """Processes the markdown content of a single URL to extract Q/A pairs.
-    Clears the QA file at the start, saves incrementally (overwriting),
-    and uploads the final file to Voiceflow only once at the end.
+def sub_chunk_if_needed(chunk, identifier, max_limit):
+    """Helper function to sub-chunk oversized text chunks."""
+    if len(chunk) <= max_limit:
+        return [chunk]
 
-    Args:
-        url (str): The URL to process.
-        category (str): The assigned category.
-        metadata (dict): Metadata associated with the URL (e.g., title).
-    """
-    accumulated_pairs_this_run = [] # Accumulate Q/A pairs for this run
-    final_filename = None # Store the name of the file to be uploaded
+    logger.warning(f"Chunk starting with '{identifier[:50].replace(chr(10), ' ')}...' ({len(chunk)} chars) exceeds limit {max_limit}. Attempting sub-chunking.")
+    sub_chunks = []
 
-    try:
-        # --- Step 1: Clear/Create the file at the start of processing this URL ---
-        logger.info(f"Initializing/Clearing Q/A file for URL: {url}")
-        # Call save_payload_to_file with an empty list to ensure the file is overwritten/created fresh
-        initial_filename = save_payload_to_file(url, [], category, metadata)
-        if not initial_filename:
-            # If we can't even create the empty file, log error and stop processing this URL
-            logger.error(f"Failed to initialize/clear Q/A file for {url}. Aborting Q/A extraction for this URL.")
-            return
-        logger.info(f"Successfully initialized/cleared file: {initial_filename}")
-        final_filename = initial_filename # Keep track of the latest valid filename
-        # No initial upload needed for an empty file
-        # ----------------------------------------------------------------------
+    # 1. Try splitting by Markdown Table Separators (|---|)
+    # We look for the separator line itself to split *between* tables ideally
+    table_separator_pattern = r'\n(\|\s*[:-]?---\s*)+\|?\n'
+    # Find all start indices of the separator lines
+    indices = [m.start() for m in re.finditer(table_separator_pattern, chunk)]
 
-        # --- Step 2: Get Content ---
-        try:
-            # Specify markdown format and the selectors needed for Q/A
-            qa_content, fetched_metadata = get_content(
-                url,
-                content_format="markdown",
-                target_selector="#block-khk-content, #block-khk-sectionmenu"
-            )
-            if not qa_content:
-                logger.error(f"Failed to retrieve markdown content for URL {url} from all providers.")
-                raise ValueError("No markdown content returned from get_content")
+    if indices:
+        logger.info(f"Attempting to sub-chunk '{identifier[:50].replace(chr(10), ' ')}...' based on table separators.")
+        start_index = 0
+        for match_start_index in indices:
+            # Try to get the content *before* the separator
+            sub = chunk[start_index:match_start_index].strip()
+            if sub:
+                # Recursively check/split this part if it's still too big
+                sub_chunks.extend(sub_chunk_if_needed(sub, f"Table part before sep @{match_start_index}", max_limit))
+            # Move start_index past the separator found at match_start_index
+            # Find the end of the separator match
+            sep_match = re.search(table_separator_pattern, chunk[match_start_index:])
+            if sep_match:
+                start_index = match_start_index + sep_match.end()
+            else: # Should not happen, but break defensively
+                start_index = match_start_index + 3 # Move past minimum separator length
+                logger.warning("Separator end not found precisely, moving past conservatively.")
 
-            if fetched_metadata and fetched_metadata.get('title'):
-                 metadata['title'] = fetched_metadata['title'] # Update title
+        # Add the last part after the final separator
+        last_part = chunk[start_index:].strip()
+        if last_part:
+            sub_chunks.extend(sub_chunk_if_needed(last_part, f"Final table part after sep @{start_index}", max_limit))
 
-        except requests.exceptions.Timeout as e:
-            logger.error(f"Timeout during Q/A content retrieval for URL {url}: {str(e)}")
-            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: Timeout during content retrieval\nQ/A Extraction: SKIPPED\n============================\n")
-            return # Skip Q/A extraction for this URL
-        except Exception as e:
-            logger.error(f"Error during Q/A content retrieval for URL {url}: {str(e)}")
-            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: SKIPPED\n============================\n")
-            return # Skip Q/A extraction for this URL
-        # ---------------------------
-
-        qa_content = preprocess_markdown_content(qa_content)
-        content_chunks = chunk_content(qa_content)
-        logger.info(f"Split content into {len(content_chunks)} chunks for processing")
-
-        # --- Step 3: Process Chunks Incrementally ---
-        for i, chunk in enumerate(content_chunks):
-            logger.info(f"Processing chunk {i+1}/{len(content_chunks)} ({len(chunk)} characters)")
-            chunk_qa_pairs = convert_to_qa(chunk, metadata.get('title', 'Unknown Page') + f" (part {i+1})", category)
-
-            # If conversion succeeded and returned pairs for this chunk
-            if chunk_qa_pairs:
-                logger.info(f"Successfully extracted {len(chunk_qa_pairs)} Q/A pairs from chunk {i+1}")
-                accumulated_pairs_this_run.extend(chunk_qa_pairs) # Add pairs from this chunk
-
-                # Deduplicate the *current* accumulated list
-                seen_qa = set()
-                deduplicated_items = []
-                for item in reversed(accumulated_pairs_this_run):
-                     qa_tuple = (item.get('Question'), item.get('Answer'))
-                     if qa_tuple not in seen_qa:
-                         seen_qa.add(qa_tuple)
-                         deduplicated_items.append(item)
-                accumulated_pairs_this_run = list(reversed(deduplicated_items))
-                logger.info(f"Total accumulated items after adding chunk {i+1} and deduplicating: {len(accumulated_pairs_this_run)}")
-
-                # Save the *current accumulated* list, overwriting the previous state of the file
-                incremental_filename = save_payload_to_file(url, accumulated_pairs_this_run, category, metadata)
-
-                # Update the final filename if save was successful
-                if incremental_filename:
-                    final_filename = incremental_filename
-                else:
-                    # Log error if saving failed, but continue processing other chunks
-                    logger.error(f"Failed to save incremental payload after chunk {i+1} for URL {url}. Upload might use older file state if no further saves succeed.")
-            else:
-                # Log failure for this specific chunk
-                logger.warning(f"Failed to extract Q/A pairs from chunk {i+1} or no pairs found.")
-        # --- End Chunk Loop ---
-
-        # --- Step 4: Handle Fallback (only if NO pairs were ever accumulated) ---
-        if not accumulated_pairs_this_run:
-            logger.warning(f"No QA pairs were accumulated from any chunk for {url}. Creating fallback QA pair.")
-            title = metadata.get('title', 'Unknown page')
-            fallback_qa_pairs = [{
-                "Question": f"Co najdu na stránce {title}? | What can I find on the {title} page? | Jaké informace obsahuje stránka {title}?",
-                "Answer": f"Na stránce najdete informace o {title}. Pro podrobnosti navštivte přímo [webovou stránku]({url}).",
-                "Category": category
-            }]
-
-            # Save the fallback payload (this will overwrite the initial empty file or last saved state)
-            fallback_filename = save_payload_to_file(url, fallback_qa_pairs, category, metadata)
-
-            # Update the final filename if fallback save was successful
-            if fallback_filename:
-                final_filename = fallback_filename
-            else:
-                 logger.error(f"Failed to save fallback payload for URL {url}. No file will be uploaded.")
-                 final_filename = None # Ensure no upload happens if fallback save fails
-
-        # --- Step 5: Final Upload (after loop and fallback check) ---
-        if final_filename:
-            logger.info(f"All chunks processed for URL {url}. Proceeding to upload final file: {final_filename}")
-            upload_to_voiceflow(final_filename)
+        # If splitting by tables resulted in more than one chunk OR the single resulting chunk is smaller
+        if len(sub_chunks) > 1 or (len(sub_chunks) == 1 and len(sub_chunks[0]) < len(chunk)):
+             # Check if any sub-chunk is STILL too large
+             if not any(len(sc) > max_limit for sc in sub_chunks):
+                 logger.info(f"Successfully sub-chunked by tables into {len(sub_chunks)} parts below limit.")
+                 return sub_chunks
+             else:
+                 logger.warning(f"Sub-chunking by tables for '{identifier[:50].replace(chr(10), ' ')}...' resulted in some parts still exceeding limit. Falling back to paragraph split.")
+                 # Clear sub_chunks to proceed to paragraph splitting
+                 sub_chunks = []
         else:
-            logger.error(f"No final file available to upload for URL {url} (either initial save, incremental saves, or fallback save failed).")
-        # --- End Upload ---
+             logger.info(f"Splitting by tables for '{identifier[:50].replace(chr(10), ' ')}...' did not result in smaller/multiple chunks. Proceeding to paragraph split.")
+             sub_chunks = [] # Ensure fallback happens
 
-    except Exception as e:
-        # Catch any unexpected errors during the entire process for this URL
-        logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}", exc_info=True)
-        print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: FAILED (Overall processing)\n============================\n")
+    # 2. Fallback: Split by Paragraphs if table splitting didn't work or yielded oversized chunks
+    if not sub_chunks: # Proceed only if table splitting failed or wasn't applicable/effective
+        logger.info(f"Attempting to sub-chunk '{identifier[:50].replace(chr(10), ' ')}...' based on paragraphs.")
+        paragraphs = re.split(r'\n\s*\n', chunk)
+        current_sub_chunk = ""
+        temp_paragraph_chunks = []
+
+        for para in paragraphs:
+            para_stripped = para.strip()
+            if not para_stripped:
+                continue
+
+            # If adding the next paragraph exceeds the limit...
+            if current_sub_chunk and len(current_sub_chunk) + len(para_stripped) + 2 > max_limit:
+                temp_paragraph_chunks.append(current_sub_chunk)
+                current_sub_chunk = para_stripped
+            # If a single paragraph itself exceeds the limit...
+            elif not current_sub_chunk and len(para_stripped) > max_limit:
+                # If there was a previous chunk, add it first
+                if current_sub_chunk:
+                     temp_paragraph_chunks.append(current_sub_chunk)
+                # Add the oversized paragraph as its own chunk
+                logger.warning(f"Single paragraph within '{identifier[:50].replace(chr(10), ' ')}...' exceeds limit ({len(para_stripped)} chars). Adding as its own chunk.")
+                temp_paragraph_chunks.append(para_stripped)
+                current_sub_chunk = "" # Reset
+            # Otherwise, append the paragraph to the current sub-chunk
+            else:
+                if current_sub_chunk:
+                    current_sub_chunk += "\n\n" + para_stripped
+                else:
+                    current_sub_chunk = para_stripped
+
+        if current_sub_chunk:
+            temp_paragraph_chunks.append(current_sub_chunk)
+
+        # Check if paragraph splitting actually reduced the size or created chunks
+        if temp_paragraph_chunks and (len(temp_paragraph_chunks) > 1 or len(temp_paragraph_chunks[0]) < len(chunk)):
+             # Check if any sub-chunk is STILL too large
+             if not any(len(sc) > max_limit for sc in temp_paragraph_chunks):
+                  logger.info(f"Successfully sub-chunked by paragraphs into {len(temp_paragraph_chunks)} parts below limit.")
+                  return temp_paragraph_chunks
+             else:
+                  logger.warning(f"Sub-chunking by paragraphs for '{identifier[:50].replace(chr(10), ' ')}...' resulted in some parts still exceeding limit. Returning these parts.")
+                  return temp_paragraph_chunks # Return the paragraph chunks even if some are large
+        else:
+             # If splitting by paragraph didn't help
+             logger.error(f"Failed to sub-chunk '{identifier[:50].replace(chr(10), ' ')}...' effectively using tables or paragraphs. Returning original oversized chunk.")
+             return [chunk] # Return the original chunk as a last resort
+
+    return sub_chunks # Should only be reached if table splitting worked and was sufficient
 
 def chunk_content(content):
     """
-    Split content into chunks based solely on Markdown headers (# to ######).
-    Chunks are not limited by size.
-
-    Args:
-        content (str): The full markdown content
-
-    Returns:
-        list: List of content chunks, split by headers. Returns a single chunk if no headers are found.
+    Split content into chunks based on Markdown headers (H1-H6),
+    and further sub-chunk if any chunk exceeds MAX_CHUNK_CHAR_LIMIT,
+    prepending the original header to sub-chunks.
     """
-    # Initialize empty list to hold chunks
-    processed_chunks = []
+    # Use the global constant
+    global MAX_CHUNK_CHAR_LIMIT
 
-    # Skip processing if content is empty or None
+    processed_chunks = []
     if not content or not content.strip():
         logger.warning("Empty or None content received, skipping chunking")
         return []
 
-    # Log the content size for context
     logger.info(f"Content length before chunking: {len(content)} characters")
 
-    # --- Split by any Markdown Header (# to ######) ---
-    # Use regex that captures the header line itself and splits before it
-    header_split_pattern = r'(\n#{1,6}\s+[^\n]+\n)'
-    # Ensure content has leading newline for pattern matching at the start
-    if not content.startswith('\n'):
-        content = '\n' + content
-    header_split = re.split(header_split_pattern, content)
+    # Pattern to find headers (H1-H6) at the start of a line
+    header_pattern = re.compile(r'^(#{1,6}\s+[^\n]+)\n?', re.MULTILINE)
+    matches = list(header_pattern.finditer(content))
 
-    if len(header_split) > 1: # Found Markdown headers
-        num_headers = (len(header_split) - 1) // 2
-        logger.info(f"Splitting content by {num_headers} Markdown headers ('#' to '######').")
-        # The regex split results in [before_header, header1, after_header1_before_header2, header2, ...]
-        # We need to combine header with the text that follows it
+    primary_chunks = []
+    last_end = 0
 
-        # Handle text before the first header if it exists
-        text_before_first_header = header_split[0].strip()
-        if text_before_first_header:
-            processed_chunks.append(text_before_first_header)
+    # Add content before the first header if it exists
+    if matches and matches[0].start() > 0:
+        chunk = content[0:matches[0].start()].strip()
+        if chunk:
+            primary_chunks.append(("", chunk)) # No header associated
+    elif not matches: # No headers found at all
+         chunk = content.strip()
+         if chunk:
+             primary_chunks.append(("", chunk)) # No header associated
 
-        # Combine headers with their following text
-        for i in range(1, len(header_split), 2):
-            header = header_split[i].strip() # Remove leading/trailing whitespace from header line
-            following_text = header_split[i+1] if i+1 < len(header_split) else ""
-            
-            # Create chunk starting with the header
-            current_chunk = header + "\n" + following_text.strip() # Add newline after header, trim following text
-            
-            # Add the combined chunk if it has content
-            if current_chunk.strip():
-                processed_chunks.append(current_chunk.strip())
+    # Process content associated with each header
+    for i, match in enumerate(matches):
+        start = match.start()
+        header_text = match.group(1).strip() # Store the header text itself
 
-    else:
-        # --- No Headers Found ---
-        logger.info("No Markdown headers found. Returning the entire content as a single chunk.")
-        processed_chunks.append(content.strip()) # Return the whole content as one chunk
+        # Determine the end of the current chunk's content
+        content_start = match.end()
+        content_end = matches[i+1].start() if i + 1 < len(matches) else len(content)
 
-    # Final validation (remove any potentially empty chunks created during processing)
-    validated_chunks = [chunk for chunk in processed_chunks if chunk]
+        chunk_content_associated_with_header = content[content_start:content_end].strip()
 
-    logger.info(f"Final number of chunks created: {len(validated_chunks)}")
+        # Store header and its content together
+        primary_chunks.append((header_text, chunk_content_associated_with_header))
 
-    # Log each chunk for inspection
-    for i, chunk in enumerate(validated_chunks):
-        logger.info(f"--- Chunk {i+1}/{len(validated_chunks)} --- ({len(chunk)} characters) ---")
-        # Log a preview of the chunk
+    # Now, process primary_chunks, applying sub-chunking and prepending header if needed
+    final_chunks = []
+    for header, chunk_text in primary_chunks:
+        # Reconstruct the full chunk text including header for size check
+        full_chunk_text = (header + "\n\n" + chunk_text).strip() if header else chunk_text
+        identifier = header if header else "Initial/Full content"
+
+        if len(full_chunk_text) > MAX_CHUNK_CHAR_LIMIT:
+            # Pass the full chunk text to the sub-chunker
+            sub_chunks = sub_chunk_if_needed(full_chunk_text, identifier, MAX_CHUNK_CHAR_LIMIT)
+            # --- MODIFICATION START ---
+            # Prepend original header to each sub-chunk if a header existed
+            for sub_chunk in sub_chunks:
+                if header: # Only prepend if there was an original header
+                    final_chunks.append((header + "\n\n" + sub_chunk).strip())
+                else: # If the original oversized chunk had no header, add sub-chunk as is
+                    final_chunks.append(sub_chunk)
+            # --- MODIFICATION END ---
+        elif full_chunk_text: # Add if not empty and within limit
+            final_chunks.append(full_chunk_text)
+
+    # Log final chunk details
+    logger.info(f"Final number of chunks after potential sub-chunking: {len(final_chunks)}")
+    for i, chunk in enumerate(final_chunks):
+        logger.info(f"--- Final Chunk {i+1}/{len(final_chunks)} --- ({len(chunk)} characters) ---")
         preview_start = chunk[:200].replace('\n', ' ')
         preview_end = chunk[-100:].replace('\n', ' ')
         logger.info(f"Chunk {i+1} Preview: {preview_start}... ...{preview_end}")
 
-    return validated_chunks
+    return final_chunks
 
 def simple_chunk_by_size(text, max_size):
     """
@@ -2313,19 +2327,26 @@ def main(skip_scraping, compile_only=False, process_missing=False, custom_urls=N
             logger.error(f"Adresář {payload_dir} neexistuje!")
             return
             
-        payload_files = [f for f in os.listdir(payload_dir) if f.endswith('_payload.json')]
-        if not payload_files:
-            logger.error(f"V adresáři {payload_dir} nebyly nalezeny žádné payload soubory!")
+        # Get all files in the payload_dir
+        all_files_in_payload_dir = []
+        for entry in os.listdir(payload_dir):
+            full_path = os.path.join(payload_dir, entry)
+            if os.path.isfile(full_path):
+                all_files_in_payload_dir.append(entry) # Add basename
+
+        if not all_files_in_payload_dir:
+            logger.warning(f"V adresáři {payload_dir} nebyly nalezeny žádné soubory k nahrání.") # Changed from error to warning
             return
             
-        logger.info(f"Nalezeno {len(payload_files)} payload souborů k nahrání")
-        for file in payload_files:
-            file_path = os.path.join(payload_dir, file)
-            logger.info(f"Nahrávám soubor: {file}")
+        logger.info(f"Nalezeno {len(all_files_in_payload_dir)} souborů v adresáři '{payload_dir}' k nahrání")
+        for file_basename in all_files_in_payload_dir: # Iterate over basenames
+            file_path = os.path.join(payload_dir, file_basename) # Construct full path
+            logger.info(f"Nahrávám soubor: {file_basename}")
             try:
                 upload_to_voiceflow(file_path)
+                time.sleep(VOICEFLOW_UPLOAD_DELAY) # Added delay
             except Exception as e:
-                logger.error(f"Chyba při nahrávání souboru {file}: {str(e)}")
+                logger.error(f"Chyba při nahrávání souboru {file_basename}: {str(e)}")
         
         logger.info("Nahrávání dokončeno")
         return
@@ -2427,6 +2448,7 @@ def main(skip_scraping, compile_only=False, process_missing=False, custom_urls=N
                 logger.info(f"Uploading file: {filename}")
                 try:
                     upload_to_voiceflow(file_path)
+                    time.sleep(VOICEFLOW_UPLOAD_DELAY) # Added delay
                 except Exception as e:
                     logger.error(f"Error uploading file {filename}: {str(e)}")
 
@@ -2677,33 +2699,456 @@ def convert_to_qa_with_retry(content, title, category, max_retries=3):
         try:
             # First try with full content
             if attempt == 0:
-                qa_pairs = convert_to_qa(content, title, category)
-                if qa_pairs:
-                    return qa_pairs
+                qa_pairs, contains_contacts = convert_to_qa(content, title, category)
+                if qa_pairs: # Check if qa_pairs is not None
+                    return qa_pairs, contains_contacts
             
             # Second try with simplified content
             elif attempt == 1:
                 # Simplify content by removing complex HTML
                 simplified = re.sub(r'<table.*?</table>', '[TABLE DATA]', content, flags=re.DOTALL)
-                qa_pairs = convert_to_qa(simplified, title, category)
-                if qa_pairs:
-                    return qa_pairs
+                qa_pairs, contains_contacts = convert_to_qa(simplified, title, category)
+                if qa_pairs: # Check if qa_pairs is not None
+                    return qa_pairs, contains_contacts
             
             # Last try with minimal extraction approach
             else:
                 # Extract just text and basic info
                 text_only = re.sub(r'<[^>]+>', ' ', content)
                 text_only = re.sub(r'\s+', ' ', text_only).strip()
-                qa_pairs = convert_to_qa(text_only[:5000], title, category)
-                if qa_pairs:
-                    return qa_pairs
+                qa_pairs, contains_contacts = convert_to_qa(text_only[:5000], title, category)
+                if qa_pairs: # Check if qa_pairs is not None
+                    return qa_pairs, contains_contacts
                 
         except Exception as e:
             logger.error(f"Error in convert_to_qa attempt {attempt+1}: {str(e)}")
     
-    # If all attempts fail, return None instead of using a fallback
+    # If all attempts fail, return None for qa_pairs and False for contains_contacts
     logger.error(f"All QA extraction attempts failed for {title}")
-    return None
+    return None, False
+
+def extract_contact_details_llm(content, page_title, category, source_url):
+    """
+    Extracts structured contact information from text using an LLM call.
+    """
+    contact_tool = [
+        {
+            "name": "extract_contact_details",
+            "description": "Extracts detailed contact information for individuals from the provided text and formats it as a valid JSON object.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "contacts": {
+                        "type": "array",
+                        "description": "An array of contact objects extracted from the text. This MUST be present.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "FirstName": {"type": "string", "description": "First name of the contact. If multiple first names, include all."},
+                                "LastName": {"type": "string", "description": "Last name of the contact. If multiple last names (e.g. double barrelled), include all."},
+                                "FullName": {"type": "string", "description": "Full name of the contact, including titles if available directly with the name."},
+                                "Title": {"type": "string", "description": "Academic or professional titles (e.g., Ing., Mgr., Ph.D.). May be part of FullName but also separate if clearly delineated."},
+                                "Role": {"type": "string", "description": "Job title or role of the contact (e.g., Vedoucí oddělení, Referent)."},
+                                "Department": {"type": "string", "description": "The main department or organizational unit the contact belongs to."},
+                                "Subdepartment": {"type": "string", "description": "A sub-department or more specific team, if applicable."},
+                                "Email": {"type": "string", "description": "Email address of the contact."},
+                                "PhoneNumber": {"type": "string", "description": "Phone number of the contact. Include all listed numbers, separated by comma or semicolon."},
+                                "ProfileURL": {"type": "string", "description": "Direct URL to the contact's profile page, if available in the text."},
+                                "Office": {"type": "string", "description": "Office number or location description (e.g., Dveře č. 123, Budova A)."},
+                                "OfficeURL": {"type": "string", "description": "URL specifically for the office location or map, if available."}
+                            },
+                            "required": ["LastName", "FullName"] # Minimum requirement
+                        }
+                    }
+                },
+                "required": ["contacts"]
+            }
+        }
+    ]
+    tool_choice = {"type": "tool", "name": "extract_contact_details"}
+
+    system_prompt = f'''# Vaše Role: Jste specializovaný AI asistent pro precizní extrakci kontaktních informací o jednotlivých osobách z poskytnutého textu.
+Váš úkol je identifikovat VŠECHNY osoby zmíněné v textu a pro KAŽDOU z nich extrahovat co nejvíce detailních kontaktních údajů pomocí nástroje `extract_contact_details`.
+
+## Cílová stránka: '{page_title}' (URL: {source_url})
+## Kategorie stránky: '{category}'
+
+## Klíčové Instrukce pro Extrakci:
+1.  **Identifikace Osob:** Najděte všechny zmínky o konkrétních lidech. Zaměřte se na jména, příjmení, tituly.
+2.  **Kompletní Data:** Pro každou osobu se snažte vyplnit VŠECHNA pole definovaná ve schématu nástroje (`FirstName`, `LastName`, `FullName`, `Title`, `Role`, `Department`, `Subdepartment`, `Email`, `PhoneNumber`, `ProfileURL`, `Office`, `OfficeURL`).
+    *   `FirstName`: Křestní jméno.
+    *   `LastName`: Příjmení. MUSÍ BÝT VYPLNĚNO, pokud je jméno osoby identifikováno.
+    *   `FullName`: Celé jméno, včetně titulů před i za jménem, jak je uvedeno v textu. MUSÍ BÝT VYPLNĚNO.
+    *   `Title`: Akademické/profesní tituly (Ing., MUDr., Ph.D., Bc., atd.).
+    *   `Role`: Pracovní pozice nebo funkce (např. "Vedoucí oddělení", "Starosta", "Referent pro XYZ").
+    *   `Department`: Hlavní odbor, komise, výbor, rada nebo organizační jednotka.
+    *   `Subdepartment`: Podřazené oddělení (platí hlavně pro odbory), referát nebo specifičtější tým, pokud je uvedeno.
+    *   `Email`: E-mailová adresa. Pokud je více adres, uveďte všechny (oddělené čárkou).
+    *   `PhoneNumber`: Telefonní číslo. Pokud je více čísel (mobil, pevná linka), uveďte všechny (oddělené čárkou).
+    *   `ProfileURL`: Přímý odkaz na osobní profilovou stránku dané osoby, POUZE pokud je explicitně uveden v textu u dané osoby. Neuvádějte obecnou URL stránky, ze které extrahujete.
+    *   `Office`: Číslo kanceláře, dveří, popis umístění (např. "kancelář č. 101", "budova B, 2. patro").
+    *   `OfficeURL`: Odkaz na mapu kanceláře nebo plán budovy, POUZE pokud je explicitně uveden.
+3.  **Přesnost a Verbatim:** Extrahujte informace PŘESNĚ tak, jak jsou uvedeny v textu. Neměňte je, nedoplňujte si je, pokud nejsou explicitně přítomny.
+4.  **Více Osob:** Pokud text obsahuje informace o více osobách, vytvořte samostatný objekt v poli "contacts" pro KAŽDOU osobu.
+5.  **Chybějící Informace:** Pokud některý údaj pro danou osobu v textu chybí, ponechte příslušné pole v JSONu prázdné (null nebo vynechte, pokud není 'required') nebo jako prázdný řetězec "". NEVYMÝŠLEJTE si data. Pole `LastName` a `FullName` jsou však vysoce preferovaná.
+6.  **Formát JSON:** Výstup MUSÍ být validní JSON objekt odpovídající schématu nástroje. Žádný další text mimo JSON.
+7.  **KROK 0: POVINNÉ PŘEDZPRACOVÁNÍ ZDROJOVÉHO TEXTU**
+    PŘED extrakcí a PŘED aplikací jakýchkoli dalších pravidel níže, MUSÍTE nejprve upravit "ZDROJOVÝ TEXT K ANALÝZE" následovně:
+    - V celém textu nahraďte KAŽDÝ VÝSKYT **jakéhokoli typu uvozovky** (například: `\\\"`, `\"`, `\"`, `\"`, `'`, `'`, `'`, `'`, `„`, `\"`, `‚`, `'` atd.) **PŘESNĚ JEDNÍM standardním jednoduchým apostrofem (`'`)**.
+    - Toto pravidlo se vztahuje na VŠECHNY uvozovky, které najdete, bez výjimky. Cílem je, aby výsledný text, který budete dále analyzovat, obsahoval místo jakýchkoli původních uvozovek pouze jednoduché apostrofy (`'`).
+    - Tento krok je **ABSOLUTNĚ KRITICKY DŮLEŽITÝ** pro zajištění správného formátu JSON výstupu a pro zamezení chyb při parsování JSONu.
+8.  **ZAJIŠTĚNÍ VALIDNÍHO JSON VÝSTUPU (Escapování):**
+    *   Pole v JSONu (např. `FullName`, `Email`, `Role` atd.) jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat následující speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí (PO KROKU 0):
+        *   **Jednoduché apostrofy (`'`)**: Díky "KROKU 0" budou všechny původní uvozovky v textu převedeny na jednoduché apostrofy. Tyto jednoduché apostrofy (`'`) jsou **validní** uvnitř JSON řetězce definovaného dvojitými uvozovkami (např. `"FullName": "Jméno s 'apostrofem' Příjmení."`) a **NENÍ NUTNÉ JE SAMOTNÉ DÁLE ESCOPOVAT** v kontextu JSON řetězce. Zaměřte se na ostatní speciální znaky.
+        *   **Dvojité uvozovky (`"`)**: Tyto by se **NEMĚLY** vyskytovat v extrahovaném textu, protože KROK 0 je všechny převedl na jednoduché apostrofy. Pokud byste je z nějakého důvodu generovali, MUSÍ být escapovány jako `\\\\"`. **Ale primárně se spolehněte na KROK 0.**
+        *   **Zpětné lomítko (`\\\\`)**: KAŽDÝ VÝSKYT znaku zpětného lomítka (`\\\\`) MUSÍ být escapován jako `\\\\\\\\`. (Např. text `c:\\\\path` se stane `"c:\\\\\\\\path"`)
+        *   **Lomítko (`/`)**: KAŽDÝ VÝSKYT znaku lomítka (`/`) MUSÍ být escapován jako `\\\\/`. (Např. text `http://example.com` se stane `"http:\\\\/\\\\/example.com"`)
+        *   **Backspace**: Pokud se vyskytne, escapujte jako `\\\\b`.
+        *   **Form feed (`\\\\f`)**: Pokud se vyskytne, escapujte jako `\\\\f`.
+        *   **Newline (`\\\\n`)**: KAŽDÝ VÝSKYT znaku nového řádku MUSÍ být escapován jako `\\\\n`.
+        *   **Carriage return (`\\\\r`)**: KAŽDÝ VÝSKYT znaku carriage return MUSÍ být escapován jako `\\\\r`.
+        *   **Tab (`\\\\t`)**: KAŽDÝ VÝSKYT znaku tabulátoru MUSÍ být escapován jako `\\\\t`.
+        *   **Ostatní kontrolní znaky (Unicode U+0000 až U+001F)**: Všechny tyto znaky MUSÍ být escapovány pomocí `\\\\uXXXX` notace (např. `\\\\u000B` pro vertikální tabulátor).
+    *   **Struktura Výstupu:** Celý váš výstup MUSÍ být POUZE JEDEN validní JSON objekt, který přesně odpovídá schématu definovanému pro nástroj `extract_contact_details`. Žádný další text, poznámky, vysvětlení nebo formátování (např. Markdown bloky ```json ... ```) nesmí být přítomno mimo tento jediný JSON objekt.
+
+## Příklad:
+Text: "Kontaktujte Ing. Jan Novák, Ph.D., vedoucího Odboru IT, na email jan.novak@example.cz nebo tel: 123 456 789. Kancelář má v budově C, dveře č. 42."
+Možný JSON záznam pro Ing. Jana Nováka (PO aplikaci KROKU 0 a escapování):
+```json
+{{
+  "contacts": [
+    {{
+      "FirstName": "Jan",
+      "LastName": "Novák",
+      "FullName": "Ing. Jan Novák, Ph.D.",
+      "Title": "Ing., Ph.D.",
+      "Role": "vedoucí Odboru 'IT'",
+      "Department": "Odbor IT",
+      "Email": "jan.novak@example.cz",
+      "PhoneNumber": "123 456 789",
+      "Office": "budova C, dveře č. 42"
+    }}
+  ]
+}}
+```
+Analyzujte následující text a extrahujte všechny kontaktní údaje.'''
+
+    user_prompt = f'''# ZDROJOVÝ TEXT K ANALÝZE:
+```
+{content}
+```
+# TVŮJ AKTUÁLNÍ ÚKOL: Použij nástroj `extract_contact_details` pro extrakci VŠECH kontaktních informací o osobách z výše uvedeného textu. Vytvoř pole "contacts" se záznamem pro každou identifikovanou osobu.
+Důrazně dodržuj formát, KROK 0, a pravidla escapování ze systémových instrukcí.
+'''
+    messages = [{"role": "user", "content": user_prompt}]
+    
+    response_data = call_llm_api(
+        messages=messages,
+        system_prompt=system_prompt,
+        max_tokens=4096, # Adjusted for potentially many contacts
+        temperature=0.0,
+        tools=contact_tool,
+        tool_choice=tool_choice
+    )
+
+    # --- BEGIN: Added logging for contact extraction response ---
+    logger.info(f"======== CONTACT EXTRACTION DEBUG: RAW LLM RESPONSE FOR '{page_title}' ========")
+    if response_data is None:
+        logger.info("Full response_data is None.")
+    elif isinstance(response_data, dict):
+        try:
+            logger.info(f"Full response_data (dict): {json.dumps(response_data, ensure_ascii=False, indent=2)}")
+        except Exception as e:
+            logger.error(f"Error trying to json.dumps response_data (dict): {str(e)}")
+            logger.info(f"Problematic response_data (dict as string): {str(response_data)}")
+    elif isinstance(response_data, str):
+        logger.info(f"Full response_data (string): {response_data}")
+    else:
+        logger.info(f"Full response_data (type {type(response_data)}): {str(response_data)}")
+    logger.info(f"======== END CONTACT EXTRACTION DEBUG: RAW LLM RESPONSE FOR '{page_title}' ========")
+    # --- END: Added logging for contact extraction response ---
+
+    if isinstance(response_data, dict) and 'contacts' in response_data:
+        contacts = response_data['contacts']
+        if isinstance(contacts, list):
+            logger.info(f"Úspěšně extrahováno {len(contacts)} kontaktů pomocí nástroje pro stránku '{page_title}'.")
+            # Add source URL and category to each contact item
+            for contact_item in contacts:
+                if isinstance(contact_item, dict):
+                    contact_item['SourceURL'] = source_url
+                    contact_item['Category'] = category
+            return contacts
+        else:
+            logger.error(f"Klíč 'contacts' v odpovědi nástroje pro '{page_title}' není seznam (typ: {type(contacts)}). Data: {response_data}")
+            return []
+    elif response_data is None:
+         logger.error(f"Nepodařilo se získat kontaktní údaje pro '{page_title}' (API volání selhalo nebo nevrátilo data).")
+         return []
+    else:
+        logger.error(f"Neočekávaný formát odpovědi nebo chybí klíč 'contacts' při extrakci kontaktů pro '{page_title}'. Data: {str(response_data)[:500]}...")
+        return []
+
+def save_contacts_payload(url, contact_items, category):
+    """
+    Saves extracted contact items to a JSON file for Voiceflow.
+    Filename: {category}_{url_based_name}_contacts_table.json
+    """
+    output_dir = "payloads"
+    os.makedirs(output_dir, exist_ok=True)
+
+    parsed_url = urlparse(url)
+    url_path = parsed_url.path.strip('/')
+    if not url_path:
+        url_path = 'home'
+    
+    url_based_name = url_path.replace('/', '_')
+    url_based_name = remove_accents(url_based_name)
+    url_based_name = re.sub(r"[<>:\"/\\|?*]", "_", url_based_name)
+    url_based_name = re.sub(r"\s+", "_", url_based_name)
+    url_based_name = re.sub(r"_+", "_", url_based_name)
+    url_based_name = url_based_name.strip("_").lower()
+    url_based_name = url_based_name[:MAX_FILENAME_LENGTH]
+
+    # Use the original category for filename uniqueness, but data category will be 'Kontakt'
+    filename_category_prefix = category.lower()
+    table_name = f"{filename_category_prefix}_{url_based_name}_contacts_table"
+    filename = f"{output_dir}/{table_name}.json"
+
+    # Ensure all required fields for the schema are present in items, adding them as empty strings if missing.
+    # These are the fields expected by the schema defined below.
+    # Note: SourceURL is now added to searchableFields as per previous implementation, but not in the user's new metadataFields list.
+    # We will keep it in processed_items for now, but schema will reflect user's request.
+    expected_fields = ["FirstName", "LastName", "FullName", "Title", "Role", "Department", 
+                       "Subdepartment", "Email", "PhoneNumber", "ProfileURL", "Office", "OfficeURL"]
+                       # Category will be explicitly set to 'Kontakt'
+
+    processed_items = []
+    for item in contact_items:
+        if not isinstance(item, dict):
+            logger.warning(f"Skipping non-dictionary item in contact_items for {url}: {item}")
+            continue
+        
+        new_item = {}
+        for field in expected_fields:
+            new_item[field] = item.get(field, "") # Default to empty string if missing
+        new_item["Category"] = "Kontakt" # Override category to 'Kontakt' for all contact items
+        processed_items.append(new_item)
+
+    payload = {
+        "data": {
+            "schema": {
+                # Searchable fields can remain broader as it helps in finding the data.
+                # User requirement is for metadataFields primarily.
+                "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Department", "Subdepartment", "Email", "PhoneNumber", "Office", "OfficeURL"],
+                "metadataFields": ["Category", "FirstName", "LastName", "PhoneNumber", "Email"] # As per user request
+            },
+            "name": table_name,
+            "items": processed_items
+        }
+    }
+
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info(f"Saved contacts payload for URL '{url}' ({len(processed_items)} items) to file: {filename}")
+        return filename
+    except Exception as e:
+        logger.error(f"Error writing contacts payload file {filename}: {str(e)}")
+        return None
+
+def process_url_content(url, category, metadata):
+    """Processes the markdown content of a single URL to extract Q/A pairs
+    and potentially contact information.
+
+    Args:
+        url (str): The URL to process.
+        category (str): The assigned category.
+        metadata (dict): Metadata associated with the URL (e.g., title).
+    """
+    accumulated_pairs_this_run = [] # Accumulate Q/A pairs for this run
+    accumulated_contacts_this_run = [] # Initialize accumulated contacts for this URL run
+    final_filename = None # Store the name of the file to be uploaded
+
+    try:
+        # --- Step 1: Clear/Create the file at the start of processing this URL ---
+        logger.info(f"Initializing/Clearing Q/A file for URL: {url}")
+        # Call save_payload_to_file with an empty list to ensure the file is overwritten/created fresh
+        initial_filename = save_payload_to_file(url, [], category)
+        if not initial_filename:
+            # If we can't even create the empty file, log error and stop processing this URL
+            logger.error(f"Failed to initialize/clear Q/A file for {url}. Aborting Q/A extraction for this URL.")
+            return
+        logger.info(f"Successfully initialized/cleared file: {initial_filename}")
+        final_filename = initial_filename # Keep track of the latest valid filename
+        # No initial upload needed for an empty file
+        # ----------------------------------------------------------------------
+
+        # --- Step 2: Get Content ---
+        try:
+            # Specify markdown format and the selectors needed for Q/A
+            qa_content, fetched_metadata = get_content(
+                url,
+                content_format="markdown"
+                # target_selector is omitted, so it defaults;
+                # but for markdown, get_content will use MARKDOWN_CONTENT_SELECTORS
+            )
+            if not qa_content:
+                logger.error(f"Failed to retrieve markdown content for URL {url} from all providers.")
+                raise ValueError("No markdown content returned from get_content")
+
+            if fetched_metadata and fetched_metadata.get('title'):
+                 metadata['title'] = fetched_metadata['title'] # Update title
+
+        except requests.exceptions.Timeout as e:
+            logger.error(f"Timeout during Q/A content retrieval for URL {url}: {str(e)}")
+            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: Timeout during content retrieval\nQ/A Extraction: SKIPPED\n============================\n")
+            return # Skip Q/A extraction for this URL
+        except Exception as e:
+            logger.error(f"Error during Q/A content retrieval for URL {url}: {str(e)}")
+            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: SKIPPED\n============================\n")
+            return # Skip Q/A extraction for this URL
+        # ---------------------------
+
+        qa_content = preprocess_markdown_content(qa_content)
+        
+        content_to_process_list = []
+        if ENABLE_CONTENT_CHUNKING:
+            content_chunks = chunk_content(qa_content)
+            logger.info(f"Content chunking enabled. Split content into {len(content_chunks)} chunks for processing.")
+            content_to_process_list = [(chunk, f" (part {i+1}/{len(content_chunks)})") for i, chunk in enumerate(content_chunks)]
+        else:
+            logger.info("Content chunking disabled. Processing entire content as a single unit.")
+            content_to_process_list = [(qa_content, " (entire content)")]
+
+        # --- Step 3: Process Content (Chunks or Whole) Incrementally ---
+        for i, (content_item, part_info) in enumerate(content_to_process_list):
+            processing_unit_description = f"Processing unit {i+1}/{len(content_to_process_list)}{part_info} ({len(content_item)} characters)"
+            if not ENABLE_CONTENT_CHUNKING:
+                processing_unit_description = f"Processing entire content ({len(content_item)} characters)"
+            logger.info(processing_unit_description)
+            
+            item_qa_pairs, contains_contacts = convert_to_qa(content_item, metadata.get('title', 'Unknown Page') + part_info, category)
+
+            # If conversion succeeded and returned pairs for this item
+            if item_qa_pairs:
+                success_message = f"Successfully extracted {len(item_qa_pairs)} Q/A pairs from {processing_unit_description}"
+                if not ENABLE_CONTENT_CHUNKING:
+                     success_message = f"Successfully extracted {len(item_qa_pairs)} Q/A pairs from the entire content."
+                logger.info(success_message)
+                accumulated_pairs_this_run.extend(item_qa_pairs) # Add pairs from this item
+
+                # Deduplicate the *current* accumulated list
+                seen_qa = set()
+                deduplicated_items = []
+                for item_dedup in reversed(accumulated_pairs_this_run): # Renamed 'item' to 'item_dedup' to avoid conflict
+                     qa_tuple = (item_dedup.get('Question'), item_dedup.get('Answer'))
+                     if qa_tuple not in seen_qa:
+                         seen_qa.add(qa_tuple)
+                         deduplicated_items.append(item_dedup)
+                accumulated_pairs_this_run = list(reversed(deduplicated_items))
+                
+                total_items_message = f"Total accumulated items after processing unit {i+1} and deduplicating: {len(accumulated_pairs_this_run)}"
+                if not ENABLE_CONTENT_CHUNKING:
+                    total_items_message = f"Total accumulated items after processing entire content and deduplicating: {len(accumulated_pairs_this_run)}"
+                logger.info(total_items_message)
+
+
+                # Save the *current accumulated* list, overwriting the previous state of the file
+                incremental_filename = save_payload_to_file(url, accumulated_pairs_this_run, category)
+
+                # Update the final filename if save was successful
+                if incremental_filename:
+                    final_filename = incremental_filename
+                else:
+                    # Log error if saving failed, but continue processing other items
+                    logger.error(f"Failed to save incremental payload after processing unit {i+1} for URL {url}. Upload might use older file state if no further saves succeed.")
+            else:
+                # Log failure for this specific item
+                failure_message = f"Failed to extract Q/A pairs from processing unit {i+1}{part_info} or no pairs found."
+                if not ENABLE_CONTENT_CHUNKING:
+                    failure_message = f"Failed to extract Q/A pairs from the entire content or no pairs found."
+                logger.warning(failure_message)
+
+            # --- Contact Extraction and Accumulation (Modified Step) ---
+            if contains_contacts: # LLM assessed this chunk might have contacts
+                logger.info(f"Contact assessment positive for processing unit {i+1}{part_info}. Attempting contact extraction from this chunk.")
+                # Extract contacts from the current chunk
+                chunk_contact_items = extract_contact_details_llm(content_item, metadata.get('title', 'Unknown Page') + part_info, category, url)
+                
+                if chunk_contact_items:
+                    logger.info(f"Extracted {len(chunk_contact_items)} new contact items from processing unit {i+1}{part_info}.")
+                    accumulated_contacts_this_run.extend(chunk_contact_items)
+
+                    # Deduplicate accumulated_contacts_this_run
+                    seen_contacts_tuples = set()
+                    deduplicated_contact_list = []
+                    # Define key fields that make a contact unique for deduplication
+                    unique_contact_keys_for_dedup = ("FullName", "Email", "PhoneNumber", "Role", "Department") 
+                    for contact_to_dedup in reversed(accumulated_contacts_this_run):
+                        # Create a tuple of values for the unique keys, handling missing keys
+                        contact_tuple_for_dedup = tuple(contact_to_dedup.get(key, "") for key in unique_contact_keys_for_dedup)
+                        if contact_tuple_for_dedup not in seen_contacts_tuples:
+                            seen_contacts_tuples.add(contact_tuple_for_dedup)
+                            deduplicated_contact_list.append(contact_to_dedup)
+                    accumulated_contacts_this_run = list(reversed(deduplicated_contact_list))
+                    logger.info(f"Total accumulated contact items after processing unit {i+1} and deduplicating: {len(accumulated_contacts_this_run)}")
+                else: # No new contacts found in this specific chunk by LLM
+                    logger.info(f"Contact extraction from chunk {i+1}{part_info} yielded no new contact items.")
+            else: # LLM assessed this chunk does NOT have contacts
+                logger.info(f"Contact assessment negative for processing unit {i+1}{part_info}. Skipping contact extraction for this chunk.")
+            
+            # --- Save and Upload Accumulated Contacts (after each chunk's processing) ---
+            # This runs after each chunk. If accumulated_contacts_this_run is empty,
+            # save_contacts_payload will likely create an empty file or handle it appropriately.
+            if accumulated_contacts_this_run: # Only save if there are any contacts accumulated
+                logger.info(f"Attempting to save/upload {len(accumulated_contacts_this_run)} accumulated contact items after processing unit {i+1}{part_info}.")
+                saved_contacts_filename = save_contacts_payload(url, accumulated_contacts_this_run, category)
+                if saved_contacts_filename:
+                    # Log message now reflects accumulated count
+                    logger.info(f"Successfully saved/overwritten {len(accumulated_contacts_this_run)} accumulated contact items to {saved_contacts_filename}.")
+                    upload_to_voiceflow(saved_contacts_filename) 
+                    time.sleep(VOICEFLOW_UPLOAD_DELAY) # Added delay
+                else:
+                    logger.error(f"Failed to save {len(accumulated_contacts_this_run)} accumulated contact items for URL {url} after unit {i+1}{part_info}.")
+            else: # No contacts accumulated yet or all were duplicates
+                logger.info(f"No contacts accumulated to save after processing unit {i+1}{part_info}. Contacts file may be empty or unchanged.")
+            # --- End Contact Saving/Uploading for the chunk ---
+
+        # --- End Content Processing Loop ---
+
+        # --- Step 4: Handle Fallback (only if NO pairs were ever accumulated for Q/A) ---
+        if not accumulated_pairs_this_run:
+            logger.warning(f"No QA pairs were accumulated from any processing unit for {url}. Creating fallback QA pair.")
+            title = metadata.get('title', 'Unknown page')
+            fallback_qa_pairs = [{
+                "Question": f"Co najdu na stránce {title}? | What can I find on the {title} page? | Jaké informace obsahuje stránka {title}?",
+                "Answer": f"Na stránce najdete informace o {title}. Pro podrobnosti navštivte přímo [webovou stránku]({url}).",
+                "Category": category
+            }]
+
+            # Save the fallback payload (this will overwrite the initial empty file or last saved state)
+            fallback_filename = save_payload_to_file(url, fallback_qa_pairs, category)
+
+            # Update the final filename if fallback save was successful
+            if fallback_filename:
+                final_filename = fallback_filename
+            else:
+                 logger.error(f"Failed to save fallback payload for URL {url}. No file will be uploaded.")
+                 final_filename = None # Ensure no upload happens if fallback save fails
+
+        # --- Step 5: Final Upload (after loop and fallback check) ---
+        if final_filename:
+            logger.info(f"All processing units handled for URL {url}. Proceeding to upload final file: {final_filename}")
+            upload_to_voiceflow(final_filename)
+            time.sleep(VOICEFLOW_UPLOAD_DELAY) # Added delay
+        else:
+            logger.error(f"No final file available to upload for URL {url} (either initial save, incremental saves, or fallback save failed).")
+        # --- End Upload ---
+
+    except Exception as e:
+        # Catch any unexpected errors during the entire process for this URL
+        logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}", exc_info=True)
+        print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: FAILED (Overall processing)\n============================\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
