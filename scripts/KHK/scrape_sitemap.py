@@ -113,7 +113,7 @@ INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 ENABLE_QA_PROCESSING = True  # Enable Q/A processing
 UPLOAD_IMMEDIATELY = False  # Skip processing and only upload existing payloads
 COMPILE_SEARCH_QUERIES = True  # Enable compilation of search queries
-CHECK_LAST_MODIFIED = False  # Check last modified date from sitemap.xml before Q/A extraction
+CHECK_LAST_MODIFIED = True  # Check last modified date from sitemap.xml before Q/A extraction
 ENABLE_CONTENT_CHUNKING = True # NEW: Enable/disable content chunking for Q/A
 
 # ============================================================================
