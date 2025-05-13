@@ -103,7 +103,7 @@ CUSTOM_URLS = [
 # API CALL SETTINGS
 # ============================================================================
 API_CALL_DELAY = 10  # Fixed delay between API calls in seconds
-VOICEFLOW_UPLOAD_DELAY = 60 # Delay between Voiceflow upload API calls in seconds
+VOICEFLOW_UPLOAD_DELAY = 10 # Delay between Voiceflow upload API calls in seconds
 MAX_RETRIES = 3  # Maximum number of retry attempts
 INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 
@@ -112,8 +112,8 @@ INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 # ============================================================================
 ENABLE_QA_PROCESSING = True  # Enable Q/A processing
 UPLOAD_IMMEDIATELY = False  # Skip processing and only upload existing payloads
-COMPILE_SEARCH_QUERIES = False  # Enable compilation of search queries into TXT file
-CHECK_LAST_MODIFIED = True  # Check last modified date from sitemap.xml before Q/A extraction
+COMPILE_SEARCH_QUERIES = True  # Enable compilation of search queries
+CHECK_LAST_MODIFIED = False  # Check last modified date from sitemap.xml before Q/A extraction
 ENABLE_CONTENT_CHUNKING = True # NEW: Enable/disable content chunking for Q/A
 
 # ============================================================================
@@ -1001,7 +1001,8 @@ def save_payloads_to_files(categorized_links, category_to_save=None):
                 "URL": url,
                 "Category": category,
                 "Question": link_data.get("Question", "Default question | Default question in English"),
-                "Navigation": link_data.get("Navigation", "")
+                "Navigation": link_data.get("Navigation", ""),
+                "Type": "Data"  # Add static Type field
             }
 
             # Check if URL exists and update/add in the dictionary
@@ -1020,7 +1021,7 @@ def save_payloads_to_files(categorized_links, category_to_save=None):
             "data": {
                 "schema": {
                     "searchableFields": ["Title", "URL", "Question", "Navigation"],
-                    "metadataFields": ["Category"]
+                    "metadataFields": ["Category", "Type"]
                 },
                 "name": table_name,
                 "items": final_items
@@ -1057,14 +1058,15 @@ def save_payloads_to_files(categorized_links, category_to_save=None):
                     "URL": link_data.get("URL", ""),
                     "Category": category,
                     "Question": link_data.get("Question", "Default question | Default question in English"),
-                    "Navigation": link_data.get("Navigation", "")
+                    "Navigation": link_data.get("Navigation", ""),
+                    "Type": "Data"  # Add static Type field
                 })
             
             payload = {
                 "data": {
                     "schema": {
                         "searchableFields": ["Title", "URL", "Question", "Navigation"],
-                        "metadataFields": ["Category"]
+                        "metadataFields": ["Category", "Type"]
                     },
                     "name": table_name,
                     "items": final_items
@@ -1228,6 +1230,7 @@ def save_payload_to_file(url, content, section):
     for item in content:
         if isinstance(item, dict):
             item["Category"] = section
+            item["Type"] = "Data" # Add static Type field
         else:
             logger.warning(f"Skipping non-dictionary item during category assignment: {item}")
 
@@ -1240,7 +1243,7 @@ def save_payload_to_file(url, content, section):
         "data": {
             "schema": {
                 "searchableFields": ["Question", "Answer"],
-                "metadataFields": ["Category"]
+                "metadataFields": ["Category", "Type"]
             },
             "name": f"{section.lower()}_{url_based_name}", # Schema name consistency
             "items": final_items # Use the validated items
@@ -1259,6 +1262,7 @@ def save_payload_to_file(url, content, section):
         if not isinstance(item, dict):
             logger.warning(f"Skipping non-dictionary item during final validation: {item}")
             continue
+        item["Type"] = "Data" # Add static Type field
         valid = True
         for key in payload["data"]["schema"]["searchableFields"] + payload["data"]["schema"]["metadataFields"]:
             if key not in item:
@@ -2312,7 +2316,7 @@ def main(skip_scraping, compile_only=False, process_missing=False, custom_urls=N
     if compile_only:
         logger.info("Spouštím pouze kompilaci vyhledávacích dotazů")
         if COMPILE_SEARCH_QUERIES:
-            compile_search_queries_file()
+            compile_and_upload_question_tables() # Replaced call
         else:
             logger.warning("Kompilace vyhledávacích dotazů je vypnuta (COMPILE_SEARCH_QUERIES = False)")
         return
@@ -2454,8 +2458,8 @@ def main(skip_scraping, compile_only=False, process_missing=False, custom_urls=N
 
     # Add compilation of search queries if enabled
     if COMPILE_SEARCH_QUERIES:
-        logger.info("Compiling search queries...") # Added log
-        compile_search_queries_file()
+        logger.info("Compiling search queries and uploading category question tables...") # Updated log
+        compile_and_upload_question_tables() # Replaced call
     
     # Save the current timestamp as the last run timestamp
     save_last_run_timestamp()
@@ -2932,6 +2936,7 @@ def save_contacts_payload(url, contact_items, category):
         for field in expected_fields:
             new_item[field] = item.get(field, "") # Default to empty string if missing
         new_item["Category"] = "Kontakt" # Override category to 'Kontakt' for all contact items
+        new_item["Type"] = "Data"  # Add static Type field
         processed_items.append(new_item)
 
     payload = {
@@ -2940,7 +2945,7 @@ def save_contacts_payload(url, contact_items, category):
                 # Searchable fields can remain broader as it helps in finding the data.
                 # User requirement is for metadataFields primarily.
                 "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Department", "Subdepartment", "Email", "PhoneNumber", "Office", "OfficeURL"],
-                "metadataFields": ["Category", "FirstName", "LastName", "PhoneNumber", "Email"] # As per user request
+                "metadataFields": ["Category", "FirstName", "LastName", "PhoneNumber", "Email", "Type"] # As per user request
             },
             "name": table_name,
             "items": processed_items
@@ -3149,6 +3154,107 @@ def process_url_content(url, category, metadata):
         # Catch any unexpected errors during the entire process for this URL
         logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}", exc_info=True)
         print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: FAILED (Overall processing)\n============================\n")
+
+def compile_and_upload_question_tables():
+    """
+    Compiles "Question" fields from all JSON payload files, groups them by "Category",
+    creates new category-specific table JSONs, and uploads them to Voiceflow.
+    This replaces the old compile_search_queries_file functionality.
+    """
+    logger.info("Starting compilation and upload of category-specific question tables.")
+    payloads_dir = "payloads"
+    category_questions_map = {}
+
+    if not os.path.exists(payloads_dir):
+        logger.error(f"Payloads directory '{payloads_dir}' does not exist. Cannot compile question tables.")
+        return
+
+    logger.info(f"Iterating through JSON files in '{payloads_dir}' to extract questions.")
+    for filename in os.listdir(payloads_dir):
+        if filename.endswith('.json'):
+            file_path = os.path.join(payloads_dir, filename)
+            logger.debug(f"Processing file: {filename}")
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    payload_content = json.load(f)
+                
+                items = payload_content.get('data', {}).get('items', [])
+                
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            question = item.get("Question")
+                            category = item.get("Category")
+
+                            if question and isinstance(question, str) and question.strip() and \
+                               category and isinstance(category, str) and category.strip():
+                                
+                                if category not in category_questions_map:
+                                    category_questions_map[category] = []
+                                
+                                # Avoid duplicate questions within the same category
+                                is_duplicate = False
+                                for existing_q_item in category_questions_map[category]:
+                                    if existing_q_item["Question"] == question:
+                                        is_duplicate = True
+                                        break
+                                if not is_duplicate:
+                                    category_questions_map[category].append({
+                                        "Question": question,
+                                        "Category": category,  # Store category with each question item
+                                        "Type": "Question"  # Revert to "Question"
+                                    })
+                            else:
+                                logger.debug(f"Skipping item in {filename} due to missing/invalid Question or Category: {item}")
+                        else:
+                            logger.debug(f"Skipping non-dictionary item in {filename}: {item}")
+                else:
+                    logger.debug(f"No 'items' list found or 'items' is not a list in {filename}.")
+            except json.JSONDecodeError:
+                logger.error(f"Error decoding JSON from file {file_path}. Skipping.")
+            except Exception as e:
+                logger.error(f"Unexpected error processing file {file_path}: {str(e)}. Skipping.")
+
+    if not category_questions_map:
+        logger.info("No questions found to compile into category tables.")
+        return
+
+    logger.info(f"Found questions for {len(category_questions_map)} categories. Preparing and uploading tables...")
+    for category, questions_list in category_questions_map.items():
+        if not questions_list:
+            logger.info(f"No questions to upload for category '{category}'. Skipping.")
+            continue
+
+        table_name = f"{category.lower().replace(' ', '_')}_questions_table"
+        output_filename = os.path.join(payloads_dir, f"{table_name}.json")
+
+        logger.info(f"Creating table for category '{category}' with {len(questions_list)} questions. Table name: {table_name}")
+
+        new_payload = {
+            "data": {
+                "schema": {
+                    "searchableFields": ["Question"],
+                    "metadataFields": ["Category", "Type"] # Add Type to metadataFields
+                },
+                "name": table_name,
+                "items": questions_list  # questions_list already contains {"Question": ..., "Category": ..., "Type": ...}
+            }
+        }
+
+        try:
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                json.dump(new_payload, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved question table for category '{category}' to {output_filename}")
+
+            logger.info(f"Uploading {output_filename} to Voiceflow...")
+            upload_to_voiceflow(output_filename)
+            logger.info(f"Successfully uploaded {output_filename}. Waiting for {VOICEFLOW_UPLOAD_DELAY} seconds.")
+            time.sleep(VOICEFLOW_UPLOAD_DELAY)
+
+        except Exception as e:
+            logger.error(f"Error saving or uploading question table for category '{category}' (file: {output_filename}): {str(e)}")
+            
+    logger.info("Finished compiling and uploading category-specific question tables.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
