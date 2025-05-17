@@ -1194,7 +1194,7 @@ def save_payload_to_file(url, content, section):
     always overwriting the existing file.
 
     Args:
-        url (str): The URL the content is associated with (used for filename).
+        url (str): The URL the content is associated with (used for filename and data).
         content (list): The list of QA pair dictionaries to save.
         section (str): The category/section (used for filename and metadata).
     """
@@ -1226,13 +1226,14 @@ def save_payload_to_file(url, content, section):
     # QA payload filename format: {section}_{url_based_name}.json
     filename = f"payloads/{section.lower()}_{url_based_name}.json"
     
-    # Ensure category is added to each item in the *incoming* content list
-    for item in content:
+    # Ensure category and URL are added to each item in the *incoming* content list
+    for item in content: # 'content' is the list of QA pairs
         if isinstance(item, dict):
             item["Category"] = section
             item["Type"] = "Data" # Add static Type field
+            item["URL"] = url     # Add the source URL to each Q/A item
         else:
-            logger.warning(f"Skipping non-dictionary item during category assignment: {item}")
+            logger.warning(f"Skipping non-dictionary item during category/URL assignment: {item}")
 
     # --- Always Overwrite Logic --- 
     logger.info(f"Performing full save (overwrite) to: {filename}")
@@ -1243,10 +1244,10 @@ def save_payload_to_file(url, content, section):
         "data": {
             "schema": {
                 "searchableFields": ["Question", "Answer"],
-                "metadataFields": ["Category", "Type"]
+                "metadataFields": ["Category", "Type", "URL"] # Added "URL"
             },
             "name": f"{section.lower()}_{url_based_name}", # Schema name consistency
-            "items": final_items # Use the validated items
+            "items": final_items 
         }
     }
     
@@ -1262,11 +1263,13 @@ def save_payload_to_file(url, content, section):
         if not isinstance(item, dict):
             logger.warning(f"Skipping non-dictionary item during final validation: {item}")
             continue
-        item["Type"] = "Data" # Add static Type field
+        # item["Type"] = "Data" # Already added
+        # item["URL"] = url     # Already added to 'content' which became 'final_items'
         valid = True
+        # Check all keys including the new "URL" in metadataFields
         for key in payload["data"]["schema"]["searchableFields"] + payload["data"]["schema"]["metadataFields"]:
             if key not in item:
-                logger.warning(f"Missing required key '{key}' in item: {item}. Skipping item.")
+                logger.warning(f"Missing required key '{key}' in item for file {filename}: {item}. Skipping item.")
                 valid = False
                 break
         if valid:
@@ -1275,13 +1278,9 @@ def save_payload_to_file(url, content, section):
             
     payload["data"]["items"] = validated_items # Use only validated items
     
-    # Determine if we should skip saving:
-    # Skip ONLY if the final list is empty AND the original input content was NOT empty.
-    # This means validation failed on all items that were actually passed in.
-    # We allow saving if the final list is empty BECAUSE the original input was empty (initialization).
     if not validated_items and bool(content):
         logger.warning(f"No valid Q/A items found after validation for {filename}. Skipping file save as all originally provided items were invalid.")
-        return None # Indicate save failure due to validation removing all items
+        return None 
 
     try:
         with open(filename, "w", encoding="utf-8") as f:
@@ -1289,10 +1288,10 @@ def save_payload_to_file(url, content, section):
         
         logger.info(f"Successfully saved/overwritten payload for URL '{url}' ({len(payload['data']['items'])} items) to file: {filename}")
         print(f"Payload saved/overwritten: {filename}")
-        return filename # Return filename on success
+        return filename 
     except Exception as e:
         logger.error(f"Error writing payload file {filename}: {str(e)}")
-        return None # Indicate save failure
+        return None 
 
 def upload_to_voiceflow(filename):
     logger.info(f"Nahrávání souboru '{filename}' do Voiceflow")
@@ -3256,6 +3255,112 @@ def compile_and_upload_question_tables():
             
     logger.info("Finished compiling and uploading category-specific question tables.")
 
+def add_url_to_existing_qa_files():
+    payloads_dir = "payloads"
+    if not os.path.exists(payloads_dir):
+        logger.error(f"Payloads directory '{payloads_dir}' does not exist. Cannot update files.")
+        return
+
+    updated_files_count = 0
+    logger.info(f"Scanning '{payloads_dir}' for Q/A files to update with URL field...")
+    logger.warning("URL reconstruction is best-effort. It assumes filenames follow the '{category.lower()}_{original_url_path_with_slashes_replaced_by_underscores}.json' pattern.")
+
+    for filename in os.listdir(payloads_dir):
+        if not filename.endswith(".json"):
+            continue
+
+        if "_table" in filename: # Skip all table files
+            logger.debug(f"Skipping table file: {filename}")
+            continue
+        
+        file_path = os.path.join(payloads_dir, filename)
+        logger.info(f"Processing Q/A file for URL update: {file_path}")
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                payload_data = json.load(f)
+
+            if not isinstance(payload_data, dict) or 'data' not in payload_data or 'items' not in payload_data['data']:
+                logger.warning(f"Skipping {filename}: Invalid payload structure (missing data/items).")
+                continue
+
+            base_name = filename[:-5]  # Remove .json
+            reconstructed_url = f"URL_COULD_NOT_BE_RECONSTRUCTED_FROM_FILENAME:{filename}" # Default
+            
+            found_category_match = False
+            for cat_from_list in CATEGORIES:
+                category_prefix = cat_from_list.lower() + "_"
+                if base_name.startswith(category_prefix):
+                    # The part after the category prefix is the original url_based_name
+                    url_based_name_from_file = base_name[len(category_prefix):]
+                    
+                    if url_based_name_from_file == "home":
+                        reconstructed_url = BASE_URL
+                    else:
+                        # Convert underscores in this part back to slashes to get the original path
+                        original_path_segment = url_based_name_from_file.replace('_', '/')
+                        reconstructed_url = urljoin(BASE_URL, original_path_segment)
+                    found_category_match = True
+                    break 
+            
+            if not found_category_match:
+                # Handle cases where the filename might not have a known category prefix
+                # e.g., a file named "home.json" directly for the homepage's Q/A
+                if base_name == "home":
+                    reconstructed_url = BASE_URL
+                else:
+                    # If no category matched, and it's not "home.json", we might assume the whole base_name
+                    # was a url_based_name (e.g. from a single custom URL process without a clear category prefix in filename)
+                    # This part is more heuristic.
+                    logger.warning(f"No known category prefix found in '{filename}'. Attempting to reconstruct URL assuming entire base_name ('{base_name}') is the path slug (underscores converted to slashes).")
+                    original_path_segment = base_name.replace('_', '/')
+                    reconstructed_url = urljoin(BASE_URL, original_path_segment)
+
+
+            logger.debug(f"File: {filename}, Base name: {base_name}, Reconstructed URL: {reconstructed_url}")
+            
+            data_section = payload_data['data']
+            schema = data_section.get('schema', {})
+            if not schema: # Should not happen if previous check passed, but defensive
+                logger.warning(f"Skipping {filename}: Schema not found in data section.")
+                continue
+            
+            metadata_fields = schema.get('metadataFields', [])
+            schema_changed = False
+            if "URL" not in metadata_fields:
+                metadata_fields.append("URL")
+                schema['metadataFields'] = list(set(metadata_fields)) # Ensure uniqueness and preserve order (though set doesn't)
+                schema_changed = True
+                logger.info(f"Added 'URL' to metadataFields in schema for {filename}")
+
+            items = data_section.get('items', [])
+            if not isinstance(items, list): # Should not happen, but defensive
+                logger.warning(f"Skipping {filename}: 'items' is not a list or not found in data section.")
+                continue
+
+            modified_item_count = 0
+            for item in items:
+                if isinstance(item, dict):
+                    # Add or update the URL field
+                    if item.get("URL") != reconstructed_url:
+                        item["URL"] = reconstructed_url
+                        modified_item_count += 1
+            
+            if modified_item_count > 0 or schema_changed:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(payload_data, f, ensure_ascii=False, indent=2)
+                logger.info(f"Updated {filename}: {modified_item_count} items' URL field set/updated. Schema updated: {schema_changed}.")
+                updated_files_count += 1
+            else:
+                logger.info(f"No changes needed for {filename} (URL field likely already present and matches reconstructed, and schema correct).")
+
+        except json.JSONDecodeError:
+            logger.error(f"Error decoding JSON from {filename}. Skipping.")
+        except Exception as e:
+            logger.error(f"Unexpected error processing file {filename}: {str(e)}")
+    
+    logger.info(f"URL field update process for existing Q/A files finished. {updated_files_count} files were modified.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
     parser.add_argument("--skip-scraping", type=int, choices=[0, 1], default=0,
@@ -3268,6 +3373,8 @@ if __name__ == "__main__":
                         help="Process only URLs that don't have corresponding files from previous runs")
     parser.add_argument("--custom-urls", nargs='+', type=str,
                         help="Process only these specific URLs instead of scraping the sitemap")
+    parser.add_argument("--update-qa-url-field", action="store_true",
+                        help="Add/Update URL field in existing Q/A payload files. This is a best-effort update based on filenames.")
     args = parser.parse_args()
     
     # Set debug level if requested
@@ -3276,6 +3383,14 @@ if __name__ == "__main__":
         console_handler.setLevel(logging.DEBUG)
         file_handler.setLevel(logging.DEBUG)
         logger.info("Debug mode enabled")
+
+    if args.update_qa_url_field:
+        logger.info("Starting update of existing Q/A files to add URL field.")
+        add_url_to_existing_qa_files()
+        logger.info("Finished updating Q/A files. Exiting.")
+        # Typically, this would be a standalone operation, so we might exit.
+        # If you want other operations to run after this, remove the exit/return.
+        exit() # or return, if main() is called from elsewhere and needs to signal completion
     
     # Pass custom URLs directly to main function if provided via command line
     main(skip_scraping=args.skip_scraping, 
