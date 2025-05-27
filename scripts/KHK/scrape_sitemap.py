@@ -19,6 +19,7 @@ from anthropic import InternalServerError, RateLimitError
 # ============================================================================
 # SCRIPT IDENTIFICATION
 # ============================================================================
+# This is the SCRIPT_NAME
 SCRIPT_NAME = "scrape_sitemap"
 LOG_DIR = f"{SCRIPT_NAME}_logs"
 LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
@@ -40,7 +41,7 @@ LLM_PROVIDERS = {
     "1": {
         "name": "anthropic",
         "api_key": CLAUDE_API_KEY,
-        "model": "claude-3-7-sonnet-20250219", # Default Anthropic model (Haiku)
+        "model": "claude-sonnet-4-20250514", # Default Anthropic model (Haiku)
         "api_url": "https://api.anthropic.com/v1/messages", # Added API URL
         # "model": "claude-3-sonnet-20240229", # Alternative
         # "model": "claude-3-opus-20240229",  # Alternative
@@ -727,6 +728,9 @@ DŮLEŽITÉ INSTRUKCE:
      * formuláře a žádosti
      * hlášení závad a problémů
      * životní situace
+     * usnesení zastupitelstva a rady kraje/města/obce
+     * konání a jednání zastupitelstva a rady kraje
+     * veškeré záležitosti související s usneseními a jednáními orgánů kraje/města/obce
 
 Vezměte v úvahu celou absolutní cestu v daném stromě k URL odkazu pro co nejpřesnější zařazení/zvolení dané kategorie ze vstupního seznamu. MUSÍTE vybrat jednu kategorii, i když si nejste zcela jisti - vyberte tu nejvíce odpovídající.
 """
@@ -1330,7 +1334,7 @@ def convert_to_qa(content, title, category):
                             "type": "object",
                             "properties": {
                                 "Question": {"type": "string", "description": "The question formulated from the text content, including multiple variations separated by ' | '."},
-                                "Answer": {"type": "string", "description": "The answer extracted verbatim from the text, including any relevant Markdown formatting for links and images."}, 
+                                "Answer": {"type": "string", "description": "The answer extracted verbatim from the text, with ALL URLs and images converted to proper Markdown format ([text](URL) for links, ![alt](URL) for images). Every single URL and image found in the source text MUST be preserved - no exceptions."}, 
                                 "Category": {"type": "string", "description": "The category assigned to this Q/A pair."}
                             },
                             "required": ["Question", "Answer", "Category"]
@@ -1350,10 +1354,45 @@ def convert_to_qa(content, title, category):
     tool_choice = {"type": "tool", "name": "extract_qa_pairs"}
     
     # Revised system prompt focusing on extraction principles
-    # Improved System Prompt
+    # Improved System Prompt with COMPREHENSIVE URL/IMAGE EXTRACTION
     system_prompt = f"""# Tvá role: Jste ultra-precizní asistent pro extrakci informací specializovaný na obsah webových stránek. Vaším úkolem je analyzovat poskytnutý text (fragment webové stránky) a extrahovat z něj POUZE informace **přímo související s hlavním tématem stránky: '{title}'** A ZÁROVEŇ posoudit, zda text obsahuje kontaktní informace na konkrétní osoby. Výstup MUSÍ být ve formě párů Otázka/Odpověď a indikace přítomnosti kontaktů pomocí poskytnutého nástroje `extract_qa_pairs`. Ignorujte obecné navigační prvky, patičky, záhlaví a nesouvisející postranní panely.
 
-## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer") obsahující **každý relevantní detail** z textu **k tématu '{title}'**. Odpovědi NESMÍ být stručné nebo sumarizované. Současně POSUĎTE, zda text obsahuje kontaktní údaje na identifikovatelné osoby (jména, příjmení, e-maily, telefony, pracovní pozice) a nastavte pole `contains_contact_info` na `true` nebo `false`.
+## 🔗 KRITICKÉ PRAVIDLO - KOMPLETNÍ EXTRAKCE VŠECH URL A OBRÁZKŮ 🔗
+**TÉTO SEKCI MUSÍTE VĚNOVAT NEJVYŠŠÍ POZORNOST - JE TO ABSOLUTNÍ PRIORITA!**
+
+### EXTRAKCE A ZACHOVÁNÍ ODKAZŮ/OBRÁZKŮ Z MARKDOWN OBSAHU:
+1. **POVINNÉ: Extrahujte a zachovejte ABSOLUTNĚ VŠECHNY URLs a obrázky** nalezené v analyzovaném Markdown textu, bez jediné výjimky.
+2. **ROZPOZNÁNÍ MARKDOWN FORMÁTŮ:** Text k analýze už je v Markdown formátu, identifikujte a zachovejte:
+   - **Markdown odkazy:** `[popisek](URL)` - zachovejte PŘESNĚ v tomto formátu
+   - **Markdown obrázky:** `![alt text](URL)` - zachovejte PŘESNĚ v tomto formátu  
+   - **Prosté URL:** `https://example.com` - zachovejte buď jako prosté URL nebo převeďte na `[https://example.com](https://example.com)`
+   - **Reference odkazy:** `[text][ref]` a `[ref]: URL` - zachovejte oba formáty
+3. **ZACHOVÁNÍ VŠECH URL TYPŮ:** Extrahujte odkazy na:
+   - Webové stránky (http://, https://)
+   - E-mailové adresy (mailto:)
+   - Telefonní čísla (tel:)
+   - Soubory ke stažení (PDF, DOC, XLS, atd.)
+   - Interní odkazy (#sekce, /cesta, ./relativní)
+   - Všechny další typy URL bez výjimky
+4. **ZACHOVÁNÍ EXISTUJÍCÍHO MARKDOWN FORMÁTU:** Pokud text již obsahuje odkazy/obrázky v Markdown formátu, zachovejte je BEZE ZMĚNY.
+5. **NEDUPLIKUJTE:** Pokud je stejný odkaz zmíněn vícekrát, zachovejte všechny výskyty v jejich kontextu.
+6. **KONTEXTOVÁ INTEGRACE:** Odkazy a obrázky musí být integrovány přirozeně do textu odpovědi, ne jako samostatný seznam.
+
+### PŘÍKLADY SPRÁVNÉHO ZACHOVÁNÍ Z MARKDOWN:
+- **Nalezeno:** `[Stáhnout dokument](https://example.com/dokument.pdf)` 
+  **→ ZACHOVÁNO:** `[Stáhnout dokument](https://example.com/dokument.pdf)`
+- **Nalezeno:** `![Mapa oblasti](/images/mapa.jpg)`
+  **→ ZACHOVÁNO:** `![Mapa oblasti](/images/mapa.jpg)`
+- **Nalezeno:** `Více informací na https://example.com`
+  **→ ZACHOVÁNO:** `Více informací na https://example.com` nebo `Více informací na [https://example.com](https://example.com)`
+- **Nalezeno:** `[Kontakt][1]` a `[1]: mailto:info@example.com`
+  **→ ZACHOVÁNO:** `[Kontakt][1]` a `[1]: mailto:info@example.com`
+- **Nalezeno:** `[jan.novak@khk.cz](mailto:jan.novak@khk.cz)`
+  **→ Email:** `jan.novak@khk.cz` **→ ProfileURL:** `mailto:jan.novak@khk.cz` (pokud je emailový odkaz)
+
+**VAROVÁNÍ:** Ztráta jakéhokoli odkazu nebo obrázku z Markdown obsahu je NEPŘÍPUSTNÁ. Každý URL a obrázek nalezený v Markdown textu MUSÍ být zachován ve správném formátu v poli "Answer".
+
+## HLAVNÍ CÍL: Vytvořit **VYČERPÁVAJÍCÍ** odpovědi ("Answer") obsahující **každý relevantní detail** z textu **k tématu '{title}'** VČETNĚ VŠECH ODKAZŮ A OBRÁZKŮ V MARKDOWN FORMÁTU. Odpovědi NESMÍ být stručné nebo sumarizované. Současně POSUĎTE, zda text obsahuje kontaktní údaje na identifikovatelné osoby (jména, příjmení, e-maily, telefony, pracovní pozice) a nastavte pole `contains_contact_info` na `true` nebo `false`.
 
 ## KLÍČOVÉ ZAMĚŘENÍ:
 *   **POUZE Téma '{title}':** Extrahujte informace **VÝHRADNĚ** se týkající **'{title}'**. Pokud text obsahuje sekce (např. telefonní seznam rozdělený podle oddělení), extrahujte informace pro každou tuto podsekci tématu.
@@ -1372,18 +1411,19 @@ PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel ní�
 - Tento krok je **ABSOLUTNĚ KRITICKY DŮLEŽITÝ** pro zajištění správného formátu JSON výstupu a pro zamezení chyb při parsování JSONu.
 
 ## PRINCIPY EXTRAKCE (pro relevantní obsah k '{title}' PO KROKU 0):
-1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v relevantním textu (již upraveném dle Kroku 0). NIC si nedomýšlejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu, který nyní obsahuje pouze jednoduché apostrofy místo původních uvozovek). **Nezkracujte ani nesumarizujte.**
+1.  **PŘESNOST & VERBATIM:** Extrahujte POUZE informace explicitně uvedené v relevantním textu (již upraveném dle Kroku 0). NIC si nedomýšlejte. Odpověď ("Answer") by měla být co nejvíce **verbatim** (doslovná kopie textu, který nyní obsahuje pouze jednoduché apostrofy místo původních uvozovek) **S KONVERZÍ VŠECH ODKAZŮ A OBRÁZKŮ DO MARKDOWN FORMÁTU**. **Nezkracujte ani nesumarizujte.**
 2.  **MAXIMÁLNÍ ÚPLNOST (v rámci tématu):** Extrahujte **ABSOLUTNĚ VŠECHNY** smysluplné informace **k tématu '{title}'**. To zahrnuje (ale není omezeno na):
     *   **Všechny** kontaktní údaje (jména, příjmení, tituly, funkce, oddělení, emaily, VŠECHNY telefony, fax, adresy kanceláří, čísla dveří) **osob relevantních k '{title}'**.
     *   **Kompletní** seznamy osob (členové výborů, zaměstnanci oddělení atd.) **patřící k '{title}'**.
     *   **Všechny** číselné údaje, časové údaje, odkazy, názvy **související s '{title}'**.
     *   **Všechny** procedurální informace, podmínky, kritéria **týkající se '{title}'**.
+    *   **🔗 VŠECHNY URL, odkazy a obrázky v Markdown formátu - BEZ VÝJIMKY! 🔗**
 3.  **POČET POLOŽEK V SEZNAMECH:** Pokud text obsahuje seznamy položek (např. kontaktní osoby, projekty, dokumenty), jedna z Q/A dvojic se MUSÍ dotazovat na CELKOVÝ POČET těchto položek a odpověď MUSÍ obsahovat tento číselný údaj. Například: 'Kolik zaměstnanců pracuje v odboru X?' Odpověď: 'V odboru X pracuje celkem Y zaměstnanců.'
 4.  **KONKRÉTNÍ NÁKLADY/ALOKACE:** Pokud text zmiňuje jakékoli konkrétní finanční částky, náklady, alokace, rozpočty nebo podobné číselné údaje o penězích, jedna z Q/A dvojic se MUSÍ explicitně ptát na PŘESNOU VÝŠI této částky a odpověď ji MUSÍ obsahovat. Například: 'Jaká je výše dotace pro projekt Y?' Odpověď: 'Dotace pro projekt Y činí Z Kč.'
-5.  **KONKRÉTNOST:** Odpovědi musí být konkrétní a faktické, **přímo citující** zdrojový text (s uvozovkami převedenými na `'`).
+5.  **KONKRÉTNOST:** Odpovědi musí být konkrétní a faktické, **přímo citující** zdrojový text (s uvozovkami převedenými na `'`) **A VŠEMI ODKAZY/OBRÁZKY PŘEVEDENÝMI NA MARKDOWN**.
 6.  **KONTEXT:** Zachovejte původní kontext extrahovaných informací v rámci tématu '{title}'.
 7.  **FORMÁTOVÁNÍ V ODPOVĚDI A ZAJIŠTĚNÍ VALIDNÍHO JSON VÝSTUPU:**
-    *   **Markdown v "Answer":** V poli "Answer" formátujte odkazy pomocí Markdown: `[Popisek](URL)`.
+    *   **🔗 MARKDOWN ZACHOVÁNÍ - NEJVYŠŠÍ PRIORITA:** V poli "Answer" **MUSÍTE** zachovat VŠECHNY odkazy a obrázky nalezené v Markdown obsahu v jejich původním Markdown formátu dle pokynů výše. Toto je KRITICKÉ!
     *   **Kritické Pravidlo (JSON Escaping pro "Question" a "Answer"):** Pole "Question" a "Answer" jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat následující speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí:
         *   **Jednoduché apostrofy (`'`)**: Díky "KROKU 0" budou všechny původní uvozovky v textu převedeny na jednoduché apostrofy. Tyto jednoduché apostrofy (`'`) jsou **validní** uvnitř JSON řetězce definovaného dvojitými uvozovkami (např. `"Answer": "Text s 'apostrofem' uvnitř."`) a **NENÍ NUTNÉ JE SAMOTNÉ DÁLE ESCOPOVAT** v kontextu JSON řetězce. Zaměřte se na ostatní speciální znaky.
         *   **Dvojité uvozovky (`"`)**: Tyto by se **NEMĚLY** vyskytovat v extrahovaném textu, protože KROK 0 je všechny převedl na jednoduché apostrofy. Pokud byste je z nějakého důvodu generovali, MUSÍ být escapovány jako `\\"`. **Ale primárně se spolehněte na KROK 0.**
@@ -1395,30 +1435,31 @@ PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel ní�
         *   **Carriage return (`\\r`)**: KAŽDÝ VÝSKYT znaku carriage return MUSÍ být escapován jako `\\r`.
         *   **Tab (`\\t`)**: KAŽDÝ VÝSKYT znaku tabulátoru MUSÍ být escapován jako `\\t`.
         *   **Ostatní kontrolní znaky (Unicode U+0000 až U+001F)**: Všechny tyto znaky MUSÍ být escapovány pomocí `\\uXXXX` notace (např. `\\u000B` pro vertikální tabulátor).
-    *   **Obsah "Answer":** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje **k tématu '{title}'** (kde všechny původní uvozovky jsou nyní jednoduché apostrofy a ostatní speciální znaky jsou escapovány dle výše uvedených pravidel). Toto platí obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Odpověď MUSÍ být v ČEŠTINĚ.
+    *   **Obsah "Answer":** Pole "Answer" **MUSÍ** obsahovat **PLNÝ, NESKRÁCENÝ, VERBATIM** text extrahovaný ze zdroje **k tématu '{title}'** (kde všechny původní uvozovky jsou nyní jednoduché apostrofy, všechny odkazy/obrázky jsou zachovány z Markdown obsahu, a ostatní speciální znaky jsou escapovány dle výše uvedených pravidel). Toto platí obzvláště pro seznamy a detailní popisy. **ŽÁDNÉ SUMARIZACE!** Odpověď MUSÍ být v ČEŠTINĚ.
     *   **Struktura Výstupu:** Celý váš výstup MUSÍ být POUZE JEDEN validní JSON objekt, který přesně odpovídá schématu definovanému pro nástroj `extract_qa_pairs`. Žádný další text, poznámky, vysvětlení nebo formátování (např. Markdown bloky ```json ... ```) nesmí být přítomno mimo tento jediný JSON objekt.
-6.  **KONTAKTY A SEZNAMY (v rámci tématu '{title}'):**
-    *   Věnujte **NEJVYŠŠÍ POZORNOST** extrakci **KOMPLETNÍCH, NEZKRÁCENÝCH** seznamů osob (např. zaměstnanci odborů v telefonním seznamu) a **VŠECH** jejich kontaktních údajů.
-    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců v dané sekci tématu, spolu se **VŠEMI** jejich detaily (tituly, funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo, **KAŽDÝ** email, číslo kanceláře atd.), přesně jak je to v textu (s uvozovkami převedenými na `'`).
-    *   **NEVYNECHÁVEJTE ŽÁDNÝ DETAIL U ŽÁDNÉ OSOBY!**
-    *   Pro tyto seznamy **IGNORUJTE JAKÉKOLI VNÍMANÉ OMEZENÍ DÉLKY ODPOVĚDI**. Cílem je **100% ÚPLNOST** detailů pro každou osobu v seznamu relevantním k '{title}'.
-    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro každou logickou podsekci tématu (např. pro každý odbor v telefonním seznamu: Otázka: "Kdo pracuje v [Název odboru] a jaké jsou jejich kompletní kontakty?" a Odpověď obsahující **celý, nezměněný výpis** všech osob a detailů z dané sekce textu, s uvozovkami jako `'`). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé osoby v seznamu.
-7.  **OTÁZKY:** Formulujte jasné otázky **specifické pro téma '{title}'**, které přímo vedou k extrahované **detailní** odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu pro telefonní seznam: `Jaké jsou kontakty na Odbor kancelář hejtmana? | Kdo pracuje v Kanceláři hejtmana a jak je kontaktovat? | Telefonní seznam Kanceláře hejtmana | What are the contacts for the Governor's Office Department? | Who works at the Governor's Office and what are their contact details?`
+8.  **KONTAKTY A SEZNAMY (v rámci tématu '{title}'):**
+    *   Věnujte **NEJVYŠŠÍ POZORNOST** extrakci **KOMPLETNÍCH, NEZKRÁCENÝCH** seznamů osob (např. zaměstnanci odborů v telefonním seznamu) a **VŠECH** jejich kontaktních údajů **VČETNĚ VŠECH ODKAZŮ V MARKDOWN FORMÁTU**.
+    *   Vaše "Answer" **MUSÍ** obsahovat **ABSOLUTNĚ PLNÝ VÝČET VŠECH** jednotlivců v dané sekci tématu, spolu se **VŠEMI** jejich detaily (tituly, funkce, pracoviště/odbor, **KAŽDÉ** telefonní číslo, **KAŽDÝ** email, číslo kanceláře atd.), přesně jak je to v textu (s uvozovkami převedenými na `'` a odkazy v Markdown).
+    *   **NEVYNECHÁVEJTE ŽÁDNÝ DETAIL U ŽÁDNÉ OSOBY a ŽÁDNÝ ODKAZ!**
+    *   Pro tyto seznamy **IGNORUJTE JAKÉKOLI VNÍMANÉ OMEZENÍ DÉLKY ODPOVĚDI**. Cílem je **100% ÚPLNOST** detailů pro každou osobu v seznamu relevantním k '{title}' **VČETNĚ VŠECH URL**.
+    *   Ideálně vytvořte **JEDEN KOMPLEXNÍ Q/A pár** pro každou logickou podsekci tématu (např. pro každý odbor v telefonním seznamu: Otázka: "Kdo pracuje v [Název odboru] a jaké jsou jejich kompletní kontakty?" a Odpověď obsahující **celý, nezměněný výpis** všech osob a detailů z dané sekce textu, s uvozovkami jako `'` a odkazy v Markdown). **NEVYTVÁŘEJTE** samostatné Q/A páry pro jednotlivé osoby v seznamu.
+9.  **OTÁZKY:** Formulujte jasné otázky **specifické pro téma '{title}'**, které přímo vedou k extrahované **detailní** odpovědi. Zahrňte 3-5 různých formulací otázky oddělených ` | `. PRVNÍ formulace by měla být hlavní otázka v ČEŠTINĚ, následovaná dalšími českými variantami. Poté přidejte anglické překlady/varianty otázky, také oddělené ` | `. Příklad formátu pro telefonní seznam: `Jaké jsou kontakty na Odbor kancelář hejtmana? | Kdo pracuje v Kanceláři hejtmana a jak je kontaktovat? | Telefonní seznam Kanceláře hejtmana | What are the contacts for the Governor's Office Department? | Who works at the Governor's Office and what are their contact details?`
 
 ## POSTUP EXTRAKCE STEP-BY-STEP:
 1.  Pečlivě analyzuj "ZDROJOVÝ TEXT K ANALÝZE" (po aplikaci KROKU 0) s cílem extrahovat **MAXIMUM** informativních Q/A párů **k tématu '{title}'** A ZÁROVEŇ POSOUDIT přítomnost kontaktů.
-2.  Identifikuj **VŠECHNY** klíčové informace, fakta, detaily, kontakty, seznamy **relevantní k '{title}'**. **IGNORUJ** obsah nesouvisející s tímto tématem.
-3.  Pro každou identifikovanou informaci (nebo ucelený blok informací jako sekce telefonního seznamu) vytvořte pár Otázka/Odpověď.
-4.  Pokuste se generovat Q/A páry v pořadí, v jakém se informace objevují v textu.
-5.  Dbejte na **ABSOLUTNÍ PŘESNOST A MAXIMÁLNÍ ÚPLNOST** extrakce v rámci tématu. **NENECHÁVEJTE ŽÁDNÝ RELEVANTNÍ DETAIL** pozadu v poli "Answer".
-6.  V odpovědích správně formátujte odkazy pomocí Markdown.
-7.  Vytvořte **VYČERPÁVAJÍCÍ** Q/A páry pro všechny seznamy osob a kontaktů **v rámci tématu '{title}'**.
-8.  Na základě analýzy textu nastavte hodnotu `contains_contact_info` na `true` nebo `false`.
+2.  **🔗 IDENTIFIKUJ VŠECHNY URL A OBRÁZKY:** Projděte celý text a najděte VŠECHNY odkazy a obrázky - nic nesmí uniknout!
+3.  Identifikuj **VŠECHNY** klíčové informace, fakta, detaily, kontakty, seznamy **relevantní k '{title}'**. **IGNORUJ** obsah nesouvisející s tímto tématem.
+4.  Pro každou identifikovanou informaci (nebo ucelený blok informací jako sekce telefonního seznamu) vytvořte pár Otázka/Odpověď **SE ZACHOVÁNÍM VŠECH ODKAZŮ/OBRÁZKŮ Z MARKDOWN OBSAHU**.
+5.  Pokuste se generovat Q/A páry v pořadí, v jakém se informace objevují v textu.
+6.  Dbejte na **ABSOLUTNÍ PŘESNOST A MAXIMÁLNÍ ÚPLNOST** extrakce v rámci tématu. **NENECHÁVEJTE ŽÁDNÝ RELEVANTNÍ DETAIL** pozadu v poli "Answer" **VČETNĚ ŽÁDNÉHO ODKAZU NEBO OBRÁZKU**.
+7.  **🔗 ZACHOVEJTE VŠECHNY ODKAZY A OBRÁZKY z Markdown obsahu v jejich původním formátu.**
+8.  Vytvořte **VYČERPÁVAJÍCÍ** Q/A páry pro všechny seznamy osob a kontaktů **v rámci tématu '{title}'**.
+9.  Na základě analýzy textu nastavte hodnotu `contains_contact_info` na `true` nebo `false`.
 
-## Cílové téma tohoto textového fragmentu je: '{title}'. Zaměřte se POUZE na extrakci informací k tomuto tématu a posouzení přítomnosti kontaktů."""
+## Cílové téma tohoto textového fragmentu je: '{title}'. Zaměřte se POUZE na extrakci informací k tomuto tématu, posouzení přítomnosti kontaktů, a **TRIPLE-SURE** zachování všech URL a obrázků v Markdown formátu."""
 
     # Revised user prompt focusing on the task and instructing tool use
-    # Improved User Prompt
+    # Improved User Prompt with URL/IMAGE EXTRACTION EMPHASIS
     user_prompt = f"""# ZDROJOVÝ TEXT K ANALÝZE:
 
 ```
@@ -1426,8 +1467,18 @@ PŘED extrakcí Q/A párů a PŘED aplikací jakýchkoli dalších pravidel ní�
 ```
 
 # TVŮJ AKTUÁLNÍ ÚKOL: **NYNÍ POUŽIJ NÁSTROJ `extract_qa_pairs`** pro extrakci Q/A párů ze "ZDROJOVÝ TEXT K ANALÝZE".
-**DŮRAZ:** Zaměř se na vytvoření **maximálně vyčerpávajících a detailních odpovědí ('Answer')**, jak je specifikováno v systémových instrukcích, zejména pro kontaktní informace a seznamy. **NEZKRACUJ** odpovědi.
-**KLÍČOVÁ POŽADAVKA NA FORMÁT:** Ujistěte se, že celý JSON výstup je striktně validní. Všechny textové hodnoty v JSONu (zejména v polích "Question" a "Answer") MUSÍ mít korektně escapované všechny speciální znaky (jako jsou uvozovky, zpětná lomítka, nové řádky atd.) podle standardu JSON a dle detailních pravidel uvedených v systémových instrukcích. Výstup nesmí obsahovat žádný text mimo samotný JSON objekt.
+
+## 🔗 PRIORITA #1: EXTRAKCE VŠECH URL A OBRÁZKŮ
+**KRITICKÉ:** Před vytvořením Q/A párů MUSÍTE identifikovat VŠECHNY odkazy a obrázky v Markdown textu a zachovat je v původním Markdown formátu v odpovědích. Žádný URL nebo obrázek nesmí být ztracen!
+
+## DALŠÍ POŽADAVKY:
+**DŮRAZ:** Zaměř se na vytvoření **maximálně vyčerpávajících a detailních odpovědí ('Answer')** VČETNĚ VŠECH ODKAZŮ A OBRÁZKŮ V MARKDOWN FORMÁTU, jak je specifikováno v systémových instrukcích, zejména pro kontaktní informace a seznamy. **NEZKRACUJ** odpovědi.
+
+**KLÍČOVÁ POŽADAVKA NA FORMÁT:** Ujistěte se, že celý JSON výstup je striktně validní. Všechny textové hodnoty v JSONu (zejména v polích "Question" a "Answer") MUSÍ mít korektně escapované všechny speciální znaky (jako jsou uvozovky, zpětná lomítka, nové řádky atd.) podle standardu JSON a dle detailních pravidel uvedených v systémových instrukcích. 
+
+**🔗 POVINNOST ZACHOVÁNÍ URL/OBRÁZKŮ:** Každý odkaz a obrázek nalezený v Markdown textu MUSÍ být zachován v původním Markdown formátu v poli "Answer". Ztráta jakéhokoli URL nebo obrázku je nepřípustná.
+
+Výstup nesmí obsahovat žádný text mimo samotný JSON objekt.
 """
 
     messages = [{"role": "user", "content": user_prompt}]
@@ -2756,9 +2807,9 @@ def extract_contact_details_llm(content, page_title, category, source_url):
                                 "Subdepartment": {"type": "string", "description": "A sub-department or more specific team, if applicable."},
                                 "Email": {"type": "string", "description": "Email address of the contact."},
                                 "PhoneNumber": {"type": "string", "description": "Phone number of the contact. Include all listed numbers, separated by comma or semicolon."},
-                                "ProfileURL": {"type": "string", "description": "Direct URL to the contact's profile page, if available in the text."},
+                                "ProfileURL": {"type": "string", "description": "ALL URLs related to this contact person: profile pages, personal websites, LinkedIn profiles, mailto links, or ANY other URL explicitly associated with this person. Preserve EVERY URL found - no exceptions."},
                                 "Office": {"type": "string", "description": "Office number or location description (e.g., Dveře č. 123, Budova A)."},
-                                "OfficeURL": {"type": "string", "description": "URL specifically for the office location or map, if available."}
+                                "OfficeURL": {"type": "string", "description": "ALL URLs related to office location: maps, building plans, navigation systems, or ANY URL concerning the office location of this person. Preserve EVERY URL found - no exceptions."}
                             },
                             "required": ["LastName", "FullName"] # Minimum requirement
                         }
@@ -2776,6 +2827,30 @@ Váš úkol je identifikovat VŠECHNY osoby zmíněné v textu a pro KAŽDOU z n
 ## Cílová stránka: '{page_title}' (URL: {source_url})
 ## Kategorie stránky: '{category}'
 
+## 🔗 KRITICKÉ PRAVIDLO - ZACHOVÁNÍ VŠECH URL A OBRÁZKŮ 🔗
+**NEJVYŠŠÍ PRIORITA: Zachovejte VŠECHNY URL a odkazy nalezené v textu!**
+
+### EXTRAKCE A ZACHOVÁNÍ ODKAZŮ:
+1. **POVINNÉ:** Identifikujte a zachovejte VŠECHNY URLs a odkazy související s kontaktními osobami.
+2. **SPECIFICKÉ URL TYPY pro kontakty:**
+   - **ProfileURL:** Přímé odkazy na osobní profily, webové stránky osob
+   - **OfficeURL:** Odkazy na mapy kanceláří, plány budov, lokalizační služby
+   - **Email odkazy:** mailto: odkazy (zachovejte je jako "mailto:email@domena.cz")
+   - **Telefonní odkazy:** tel: odkazy (zachovejte je jako "tel:+420123456789")
+   - **Všechny ostatní URL:** Jakékoli další odkazy související s osobou
+3. **ZACHOVÁNÍ FORMÁTU:** URLs zachovejte PŘESNĚ jak jsou v textu - nekonvertujte na Markdown, ale zachovejte originální formát.
+4. **ŽÁDNÁ ZTRÁTA:** Ztráta jakéhokoli odkazu související s kontaktní osobou je NEPŘÍPUSTNÁ.
+
+### PŘÍKLADY SPRÁVNÉHO ZACHOVÁNÍ URL:
+- **Nalezeno:** `Profil: https://www.khk.cz/osoba/jan-novak`
+  **→ ProfileURL:** `https://www.khk.cz/osoba/jan-novak`
+- **Nalezeno:** `Kancelář: https://maps.khk.cz/budova-a-mistnost-201`
+  **→ OfficeURL:** `https://maps.khk.cz/budova-a-mistnost-201`
+- **Nalezeno:** `[jan.novak@khk.cz](mailto:jan.novak@khk.cz)`
+  **→ Email:** `jan.novak@khk.cz` **→ ProfileURL:** `mailto:jan.novak@khk.cz` (pokud je emailový odkaz)
+- **Nalezeno:** `[jan.novak@khk.cz](mailto:jan.novak@khk.cz)`
+  **→ Email:** `jan.novak@khk.cz` **→ ProfileURL:** `mailto:jan.novak@khk.cz` (pokud je emailový odkaz)
+
 ## Klíčové Instrukce pro Extrakci:
 1.  **Identifikace Osob:** Najděte všechny zmínky o konkrétních lidech. Zaměřte se na jména, příjmení, tituly.
 2.  **Kompletní Data:** Pro každou osobu se snažte vyplnit VŠECHNA pole definovaná ve schématu nástroje (`FirstName`, `LastName`, `FullName`, `Title`, `Role`, `Department`, `Subdepartment`, `Email`, `PhoneNumber`, `ProfileURL`, `Office`, `OfficeURL`).
@@ -2788,10 +2863,10 @@ Váš úkol je identifikovat VŠECHNY osoby zmíněné v textu a pro KAŽDOU z n
     *   `Subdepartment`: Podřazené oddělení (platí hlavně pro odbory), referát nebo specifičtější tým, pokud je uvedeno.
     *   `Email`: E-mailová adresa. Pokud je více adres, uveďte všechny (oddělené čárkou).
     *   `PhoneNumber`: Telefonní číslo. Pokud je více čísel (mobil, pevná linka), uveďte všechny (oddělené čárkou).
-    *   `ProfileURL`: Přímý odkaz na osobní profilovou stránku dané osoby, POUZE pokud je explicitně uveden v textu u dané osoby. Neuvádějte obecnou URL stránky, ze které extrahujete.
+    *   **🔗 `ProfileURL`: VŠECHNY přímé odkazy na osobní profilové stránky, webové stránky osob, LinkedIn profily, mailto odkazy, nebo jakékoli jiné URL explicitně spojené s danou osobou. NIKDY NEVYNECHTE žádný odkaz!**
     *   `Office`: Číslo kanceláře, dveří, popis umístění (např. "kancelář č. 101", "budova B, 2. patro").
-    *   `OfficeURL`: Odkaz na mapu kanceláře nebo plán budovy, POUZE pokud je explicitně uveden.
-3.  **Přesnost a Verbatim:** Extrahujte informace PŘESNĚ tak, jak jsou uvedeny v textu. Neměňte je, nedoplňujte si je, pokud nejsou explicitně přítomny.
+    *   **🔗 `OfficeURL`: VŠECHNY odkazy na mapy kanceláří, plány budov, navigační systémy, nebo jakékoli URL týkající se lokalizace kanceláře dané osoby. ZACHOVEJTE VŠECHNY!**
+3.  **Přesnost a Verbatim:** Extrahujte informace PŘESNĚ tak, jak jsou uvedeny v textu. Neměňte je, nedoplňujte si je, pokud nejsou explicitně přítomny. **ZACHOVEJTE VŠECHNY URL v jejich originální podobě.**
 4.  **Více Osob:** Pokud text obsahuje informace o více osobách, vytvořte samostatný objekt v poli "contacts" pro KAŽDOU osobu.
 5.  **Chybějící Informace:** Pokud některý údaj pro danou osobu v textu chybí, ponechte příslušné pole v JSONu prázdné (null nebo vynechte, pokud není 'required') nebo jako prázdný řetězec "". NEVYMÝŠLEJTE si data. Pole `LastName` a `FullName` jsou však vysoce preferovaná.
 6.  **Formát JSON:** Výstup MUSÍ být validní JSON objekt odpovídající schématu nástroje. Žádný další text mimo JSON.
@@ -2801,7 +2876,7 @@ Váš úkol je identifikovat VŠECHNY osoby zmíněné v textu a pro KAŽDOU z n
     - Toto pravidlo se vztahuje na VŠECHNY uvozovky, které najdete, bez výjimky. Cílem je, aby výsledný text, který budete dále analyzovat, obsahoval místo jakýchkoli původních uvozovek pouze jednoduché apostrofy (`'`).
     - Tento krok je **ABSOLUTNĚ KRITICKY DŮLEŽITÝ** pro zajištění správného formátu JSON výstupu a pro zamezení chyb při parsování JSONu.
 8.  **ZAJIŠTĚNÍ VALIDNÍHO JSON VÝSTUPU (Escapování):**
-    *   Pole v JSONu (např. `FullName`, `Email`, `Role` atd.) jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat následující speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí (PO KROKU 0):
+    *   Pole v JSONu (např. `FullName`, `Email`, `Role`, `ProfileURL`, `OfficeURL` atd.) jsou textové řetězce (strings) uvnitř JSON struktury. Aby byl výsledný JSON vždy platný a správně interpretovatelný, MUSÍTE důsledně escapovat následující speciální znaky VŽDY, když se objeví uvnitř HODNOT těchto polí (PO KROKU 0):
         *   **Jednoduché apostrofy (`'`)**: Díky "KROKU 0" budou všechny původní uvozovky v textu převedeny na jednoduché apostrofy. Tyto jednoduché apostrofy (`'`) jsou **validní** uvnitř JSON řetězce definovaného dvojitými uvozovkami (např. `"FullName": "Jméno s 'apostrofem' Příjmení."`) a **NENÍ NUTNÉ JE SAMOTNÉ DÁLE ESCOPOVAT** v kontextu JSON řetězce. Zaměřte se na ostatní speciální znaky.
         *   **Dvojité uvozovky (`"`)**: Tyto by se **NEMĚLY** vyskytovat v extrahovaném textu, protože KROK 0 je všechny převedl na jednoduché apostrofy. Pokud byste je z nějakého důvodu generovali, MUSÍ být escapovány jako `\\\\"`. **Ale primárně se spolehněte na KROK 0.**
         *   **Zpětné lomítko (`\\\\`)**: KAŽDÝ VÝSKYT znaku zpětného lomítka (`\\\\`) MUSÍ být escapován jako `\\\\\\\\`. (Např. text `c:\\\\path` se stane `"c:\\\\\\\\path"`)
@@ -2814,8 +2889,15 @@ Váš úkol je identifikovat VŠECHNY osoby zmíněné v textu a pro KAŽDOU z n
         *   **Ostatní kontrolní znaky (Unicode U+0000 až U+001F)**: Všechny tyto znaky MUSÍ být escapovány pomocí `\\\\uXXXX` notace (např. `\\\\u000B` pro vertikální tabulátor).
     *   **Struktura Výstupu:** Celý váš výstup MUSÍ být POUZE JEDEN validní JSON objekt, který přesně odpovídá schématu definovanému pro nástroj `extract_contact_details`. Žádný další text, poznámky, vysvětlení nebo formátování (např. Markdown bloky ```json ... ```) nesmí být přítomno mimo tento jediný JSON objekt.
 
+## POSTUP EXTRAKCE KONTAKTŮ STEP-BY-STEP:
+1. **🔗 IDENTIFIKACE VŠECH URL:** Nejprve projděte celý text a identifikujte VŠECHNY odkazy a URL. Žádný nesmí uniknout!
+2. **IDENTIFIKACE OSOB:** Najděte všechny zmínky o konkrétních osobách v textu.
+3. **PÁROVÁNÍ URL S OSOBAMI:** Přiřaďte nalezené URL ke konkrétním osobám na základě kontextu.
+4. **KOMPLETNÍ EXTRAKCE:** Pro každou osobu extrahujte všechny dostupné informace včetně všech souvisejících URL.
+5. **VALIDACE:** Ujistěte se, že každá osoba má vyplněná minimálně požadovaná pole a všechny nalezené URL jsou správně přiřazeny.
+
 ## Příklad:
-Text: "Kontaktujte Ing. Jan Novák, Ph.D., vedoucího Odboru IT, na email jan.novak@example.cz nebo tel: 123 456 789. Kancelář má v budově C, dveře č. 42."
+Text: "Kontaktujte Ing. Jan Novák, Ph.D., vedoucího Odboru IT, na email jan.novak@khk.cz nebo tel: 123 456 789. Profil: https://www.khk.cz/lide/jan-novak. Kancelář má v budově C, dveře č. 42, mapa: https://maps.khk.cz/budova-c."
 Možný JSON záznam pro Ing. Jana Nováka (PO aplikaci KROKU 0 a escapování):
 ```json
 {{
@@ -2825,23 +2907,36 @@ Možný JSON záznam pro Ing. Jana Nováka (PO aplikaci KROKU 0 a escapování):
       "LastName": "Novák",
       "FullName": "Ing. Jan Novák, Ph.D.",
       "Title": "Ing., Ph.D.",
-      "Role": "vedoucí Odboru 'IT'",
+      "Role": "vedoucí Odboru IT",
       "Department": "Odbor IT",
-      "Email": "jan.novak@example.cz",
+      "Email": "jan.novak@khk.cz",
       "PhoneNumber": "123 456 789",
-      "Office": "budova C, dveře č. 42"
+      "ProfileURL": "https:\\/\\/www.khk.cz\\/lide\\/jan-novak",
+      "Office": "budova C, dveře č. 42",
+      "OfficeURL": "https:\\/\\/maps.khk.cz\\/budova-c"
     }}
   ]
 }}
 ```
-Analyzujte následující text a extrahujte všechny kontaktní údaje.'''
+
+**🔗 KRITICKÉ UPOZORNĚNÍ:** Ztráta jakéhokoli URL nebo odkazu související s kontaktní osobou je NEPŘÍPUSTNÁ. Každý nalezený odkaz MUSÍ být správně přiřazen a zachován!
+
+Analyzujte následující text a extrahujte všechny kontaktní údaje VČETNĚ VŠECH SOUVISEJÍCÍCH URL.'''
 
     user_prompt = f'''# ZDROJOVÝ TEXT K ANALÝZE:
 ```
 {content}
 ```
-# TVŮJ AKTUÁLNÍ ÚKOL: Použij nástroj `extract_contact_details` pro extrakci VŠECH kontaktních informací o osobách z výše uvedeného textu. Vytvoř pole "contacts" se záznamem pro každou identifikovanou osobu.
-Důrazně dodržuj formát, KROK 0, a pravidla escapování ze systémových instrukcí.
+
+# TVŮJ AKTUÁLNÍ ÚKOL: Použij nástroj `extract_contact_details` pro extrakci VŠECH kontaktních informací o osobách z výše uvedeného textu.
+
+## 🔗 PRIORITA #1: ZACHOVÁNÍ VŠECH URL
+**KRITICKÉ:** Před extrakcí kontaktů MUSÍTE identifikovat VŠECHNY odkazy a URL v textu. Každý odkaz související s kontaktní osobou (profily, mapy kanceláří, mailto, tel:, atd.) MUSÍ být zachován v příslušných polích ProfileURL a OfficeURL. Žádný URL nesmí být ztracen!
+
+## DALŠÍ POŽADAVKY:
+Vytvoř pole "contacts" se záznamem pro každou identifikovanou osobu. Důrazně dodržuj formát, KROK 0, a pravidla escapování ze systémových instrukcí.
+
+**🔗 POVINNOST ZACHOVÁNÍ URL:** Každý odkaz nalezený v textu a související s kontaktní osobou MUSÍ být správně přiřazen a zachován v polích ProfileURL nebo OfficeURL. Ztráta jakéhokoli URL je nepřípustná.
 '''
     messages = [{"role": "user", "content": user_prompt}]
     
@@ -2971,188 +3066,432 @@ def process_url_content(url, category, metadata):
     """
     accumulated_pairs_this_run = [] # Accumulate Q/A pairs for this run
     accumulated_contacts_this_run = [] # Initialize accumulated contacts for this URL run
-    final_filename = None # Store the name of the file to be uploaded
+    accumulated_resolutions_this_run = [] # Initialize accumulated resolutions for this URL run
+    final_filename = None # Store the name of the Q/A payload file to be uploaded
+    resolutions_filename_for_url = None # Store the name of the resolutions payload file for this URL
 
     try:
-        # --- Step 1: Clear/Create the file at the start of processing this URL ---
+        # --- Step 1: Clear/Create the main Q/A file at the start of processing this URL ---
         logger.info(f"Initializing/Clearing Q/A file for URL: {url}")
-        # Call save_payload_to_file with an empty list to ensure the file is overwritten/created fresh
-        initial_filename = save_payload_to_file(url, [], category)
-        if not initial_filename:
-            # If we can't even create the empty file, log error and stop processing this URL
+        initial_qa_filename = save_payload_to_file(url, [], category)
+        if not initial_qa_filename:
             logger.error(f"Failed to initialize/clear Q/A file for {url}. Aborting Q/A extraction for this URL.")
             return
-        logger.info(f"Successfully initialized/cleared file: {initial_filename}")
-        final_filename = initial_filename # Keep track of the latest valid filename
-        # No initial upload needed for an empty file
+        logger.info(f"Successfully initialized/cleared Q/A file: {initial_qa_filename}")
+        final_filename = initial_qa_filename # This will be the Q/A payload file
+
+        # --- Step 1b: Conditionally Initialize/Clear Resolutions file --- 
+        page_title_lower_for_init = metadata.get('title', '').lower()
+        category_lower_for_init = category.lower()
+        page_likely_has_resolutions_for_init = any(keyword in page_title_lower_for_init for keyword in ['zastupitelstv', 'rada', 'usnesen', 'zastupitelstev', 'rad']) or \
+                                               any(keyword in category_lower_for_init for keyword in ['zastupitelstv', 'rada', 'usnesen', 'zastupitelstev', 'rad']) or \
+                                               any(code in page_title_lower_for_init for code in ['zk', 'rk', 'zm', 'rm'])
+
+        if page_likely_has_resolutions_for_init:
+            logger.info(f"Page title/category suggests potential resolutions. Initializing/Clearing resolutions file for URL: {url}")
+            initial_resolutions_filename = save_resolutions_payload(url, [], category) # Pass original category for filename consistency
+            if not initial_resolutions_filename:
+                logger.warning(f"Failed to initialize/clear resolutions file for {url}. Resolution extraction may still proceed, but file might be created later.")
+                # resolutions_filename_for_url remains None, will be set on first successful save
+            else:
+                logger.info(f"Successfully initialized/cleared resolutions file: {initial_resolutions_filename}")
+                resolutions_filename_for_url = initial_resolutions_filename
+        else:
+            logger.info(f"Page title/category does not strongly suggest resolutions. Resolutions file will be created if resolutions are found later for URL: {url}")
         # ----------------------------------------------------------------------
 
         # --- Step 2: Get Content ---
         try:
-            # Specify markdown format and the selectors needed for Q/A
             qa_content, fetched_metadata = get_content(
                 url,
                 content_format="markdown"
-                # target_selector is omitted, so it defaults;
-                # but for markdown, get_content will use MARKDOWN_CONTENT_SELECTORS
             )
             if not qa_content:
                 logger.error(f"Failed to retrieve markdown content for URL {url} from all providers.")
                 raise ValueError("No markdown content returned from get_content")
 
             if fetched_metadata and fetched_metadata.get('title'):
-                 metadata['title'] = fetched_metadata['title'] # Update title
+                 metadata['title'] = fetched_metadata['title']
 
         except requests.exceptions.Timeout as e:
             logger.error(f"Timeout during Q/A content retrieval for URL {url}: {str(e)}")
-            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: Timeout during content retrieval\nQ/A Extraction: SKIPPED\n============================\n")
-            return # Skip Q/A extraction for this URL
+            print(f"\\n=== Q/A EXTRACTION ERROR ===\\nURL: {url}\\nError: Timeout during content retrieval\\nQ/A Extraction: SKIPPED\\n============================\\n")
+            return
         except Exception as e:
             logger.error(f"Error during Q/A content retrieval for URL {url}: {str(e)}")
-            print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: SKIPPED\n============================\n")
-            return # Skip Q/A extraction for this URL
+            print(f"\\n=== Q/A EXTRACTION ERROR ===\\nURL: {url}\\nError: {str(e)}\\nQ/A Extraction: SKIPPED\\n============================\\n")
+            return
         # ---------------------------
 
         qa_content = preprocess_markdown_content(qa_content)
         
-        content_to_process_list = []
-        if ENABLE_CONTENT_CHUNKING:
-            content_chunks = chunk_content(qa_content)
-            logger.info(f"Content chunking enabled. Split content into {len(content_chunks)} chunks for processing.")
-            content_to_process_list = [(chunk, f" (part {i+1}/{len(content_chunks)})") for i, chunk in enumerate(content_chunks)]
-        else:
-            logger.info("Content chunking disabled. Processing entire content as a single unit.")
-            content_to_process_list = [(qa_content, " (entire content)")]
+        # --- Revised Step 2.5: Segment Markdown using finditer ---
+        table_pattern = re.compile(
+            r"((?:^\|[^\n]*\n)+(?:^\| [ \t]*[-:]+[ \t]*[-:| \t]*\n)(?:(?:^\|[^\n]*\n)+))", 
+            re.MULTILINE
+        )
+        
+        processed_segments_info = [] # Will store tuples of (segment_content, is_table_flag)
+        last_match_end = 0
 
-        # --- Step 3: Process Content (Chunks or Whole) Incrementally ---
-        for i, (content_item, part_info) in enumerate(content_to_process_list):
-            processing_unit_description = f"Processing unit {i+1}/{len(content_to_process_list)}{part_info} ({len(content_item)} characters)"
-            if not ENABLE_CONTENT_CHUNKING:
-                processing_unit_description = f"Processing entire content ({len(content_item)} characters)"
-            logger.info(processing_unit_description)
+        for table_match in table_pattern.finditer(qa_content):
+            # Text before the current table
+            text_before_table = qa_content[last_match_end:table_match.start()].strip()
+            if text_before_table:
+                processed_segments_info.append((text_before_table, False)) # False means it's a text segment
             
-            item_qa_pairs, contains_contacts = convert_to_qa(content_item, metadata.get('title', 'Unknown Page') + part_info, category)
+            # The table itself
+            table_content = table_match.group(0).strip() # group(0) is the whole match
+            if table_content: # Should always be true if matched
+                processed_segments_info.append((table_content, True)) # True means it's a table segment
+            
+            last_match_end = table_match.end()
 
-            # If conversion succeeded and returned pairs for this item
-            if item_qa_pairs:
-                success_message = f"Successfully extracted {len(item_qa_pairs)} Q/A pairs from {processing_unit_description}"
-                if not ENABLE_CONTENT_CHUNKING:
-                     success_message = f"Successfully extracted {len(item_qa_pairs)} Q/A pairs from the entire content."
-                logger.info(success_message)
-                accumulated_pairs_this_run.extend(item_qa_pairs) # Add pairs from this item
+        # Text after the last table (if any)
+        text_after_last_table = qa_content[last_match_end:].strip()
+        if text_after_last_table:
+            processed_segments_info.append((text_after_last_table, False))
+            
+        if not processed_segments_info and qa_content: # If no tables found, the whole content is text
+            processed_segments_info.append((qa_content, False))
 
-                # Deduplicate the *current* accumulated list
+        logger.info(f"Segmented markdown content for URL {url} into {len(processed_segments_info)} parts using finditer.")
+        
+        segment_counter = 0
+        # --- Keyword check for resolutions at the page/metadata level ---
+        page_title_lower = metadata.get('title', '').lower()
+        category_lower = category.lower()
+        page_might_contain_resolutions = any(keyword in page_title_lower for keyword in ['zastupitelstv', 'rada', 'usnesen', 'zastupitelstev', 'rad']) or \
+                                         any(keyword in category_lower for keyword in ['zastupitelstv', 'rada', 'usnesen', 'zastupitelstev', 'rad'])
+        # Add specific codes to page level check if they are likely to appear in titles/categories meaningfully
+        page_might_contain_resolutions = page_might_contain_resolutions or \
+                                         any(code in page_title_lower for code in ['zk', 'rk', 'zm', 'rm']) # Lowercase for matching title_lower
+
+        if page_might_contain_resolutions:
+            logger.info(f"Page title/category suggests potential resolutions for URL {url}. Resolution extraction will be prioritized.")
+
+        # Extract page-level defaults for Rok and DatumKonani
+        page_default_rok, page_default_datum_konani = extract_default_date_year_from_text(metadata.get('title', '') + " " + qa_content[:500])
+
+        for segment_content, is_table_segment in processed_segments_info:
+            # segment_content is already stripped from the logic above
+            if not segment_content:
+                continue
+
+            segment_counter += 1
+            logger.info(f"Processing segment {segment_counter}/{len(processed_segments_info)} for URL {url} (Length: {len(segment_content)} chars). Type: {'Table' if is_table_segment else 'Text'}")
+
+            # --- Check if this specific segment (text or table headers) indicates resolutions ---
+            segment_content_lower_preview = segment_content[:500].lower() # Check preview for performance
+            segment_keywords_check = any(keyword in segment_content_lower_preview for keyword in ['zastupitelstv', 'rada', 'usnesen', 'program jednání', 'zastupitelstev', 'rad', 'zk', 'rk', 'zm', 'rm']) or \
+                                   any(code_pattern in segment_content_lower_preview for code_pattern in ['zk/', 'rk/', 'zm/', 'rm/']) # More specific patterns for codes
+            
+            is_resolution_relevant_segment = page_might_contain_resolutions or segment_keywords_check
+            if is_resolution_relevant_segment and not page_might_contain_resolutions:
+                 logger.info(f"Segment content suggests potential resolutions for URL {url}. Resolution extraction will be applied to this segment.")
+
+            if is_table_segment:
+                # --- Handle Table Segment ---
+                if is_resolution_relevant_segment:
+                    logger.info(f"Table segment identified as relevant for RESOLUTION extraction for URL: {url}")
+                    # Parse table row by row for resolution extraction
+                    # A simple way to get rows from a markdown table string:
+                    table_lines = segment_content.strip().split('\n')
+                    if len(table_lines) < 2: # Header + separator at least
+                        logger.warning(f"Table segment for {url} has too few lines to be a valid Markdown table. Skipping row-by-row resolution extraction.")
+                    else:
+                        header_row_content = table_lines[0]
+                        # data_rows_content = table_lines[2:] # Skip header and separator
+
+                        # More robust row splitting, handling potential variations
+                        data_rows_content = []
+                        for line_idx, line_content in enumerate(table_lines):
+                            if line_idx == 0: # Skip header line
+                                continue
+                            if line_content.strip().startswith('|-') or line_content.strip().startswith(':--'): # Skip separator line
+                                continue
+                            if line_content.strip().startswith('|') and line_content.strip().endswith('|'):
+                                data_rows_content.append(line_content)
+                            else:
+                                logger.debug(f"Skipping line in table as it does not look like a valid MD table row: {line_content}")
+
+                        logger.info(f"Processing {len(data_rows_content)} data rows from resolution table: {url}")
+                        
+                        # Temp list to hold resolutions from the current table being processed row by row
+                        current_table_resolutions_so_far = []
+                        if resolutions_filename_for_url and os.path.exists(resolutions_filename_for_url):
+                            try:
+                                with open(resolutions_filename_for_url, 'r', encoding='utf-8') as f_read:
+                                    existing_payload = json.load(f_read)
+                                    if isinstance(existing_payload, dict) and \
+                                       isinstance(existing_payload.get('data'), dict) and \
+                                       isinstance(existing_payload['data'].get('items'), list):
+                                        current_table_resolutions_so_far.extend(existing_payload['data']['items'])
+                                        logger.info(f"Loaded {len(current_table_resolutions_so_far)} existing resolutions from {resolutions_filename_for_url} for incremental update.")
+                            except Exception as e:
+                                logger.warning(f"Could not load existing resolutions from {resolutions_filename_for_url} for incremental update: {e}")
+
+                        for i, row_content in enumerate(data_rows_content):
+                            row_identifier = f"Table row {i+1}/{len(data_rows_content)}"
+                            logger.info(f"Extracting resolutions from {row_identifier} for URL: {url}")
+                            row_resolution_items = extract_resolution_details_llm(row_content, metadata.get('title', url), category, url, default_rok=page_default_rok, default_datum_konani=page_default_datum_konani)
+                            
+                            if row_resolution_items:
+                                logger.info(f"Extracted {len(row_resolution_items)} resolution items from {row_identifier}.")
+                                # Add to the list for this specific table, then save and upload immediately
+                                current_table_resolutions_so_far.extend(row_resolution_items)
+                                accumulated_resolutions_this_run.extend(row_resolution_items) # Also keep track in the main accumulator for the URL
+
+                                # Deduplicate current_table_resolutions_so_far before saving each time
+                                seen_row_res_tuples = set()
+                                deduplicated_row_res_list = []
+                                unique_row_res_keys = ("CisloUsneseni", "Popis", "PoradoveCislo") 
+                                for res_to_dedup in reversed(current_table_resolutions_so_far):
+                                    res_tuple_for_dedup = tuple(res_to_dedup.get(key, "") for key in unique_row_res_keys)
+                                    if res_tuple_for_dedup not in seen_row_res_tuples:
+                                        seen_row_res_tuples.add(res_tuple_for_dedup)
+                                        deduplicated_row_res_list.append(res_to_dedup)
+                                current_table_resolutions_so_far = list(reversed(deduplicated_row_res_list))
+
+                                if current_table_resolutions_so_far: # If there are items to save (after append & dedupe)
+                                    logger.info(f"Saving/uploading {len(current_table_resolutions_so_far)} total resolutions for URL {url} after processing row {i+1}.")
+                                    temp_saved_resolutions_filename = save_resolutions_payload(url, current_table_resolutions_so_far, category)
+                                    if temp_saved_resolutions_filename:
+                                        resolutions_filename_for_url = temp_saved_resolutions_filename # Update the main tracker
+                                        logger.info(f"Successfully saved {len(current_table_resolutions_so_far)} resolutions to {resolutions_filename_for_url} after row {i+1}.")
+                                        upload_to_voiceflow(resolutions_filename_for_url)
+                                        time.sleep(VOICEFLOW_UPLOAD_DELAY)
+                                    else:
+                                        logger.error(f"Failed to save resolutions after row {i+1} for URL {url}.")
+                            else:
+                                logger.info(f"No resolution items extracted from {row_identifier}.")
+                        # End of row-by-row processing for a table
+                        if accumulated_resolutions_this_run: 
+                            logger.info(f"Resolution table processed. Total {len(accumulated_resolutions_this_run)} items for the URL so far, saved incrementally.")
+
+                    # Additionally, generate a standard Q/A pair for the entire resolution table
+                    logger.info(f"Additionally, generating a standard Q/A pair for the entire resolution table: {url}")
+                    page_title_for_q = metadata.get('title', url.split('/')[-1] or 'this page')
+                    # table_lines is already defined from earlier in this block (around line 3202)
+                    extracted_headers = []
+                    if table_lines: 
+                        header_line = table_lines[0].strip()
+                        if header_line.startswith('|') and header_line.endswith('|'):
+                            extracted_headers = [h.strip() for h in header_line[1:-1].split('|') if h.strip()]
+                    logger.info(f"Extracted headers for general Q/A from resolution table: {extracted_headers}")
+                    
+                    llm_generated_question_for_table = None
+                    if extracted_headers:
+                        llm_generated_question_for_table = generate_table_question_llm(page_title_for_q, extracted_headers, category)
+
+                    final_table_question = ""
+                    if llm_generated_question_for_table:
+                        final_table_question = llm_generated_question_for_table
+                    else:
+                        logger.warning(f"Using fallback generic question for resolution table (overall Q/A) on page '{page_title_for_q}'")
+                        table_question_cz = f"Co souhrnně obsahuje následující tabulka s usneseními na stránce '{page_title_for_q}'? | Jaké informace jsou uvedeny v této tabulce usnesení na stránce '{page_title_for_q}'?"
+                        table_question_en = f"What does the following resolutions table on the page '{page_title_for_q}' comprehensively contain? | What information is listed in this resolutions table on the page '{page_title_for_q}'?"
+                        final_table_question = f"{table_question_cz} | {table_question_en}"
+                    
+                    table_qa_pair = {
+                        "Question": final_table_question,
+                        "Answer": segment_content, # segment_content is the full table markdown
+                        "Category": category
+                    }
+                    accumulated_pairs_this_run.append(table_qa_pair)
+                    logger.info(f"Added 1 additional Q/A pair for the entire resolution table segment for URL: {url}")
+
+                else:
+                    # Standard table processing (single Q/A pair for the whole table)
+                    logger.info(f"Table segment NOT identified for resolution extraction. Generating direct Q/A pair for URL: {url}")
+                    page_title_for_q = metadata.get('title', url.split('/')[-1] or 'this page')
+                    table_lines = segment_content.strip().split('\n')
+                    extracted_headers = []
+                    if table_lines:
+                        header_line = table_lines[0].strip()
+                        if header_line.startswith('|') and header_line.endswith('|'):
+                            extracted_headers = [h.strip() for h in header_line[1:-1].split('|') if h.strip()]
+                    logger.info(f"Extracted headers for general table: {extracted_headers}")
+                    llm_generated_question_for_table = None
+                    if extracted_headers:
+                        llm_generated_question_for_table = generate_table_question_llm(page_title_for_q, extracted_headers, category)
+
+                    final_table_question = ""
+                    if llm_generated_question_for_table:
+                        final_table_question = llm_generated_question_for_table
+                    else:
+                        logger.warning(f"Using fallback generic question for table on page '{page_title_for_q}'")
+                        table_question_cz = f"Co obsahuje následující tabulka na stránce '{page_title_for_q}'? | Jaké informace jsou uvedeny v tabulce na stránce '{page_title_for_q}'?"
+                        table_question_en = f"What does the following table on the page '{page_title_for_q}' contain? | What information is listed in the table on the page '{page_title_for_q}'?"
+                        final_table_question = f"{table_question_cz} | {table_question_en}"
+                    
+                    table_qa_pair = {
+                        "Question": final_table_question,
+                        "Answer": segment_content, 
+                        "Category": category
+                    }
+                    accumulated_pairs_this_run.append(table_qa_pair)
+                    logger.info(f"Added 1 Q/A pair directly from general table segment for URL: {url}")
+
+            else:
+                # --- Handle Text Segment (Existing Logic + Potential Resolution Extraction) ---
+                logger.info(f"Segment identified as text. Applying chunking/Q&A extraction for URL: {url}")
+                content_to_process_list = []
+                if ENABLE_CONTENT_CHUNKING:
+                    text_segment_chunks = chunk_content(segment_content)
+                    logger.info(f"Text segment (length {len(segment_content)}) chunking enabled. Split into {len(text_segment_chunks)} sub-chunks.")
+                    content_to_process_list = [(chunk, f" (Text Segment {segment_counter}, part {i+1}/{len(text_segment_chunks)})") for i, chunk in enumerate(text_segment_chunks)]
+                else:
+                    logger.info(f"Text segment (length {len(segment_content)}) chunking disabled. Processing as a single unit.")
+                    content_to_process_list = [(segment_content, f" (Text Segment {segment_counter}, entire segment)")]
+
+                for i, (content_item, part_info) in enumerate(content_to_process_list):
+                    processing_unit_description = f"Processing unit {i+1}/{len(content_to_process_list)}{part_info} ({len(content_item)} characters)"
+                    logger.info(processing_unit_description)
+                    
+                    item_title_context = metadata.get('title', 'Unknown Page')
+                    header_match_in_item = re.match(r'^(#{1,6}\s+[^\n]+)', content_item)
+                    if header_match_in_item:
+                        item_title_context = header_match_in_item.group(1).strip() + " (from page: " + metadata.get('title', 'Unknown Page') + ")"
+                    else:
+                        item_title_context = metadata.get('title', 'Unknown Page') + part_info
+
+                    # Standard Q/A Extraction
+                    item_qa_pairs, contains_contacts = convert_to_qa(content_item, item_title_context, category)
+                    if item_qa_pairs:
+                        success_message = f"Successfully extracted {len(item_qa_pairs)} Q/A pairs from {processing_unit_description}"
+                        logger.info(success_message)
+                        accumulated_pairs_this_run.extend(item_qa_pairs)
+                    else:
+                        failure_message = f"Failed to extract Q/A pairs from {processing_unit_description} or no pairs found (LLM returned None)."
+                        logger.warning(failure_message)
+
+                    # Contact Extraction (if applicable)
+                    if contains_contacts:
+                        logger.info(f"Contact assessment positive for {processing_unit_description}. Attempting contact extraction.")
+                        chunk_contact_items = extract_contact_details_llm(content_item, item_title_context, category, url)
+                        if chunk_contact_items:
+                            logger.info(f"Extracted {len(chunk_contact_items)} new contact items from {processing_unit_description}.")
+                            accumulated_contacts_this_run.extend(chunk_contact_items)
+                        else:
+                            logger.info(f"Contact extraction from {processing_unit_description} yielded no new contact items.")
+                    else:
+                        logger.info(f"Contact assessment negative for {processing_unit_description}. Skipping contact extraction for this chunk.")
+                    
+                    # Resolution Extraction for Text Chunk (if relevant)
+                    # Check again for this specific chunk, even if page level was not indicative
+                    chunk_content_lower = content_item.lower()
+                    chunk_is_resolution_relevant = any(keyword in chunk_content_lower for keyword in ['zastupitelstv', 'rada', 'usnesen', 'program jednání', 'zastupitelstev', 'rad', 'zk', 'rk', 'zm', 'rm']) or \
+                                                   any(code_pattern in chunk_content_lower for code_pattern in ['zk/', 'rk/', 'zm/', 'rm/']) or \
+                                                   any(keyword in item_title_context.lower() for keyword in ['zastupitelstv', 'rada', 'usnesen', 'zastupitelstev', 'rad'])
+                    
+                    if chunk_is_resolution_relevant:
+                        logger.info(f"Text chunk {processing_unit_description} identified as relevant for RESOLUTION extraction.")
+                        # For text chunks, we don't have a definitive row index, so pass None or omit row_index_for_llm
+                        chunk_resolution_items = extract_resolution_details_llm(content_item, item_title_context, category, url, default_rok=page_default_rok, default_datum_konani=page_default_datum_konani) 
+                        if chunk_resolution_items:
+                            logger.info(f"Extracted {len(chunk_resolution_items)} resolution items from text chunk {processing_unit_description}.")
+                            accumulated_resolutions_this_run.extend(chunk_resolution_items)
+                        else:
+                            logger.info(f"No resolution items extracted from text chunk {processing_unit_description}.")
+            
+            # --- Incremental Save & Deduplication (after each segment: table or text block collection) ---
+            if accumulated_pairs_this_run:
                 seen_qa = set()
-                deduplicated_items = []
-                for item_dedup in reversed(accumulated_pairs_this_run): # Renamed 'item' to 'item_dedup' to avoid conflict
+                deduplicated_items_qa = []
+                for item_dedup in reversed(accumulated_pairs_this_run):
                      qa_tuple = (item_dedup.get('Question'), item_dedup.get('Answer'))
                      if qa_tuple not in seen_qa:
                          seen_qa.add(qa_tuple)
-                         deduplicated_items.append(item_dedup)
-                accumulated_pairs_this_run = list(reversed(deduplicated_items))
-                
-                total_items_message = f"Total accumulated items after processing unit {i+1} and deduplicating: {len(accumulated_pairs_this_run)}"
-                if not ENABLE_CONTENT_CHUNKING:
-                    total_items_message = f"Total accumulated items after processing entire content and deduplicating: {len(accumulated_pairs_this_run)}"
-                logger.info(total_items_message)
-
-
-                # Save the *current accumulated* list, overwriting the previous state of the file
+                         deduplicated_items_qa.append(item_dedup)
+                accumulated_pairs_this_run = list(reversed(deduplicated_items_qa))
+                logger.info(f"Total accumulated Q/A items after processing segment {segment_counter} and deduplicating: {len(accumulated_pairs_this_run)}")
                 incremental_filename = save_payload_to_file(url, accumulated_pairs_this_run, category)
-
-                # Update the final filename if save was successful
                 if incremental_filename:
                     final_filename = incremental_filename
                 else:
-                    # Log error if saving failed, but continue processing other items
-                    logger.error(f"Failed to save incremental payload after processing unit {i+1} for URL {url}. Upload might use older file state if no further saves succeed.")
+                    logger.error(f"Failed to save incremental Q/A payload after segment {segment_counter} for URL {url}.")
+
+            if accumulated_contacts_this_run:
+                seen_contacts_tuples = set()
+                deduplicated_contact_list = []
+                unique_contact_keys_for_dedup = ("FullName", "Email", "PhoneNumber", "Role", "Department") 
+                for contact_to_dedup in reversed(accumulated_contacts_this_run):
+                    contact_tuple_for_dedup = tuple(contact_to_dedup.get(key, "") for key in unique_contact_keys_for_dedup)
+                    if contact_tuple_for_dedup not in seen_contacts_tuples:
+                        seen_contacts_tuples.add(contact_tuple_for_dedup)
+                        deduplicated_contact_list.append(contact_to_dedup)
+                accumulated_contacts_this_run = list(reversed(deduplicated_contact_list))
+                logger.info(f"Total accumulated contact items after processing segment {segment_counter} and deduplicating: {len(accumulated_contacts_this_run)}")
+                if accumulated_contacts_this_run: # Ensure list is not empty before saving
+                    logger.info(f"Attempting to save/upload {len(accumulated_contacts_this_run)} accumulated contact items after segment {segment_counter}.")
+                    saved_contacts_filename = save_contacts_payload(url, accumulated_contacts_this_run, category)
+                    if saved_contacts_filename:
+                        logger.info(f"Successfully saved/overwritten {len(accumulated_contacts_this_run)} accumulated contact items to {saved_contacts_filename}.")
+                        upload_to_voiceflow(saved_contacts_filename) 
+                        time.sleep(VOICEFLOW_UPLOAD_DELAY)
+                    else:
+                        logger.error(f"Failed to save {len(accumulated_contacts_this_run)} accumulated contact items for URL {url} after segment {segment_counter}.")
             else:
-                # Log failure for this specific item
-                failure_message = f"Failed to extract Q/A pairs from processing unit {i+1}{part_info} or no pairs found."
-                if not ENABLE_CONTENT_CHUNKING:
-                    failure_message = f"Failed to extract Q/A pairs from the entire content or no pairs found."
-                logger.warning(failure_message)
+                logger.info(f"No contacts accumulated to save after processing segment {segment_counter}.")
 
-            # --- Contact Extraction and Accumulation (Modified Step) ---
-            if contains_contacts: # LLM assessed this chunk might have contacts
-                logger.info(f"Contact assessment positive for processing unit {i+1}{part_info}. Attempting contact extraction from this chunk.")
-                # Extract contacts from the current chunk
-                chunk_contact_items = extract_contact_details_llm(content_item, metadata.get('title', 'Unknown Page') + part_info, category, url)
-                
-                if chunk_contact_items:
-                    logger.info(f"Extracted {len(chunk_contact_items)} new contact items from processing unit {i+1}{part_info}.")
-                    accumulated_contacts_this_run.extend(chunk_contact_items)
+            if accumulated_resolutions_this_run:
+                # Deduplicate accumulated_resolutions_this_run (using CisloUsneseni and Popis as key for uniqueness)
+                seen_resolutions_tuples = set()
+                deduplicated_resolution_list = []
+                unique_resolution_keys_for_dedup = ("CisloUsneseni", "Popis", "BodUsneseni") # Added BodUsneseni for deduplication
+                for res_to_dedup in reversed(accumulated_resolutions_this_run):
+                    res_tuple_for_dedup = tuple(res_to_dedup.get(key, "") for key in unique_resolution_keys_for_dedup)
+                    if res_tuple_for_dedup not in seen_resolutions_tuples:
+                        seen_resolutions_tuples.add(res_tuple_for_dedup)
+                        deduplicated_resolution_list.append(res_to_dedup)
+                accumulated_resolutions_this_run = list(reversed(deduplicated_resolution_list))
+                logger.info(f"Total accumulated resolution items after processing segment {segment_counter} and deduplicating: {len(accumulated_resolutions_this_run)}")
+                if accumulated_resolutions_this_run: # Ensure list is not empty before saving
+                    logger.info(f"Attempting to save/upload {len(accumulated_resolutions_this_run)} accumulated resolution items after segment {segment_counter}.")
+                    # Use the stored filename if already initialized, otherwise save_resolutions_payload will create it.
+                    # save_resolutions_payload handles overwriting correctly.
+                    current_resolutions_filename = save_resolutions_payload(url, accumulated_resolutions_this_run, category)
+                    if current_resolutions_filename:
+                        resolutions_filename_for_url = current_resolutions_filename # Update with the latest (potentially newly created) filename
+                        logger.info(f"Successfully saved/overwritten {len(accumulated_resolutions_this_run)} accumulated resolution items to {resolutions_filename_for_url}.")
+                        upload_to_voiceflow(resolutions_filename_for_url)
+                        time.sleep(VOICEFLOW_UPLOAD_DELAY)
+                    else:
+                        logger.error(f"Failed to save {len(accumulated_resolutions_this_run)} accumulated resolution items for URL {url} after segment {segment_counter}.")
+            else:
+                logger.info(f"No resolutions accumulated to save after processing segment {segment_counter}.")
+            # --- End Incremental Save for this segment ---
+        # --- End Segment Processing Loop ---
 
-                    # Deduplicate accumulated_contacts_this_run
-                    seen_contacts_tuples = set()
-                    deduplicated_contact_list = []
-                    # Define key fields that make a contact unique for deduplication
-                    unique_contact_keys_for_dedup = ("FullName", "Email", "PhoneNumber", "Role", "Department") 
-                    for contact_to_dedup in reversed(accumulated_contacts_this_run):
-                        # Create a tuple of values for the unique keys, handling missing keys
-                        contact_tuple_for_dedup = tuple(contact_to_dedup.get(key, "") for key in unique_contact_keys_for_dedup)
-                        if contact_tuple_for_dedup not in seen_contacts_tuples:
-                            seen_contacts_tuples.add(contact_tuple_for_dedup)
-                            deduplicated_contact_list.append(contact_to_dedup)
-                    accumulated_contacts_this_run = list(reversed(deduplicated_contact_list))
-                    logger.info(f"Total accumulated contact items after processing unit {i+1} and deduplicating: {len(accumulated_contacts_this_run)}")
-                else: # No new contacts found in this specific chunk by LLM
-                    logger.info(f"Contact extraction from chunk {i+1}{part_info} yielded no new contact items.")
-            else: # LLM assessed this chunk does NOT have contacts
-                logger.info(f"Contact assessment negative for processing unit {i+1}{part_info}. Skipping contact extraction for this chunk.")
-            
-            # --- Save and Upload Accumulated Contacts (after each chunk's processing) ---
-            # This runs after each chunk. If accumulated_contacts_this_run is empty,
-            # save_contacts_payload will likely create an empty file or handle it appropriately.
-            if accumulated_contacts_this_run: # Only save if there are any contacts accumulated
-                logger.info(f"Attempting to save/upload {len(accumulated_contacts_this_run)} accumulated contact items after processing unit {i+1}{part_info}.")
-                saved_contacts_filename = save_contacts_payload(url, accumulated_contacts_this_run, category)
-                if saved_contacts_filename:
-                    # Log message now reflects accumulated count
-                    logger.info(f"Successfully saved/overwritten {len(accumulated_contacts_this_run)} accumulated contact items to {saved_contacts_filename}.")
-                    upload_to_voiceflow(saved_contacts_filename) 
-                    time.sleep(VOICEFLOW_UPLOAD_DELAY) # Added delay
-                else:
-                    logger.error(f"Failed to save {len(accumulated_contacts_this_run)} accumulated contact items for URL {url} after unit {i+1}{part_info}.")
-            else: # No contacts accumulated yet or all were duplicates
-                logger.info(f"No contacts accumulated to save after processing unit {i+1}{part_info}. Contacts file may be empty or unchanged.")
-            # --- End Contact Saving/Uploading for the chunk ---
-
-        # --- End Content Processing Loop ---
-
-        # --- Step 4: Handle Fallback (only if NO pairs were ever accumulated for Q/A) ---
+        # --- Step 4: Handle Fallback (only if NO Q/A pairs were ever accumulated) ---
         if not accumulated_pairs_this_run:
-            logger.warning(f"No QA pairs were accumulated from any processing unit for {url}. Creating fallback QA pair.")
+            logger.warning(f"No QA pairs were accumulated from any segment for {url}. Creating fallback QA pair.")
             title = metadata.get('title', 'Unknown page')
             fallback_qa_pairs = [{
                 "Question": f"Co najdu na stránce {title}? | What can I find on the {title} page? | Jaké informace obsahuje stránka {title}?",
                 "Answer": f"Na stránce najdete informace o {title}. Pro podrobnosti navštivte přímo [webovou stránku]({url}).",
                 "Category": category
             }]
-
-            # Save the fallback payload (this will overwrite the initial empty file or last saved state)
             fallback_filename = save_payload_to_file(url, fallback_qa_pairs, category)
-
-            # Update the final filename if fallback save was successful
             if fallback_filename:
                 final_filename = fallback_filename
             else:
                  logger.error(f"Failed to save fallback payload for URL {url}. No file will be uploaded.")
-                 final_filename = None # Ensure no upload happens if fallback save fails
+                 final_filename = None
 
-        # --- Step 5: Final Upload (after loop and fallback check) ---
-        if final_filename:
-            logger.info(f"All processing units handled for URL {url}. Proceeding to upload final file: {final_filename}")
+        # --- Step 5: Final Upload (after loop and fallback check for Q/A file) ---
+        if final_filename: # This refers to the Q/A payload file
+            logger.info(f"All segments handled for URL {url}. Proceeding to upload final Q/A file: {final_filename}")
             upload_to_voiceflow(final_filename)
-            time.sleep(VOICEFLOW_UPLOAD_DELAY) # Added delay
+            time.sleep(VOICEFLOW_UPLOAD_DELAY)
         else:
-            logger.error(f"No final file available to upload for URL {url} (either initial save, incremental saves, or fallback save failed).")
-        # --- End Upload ---
+            logger.error(f"No final Q/A file available to upload for URL {url}.")
+        # Note: Contact file uploads happen incrementally within the loop.
 
     except Exception as e:
-        # Catch any unexpected errors during the entire process for this URL
         logger.error(f"Chyba při zpracování obsahu URL {url}: {str(e)}", exc_info=True)
-        print(f"\n=== Q/A EXTRACTION ERROR ===\nURL: {url}\nError: {str(e)}\nQ/A Extraction: FAILED (Overall processing)\n============================\n")
+        print(f"\\n=== Q/A EXTRACTION ERROR ===\\nURL: {url}\\nError: {str(e)}\\nQ/A Extraction: FAILED (Overall processing)\\n============================\\n")
 
 def compile_and_upload_question_tables():
     """
@@ -3254,6 +3593,472 @@ def compile_and_upload_question_tables():
             logger.error(f"Error saving or uploading question table for category '{category}' (file: {output_filename}): {str(e)}")
             
     logger.info("Finished compiling and uploading category-specific question tables.")
+
+def extract_default_date_year_from_text(text_content):
+    """
+    Tries to extract a default year (YYYY integer) and date (YYYYMMDD integer) from text
+    using an LLM call with a dedicated tool.
+    Returns (default_rok_int, default_datum_konani_int), where values can be None.
+    """
+    if not text_content or not isinstance(text_content, str) or not text_content.strip():
+        logger.warning("extract_default_date_year_from_text (LLM-based): Input text_content is empty or invalid.")
+        return None, None
+
+    date_extraction_tool = [
+        {
+            "name": "report_extracted_date_year",
+            "description": "Reports the primary extracted year and full date from the text.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "year": {
+                        "type": ["integer", "null"],
+                        "description": "The primary four-digit year (YYYY) extracted from the text. Null if not found."
+                    },
+                    "date_yyyymmdd": {
+                        "type": ["integer", "null"],
+                        "description": "The primary full date from the text, formatted as an eight-digit integer YYYYMMDD. Null if not found or not convertible."
+                    }
+                },
+                # No 'required' fields, as either or both can be null.
+            }
+        }
+    ]
+    tool_choice_date = {"type": "tool", "name": "report_extracted_date_year"}
+
+    system_prompt = """You are an expert date extraction assistant.
+Your task is to analyze the provided text, which typically consists of a page title and a summary of its content.
+Identify the single most prominent or primary year (YYYY) and the single most prominent or primary full date that best represents the main temporal context of this document.
+The full date should ideally be convertible to a YYYYMMDD integer format.
+If a full date is identified, the year should correspond to that date.
+If multiple dates or years are present, choose the one that seems most official or globally relevant for the document (e.g., a meeting date for meeting minutes, a publication year for a report).
+Use the 'report_extracted_date_year' tool to provide your findings.
+If a year cannot be determined, provide null for 'year'.
+If a full date cannot be determined or converted to YYYYMMDD format, provide null for 'date_yyyymmdd'."""
+
+    user_prompt = f"""Please extract the primary year and date from the following text: 
+    
+    ""{text_content}""
+
+    Now, call the 'report_extracted_date_year' tool with your findings."""
+
+    messages = [{"role": "user", "content": user_prompt}]
+
+    response_data = call_llm_api(
+        messages=messages,
+        system_prompt=system_prompt,
+        max_tokens=512,
+        temperature=0.0,
+        tools=date_extraction_tool,
+        tool_choice=tool_choice_date
+    )
+
+    default_rok_int = None
+    default_datum_konani_int = None
+
+    if isinstance(response_data, dict):
+        year = response_data.get("year")
+        date_yyyymmdd = response_data.get("date_yyyymmdd")
+
+        # Validate types, as LLM might return string "null" or other types
+        if isinstance(year, int):
+            default_rok_int = year
+        elif year is not None:
+            logger.warning(f"LLM for date extraction returned non-integer for year: {year}. Treating as None.")
+
+        if isinstance(date_yyyymmdd, int):
+            default_datum_konani_int = date_yyyymmdd
+        elif date_yyyymmdd is not None:
+            logger.warning(f"LLM for date extraction returned non-integer for date_yyyymmdd: {date_yyyymmdd}. Treating as None.")
+
+        # If date is present, and year is None or inconsistent, try to derive year from date
+        if default_datum_konani_int and isinstance(default_datum_konani_int, int) and len(str(default_datum_konani_int)) == 8:
+            try:
+                extracted_year_from_date = int(str(default_datum_konani_int)[:4])
+                if default_rok_int is None or default_rok_int != extracted_year_from_date:
+                    if default_rok_int is not None: # Log if we are overwriting an existing year
+                        logger.info(f"Overwriting LLM extracted year '{default_rok_int}' with year '{extracted_year_from_date}' derived from date '{default_datum_konani_int}'.")
+                    default_rok_int = extracted_year_from_date
+            except ValueError:
+                logger.warning(f"Could not derive year from date_yyyymmdd: {default_datum_konani_int}")
+
+        logger.info(f"extract_default_date_year_from_text (LLM-based) for text ('{text_content[:50]}...') yielded: Year={default_rok_int}, DateYYYYMMDD={default_datum_konani_int}")
+        return default_rok_int, default_datum_konani_int
+    else:
+        logger.error(f"extract_default_date_year_from_text (LLM-based) failed or returned unexpected data type for text ('{text_content[:50]}...'). Response: {response_data}")
+        return None, None
+
+def extract_resolution_details_llm(content, page_title, category, source_url, default_rok=None, default_datum_konani=None):
+    """
+    Extracts structured resolution information from text using an LLM call.
+    """
+    resolution_tool = [
+        {
+            "name": "extract_resolution_data",
+            "description": "Extracts detailed data about resolutions (usnesení) from the provided text and formats it as a valid JSON object.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "resolutions": {
+                        "type": "array",
+                        "description": "An array of resolution objects extracted from the text. MUST be present.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "BodUsneseni": {"type": "string", "description": "The explicit agenda item number (e.g., 'Bod 1', '1.', 'Položka X') IF AND ONLY IF it is clearly labeled as such in the provided text. If no such explicit label and number are found IN THE TEXT, this field MUST be empty or null."},
+                                "Popis": {"type": "string", "description": "Description of the resolution (text or summary of the resolution point)."},
+                                "CisloUsneseni": {"type": "string", "description": "The official resolution identifier (e.g., ZK/123/2024, RK/45/2024, Usnesení č. XYZ). This is NOT a voting number (č.hl.) or an agenda item number (BodUsneseni). If no such official resolution identifier is found IN THE TEXT, this field MUST be empty or null."},
+                                "DatumKonani": {"type": "string", "description": "Date of the meeting when the resolution was passed. STRONGLY PREFERRED output format is YYYYMMDD as a string (e.g., '20241104')."},
+                                "Rok": {"type": "string", "description": "Year of the resolution. STRONGLY PREFERRED output format is YYYY as a string (e.g., '2024'). Attempt to derive from DatumKonani if not explicit.", "pattern": "^\\d{4}$"},
+                                "Prilohy": {"type": "string", "description": "Links to attachments (PDF, DOC, ZIP, etc.) related to the resolution. Include ALL URLs, comma-separated if multiple. ALL links MUST be in Markdown format [text](URL). If only a URL is found, convert it to Markdown (e.g., [filename.pdf](URL) or [Příloha](URL))."},
+                                "Pro": {"type": "string", "description": "Number of votes FOR the resolution, if available."},
+                                "Proti": {"type": "string", "description": "Number of votes AGAINST the resolution, if available."},
+                                "ZdrzelSe": {"type": "string", "description": "Number of abstentions, if available."},
+                                "SubCategory": {
+                        "type": "string",
+                                    "description": "The sub-category of the resolution. MUST be one of: 'RK' (Rada kraje), 'ZK' (Zastupitelstvo kraje), 'KK' (Komise kraje), 'VK' (Výbory kraje), 'RM' (Rada města), 'ZM' (Zastupitelstvo města), 'KM' (Komise města), 'VM' (Výbory města). Determine based on context like 'Rada Královéhradeckého kraje', 'Zastupitelstvo města Hradec Králové', etc. If the specific type (Rada, Zastupitelstvo, Komise, Výbor) and level (kraje, města) is clear, use the corresponding code. Prioritize explicit mentions.",
+                                    "enum": ["RK", "ZK", "KK", "VK", "RM", "ZM", "KM", "VM"]
+                                }
+                            },
+                            "required": ["Popis", "CisloUsneseni", "SubCategory"]
+                        }
+                    }
+                },
+                "required": ["resolutions"]
+            }
+        }
+    ]
+    tool_choice = {"type": "tool", "name": "extract_resolution_data"}
+
+    system_prompt = f"""# Vaše Role: Jste AI asistent specializovaný na extrakci detailních informací o usneseních rady nebo zastupitelstva z textu.
+Váš úkol je identifikovat VŠECHNA usnesení zmíněná v textu a pro KAŽDÉ z nich extrahovat co nejvíce údajů pomocí nástroje `extract_resolution_data`.
+
+## Kontext stránky: '{page_title}' (URL: {source_url})
+## Kategorie stránky: '{category}'
+
+## 🔗 KRITICKÉ PRAVIDLO - ZACHOVÁNÍ VŠECH ODKAZŮ (PŘÍLOH) 🔗
+**NEJVYŠŠÍ PRIORITA: Identifikujte a zachovejte VŠECHNY odkazy na dokumenty (PDF, DOC, ZIP atd.), které slouží jako přílohy k usnesením! Všechny odkazy v poli `Prilohy` MUSÍ být ve formátu Markdown `[text odkazu](URL)`**
+
+### EXTRAKCE A ZACHOVÁNÍ PŘÍLOH:
+1.  **POVINNÉ:** V poli `Prilohy` uveďte VŠECHNY URL odkazy na soubory, které jsou přílohami nebo souvisejícími dokumenty k danému usnesení.
+2.  **FORMÁT ODKAZŮ (POVINNÝ MARKDOWN):**
+    *   Každý odkaz na přílohu **MUSÍ** být převeden do formátu Markdown: `[Název souboru nebo relevantní text](URL_k_priloze.pdf)`.
+    *   Pokud text obsahuje již Markdown odkaz (např. `[Text odkazu](URL_k_priloze.pdf)`), zachovejte PŘESNĚ tento formát.
+    *   Pokud text obsahuje prosté URL (např. `https://example.com/priloha.zip`), **MUSÍTE** jej převést na Markdown. Jako text odkazu (`[text]`) použijte název souboru z URL (např. `priloha.zip` -> `[priloha.zip](https://example.com/priloha.zip)`), nebo pokud název souboru není zřejmý, použijte obecný text jako `[Příloha](URL)` nebo `[Dokument](URL)`.
+    *   Pokud je více příloh, oddělte jednotlivé Markdown odkazy čárkou. Např.: `[Příloha 1](url1.pdf), [Dokument Alfa](https://server.cz/priloha2.doc)`
+3.  **ŽÁDNÁ ZTRÁTA:** Ztráta jakéhokoli odkazu na přílohu je NEPŘÍPUSTNÁ. Každý musí být přítomen a ve formátu Markdown.
+
+## Klíčové Instrukce pro Extrakci:
+1.  **Identifikace Usnesení:** Najděte všechny zmínky o konkrétních usneseních. Hledejte čísla usnesení (např. ZK/xx/YYYY, RK/yy/YYYY, Usnesení č. X), data jednání, popisy bodů programu.
+2.  **Kompletní Data:** Pro každé usnesení se snažte vyplnit VŠECHNA pole definovaná ve schématu nástroje: `BodUsneseni`, `Popis`, `CisloUsneseni`, `DatumKonani`, `Rok`, `Prilohy`, `Pro`, `Proti`, `ZdrzelSe`, `SubCategory`.
+    *   `BodUsneseni`: **Vyplňte POUZE POKUD** text explicitně uvádí číslo bodu jednání, pořadové číslo položky, nebo označení jako 'Bod X', 'X.', 'Položka X', apod., které je jasně identifikovatelné jako číslo pořadí agendy.** Nehledaťe toto číslo v názvech odkazov alebo číslach hlasovania. **Pokud takové explicitní označení bodu v textu NENÍ, MUSÍ toto pole zůstat PRÁZDNÉ nebo null.** Nevymýšlejte si ho.
+    *   `Popis`: Textový popis nebo název bodu usnesení.
+    *   `CisloUsneseni`: **Vyplňte POUZE POKUD** text explicitně uvádí oficiální číslo/identifikátor usnesení (např. ZK/123/2024, RK/45/2024, Usnesení č. XYZ).** Toto NENÍ číslo hlasování (č.hl.) ani číslo bodu jednání (to patří do `BodUsneseni`). **Pokud takový explicitní identifikátor usnesení v textu NENÍ, MUSÍ toto pole zůstat PRÁZDNÉ nebo null.**
+    *   `DatumKonani`: Datum, kdy bylo usnesení přijato. **Pokud je to možné, uveďte hodnotu jako souvislý řetězec ve formátu YYYYMMDD (např. '20241104').** Pokud to není možné, uveďte datum tak, jak je v textu.
+    *   `Rok`: Rok přijetí usnesení. **Pokud je to možné, uveďte hodnotu jako čtyřmístný řetězec YYYY (např. '2024').** Často odvoditelné z `DatumKonani`.
+    *   `Prilohy`: **VŠECHNY odkazy na přílohy (viz kritické pravidlo výše) ve formátu Markdown.**
+    *   `Pro`, `Proti`, `ZdrzelSe`: Počty hlasů, pokud jsou uvedeny.
+    *   `SubCategory`: **MUSÍ být jedna z hodnot: 'RK', 'ZK', 'KK', 'VK', 'RM', 'ZM', 'KM', 'VM'.** Určete na základě kontextu, např. "Rada Královéhradeckého kraje" -> "RK", "Zastupitelstvo města Hradec Králové" -> "ZM". Pokud je z textu jasný typ orgánu (Rada, Zastupitelstvo, Komise, Výbor) a úroveň (kraje, města), použijte odpovídající kód. Hledejte explicitní zmínky jako "Usnesení Rady kraje...", "Program jednání Zastupitelstva města...", "Zápis z Komise...", atd. Například, pokud `CisloUsneseni` začíná na 'RK/', použijte 'RK'. Pokud začíná na 'ZK/', použijte 'ZK'.
+3.  **Přesnost a Verbatim:** Extrahujte informace PŘESNĚ tak, jak jsou uvedeny. U pole `Prilohy` dbejte na zachování formátu odkazu.
+4.  **Více Usnesení:** Pokud text (nebo řádek tabulky) obsahuje informace o více usneseních, vytvořte samostatný objekt v poli "resolutions" pro KAŽDÉ usnesení.
+5.  **Chybějící Informace:** Pokud některý údaj chybí (zejména `BodUsneseni` pokud není explicitní), ponechte pole prázdné (null/vynechat) nebo jako prázdný řetězec "". `Popis`, `CisloUsneseni` a `SubCategory` jsou však vysoce preferovaná.
+6.  **KROK 0 (Uvozovky):** PŘED extrakcí nahraďte VŠECHNY typy uvozovek v "ZDROJOVÝ TEXT K ANALÝZE" JEDNÍM standardním jednoduchým apostrofem (`'`). Toto je kritické pro validní JSON.
+7.  **JSON Escapování:** Důsledně escapujte speciální znaky (zpětná lomítka `\\` -> `\\\\`, lomítka `/` -> `\\/`, nové řádky `\\n` -> `\\\\n`, atd.) uvnitř textových hodnot polí JSONu, aby byl výstup vždy validní. Jednoduché apostrofy (`'`) po Kroku 0 NENÍ třeba dále escapovat. Celý výstup musí být JEDEN validní JSON objekt.
+
+## Příklad (pro řádek tabulky nebo textový fragment):
+Text: "1. Stanovení počtu členů, č. ZK/1/1/2024, datum 04.11.2024. Pro: 26, Proti: 15, Zdržel se: 3. Přílohy: [Zápis](zapis.pdf), [Podklady](podklady.zip)"
+Očekávaný JSON objekt (PO aplikaci Kroku 0 a escapování):
+```json
+{{
+  "resolutions": [
+    {{
+      "BodUsneseni": "1.",
+      "Popis": "Stanovení počtu členů",
+      "CisloUsneseni": "ZK/1/1/2024",
+      "DatumKonani": "20241104",
+      "Rok": "2024",
+      "Prilohy": "[Zápis](\\\/zapis.pdf), [Podklady](\\\/podklady.zip)",
+      "Pro": "26",
+      "Proti": "15",
+      "ZdrzelSe": "3",
+      "SubCategory": "ZK"
+    }}
+  ]
+}}
+```
+Jiný příklad textu: "Schválení rozpočtu RK/55/2023, Příloha: rozpoctova_tabulka.xlsx"
+Očekávaný JSON objekt (PO aplikaci Kroku 0 a escapování):
+```json
+{{
+  "resolutions": [
+    {{
+      "BodUsneseni": "",
+      "Popis": "Schválení rozpočtu",
+      "CisloUsneseni": "RK/55/2023",
+      "DatumKonani": "",
+      "Rok": "2023",
+      "Prilohy": "[rozpoctova_tabulka.xlsx](rozpoctova_tabulka.xlsx)",
+      "Pro": "",
+      "Proti": "",
+      "ZdrzelSe": "",
+      "SubCategory": "RK"
+    }}
+  ]
+}}
+```
+Analyzujte následující text a extrahujte všechna data o usneseních VČETNĚ VŠECH PŘÍLOH A JEJICH ODKAZŮ **VE FORMÁTU MARKDOWN**."""
+
+    user_prompt = f"""# ZDROJOVÝ TEXT K ANALÝZE (může být celý textový chunk nebo jeden řádek z tabulky):
+```
+{content}
+```
+
+# TVŮJ AKTUÁLNÍ ÚKOL: Použij nástroj `extract_resolution_data` pro extrakci informací o usneseních z výše uvedeného textu.
+
+## 🔗 PRIORITA #1: EXTRAKCE VŠECH PŘÍLOH (ODKAZŮ) VE FORMÁTU MARKDOWN
+**KRITICKÉ:** Identifikuj VŠECHNY odkazy na dokumenty (PDF, DOCX, XLSX, ZIP atd.) v textu. Každý takový odkaz **MUSÍ** být v poli `Prilohy` uveden ve formátu Markdown `[text odkazu](URL)`. Pokud je v textu jen holé URL, vytvořte vhodný `text odkazu` (např. název souboru). Žádný odkaz na přílohu nesmí být ztracen a všechny musí být v Markdown.
+
+## DALŠÍ POŽADAVKY:
+Vytvoř pole "resolutions" se záznamem pro každé identifikované usnesení. Důrazně dodržuj formát, KROK 0 (uvozovky), a pravidla escapování ze systémových instrukcí.
+Výstup nesmí obsahovat žádný text mimo samotný JSON objekt.
+"""
+    messages = [{"role": "user", "content": user_prompt}]
+
+    response_data = call_llm_api(
+        messages=messages,
+        system_prompt=system_prompt,
+        max_tokens=2048, # Max tokens for resolutions, might be less data per item than contacts
+        temperature=0.0,
+        tools=resolution_tool,
+        tool_choice=tool_choice
+    )
+
+    logger.info(f"======== RESOLUTION EXTRACTION DEBUG: RAW LLM RESPONSE FOR '{page_title}' ========")
+    if response_data is None:
+        logger.info("Full response_data for resolution extraction is None.")
+    elif isinstance(response_data, dict):
+        try:
+            logger.info(f"Full response_data (dict) for resolution extraction: {json.dumps(response_data, ensure_ascii=False, indent=2)}")
+        except Exception as e:
+            logger.error(f"Error trying to json.dumps response_data (dict) for resolution extraction: {str(e)}")
+            logger.info(f"Problematic response_data (dict as string) for resolution extraction: {str(response_data)}")
+    elif isinstance(response_data, str):
+        logger.info(f"Full response_data (string) for resolution extraction: {response_data}")
+    else:
+        logger.info(f"Full response_data (type {type(response_data)}) for resolution extraction: {str(response_data)}")
+    logger.info(f"======== END RESOLUTION EXTRACTION DEBUG: RAW LLM RESPONSE FOR '{page_title}' ========")
+
+    if isinstance(response_data, dict) and 'resolutions' in response_data:
+        resolutions = response_data['resolutions']
+        if isinstance(resolutions, list):
+            logger.info(f"Úspěšně extrahováno {len(resolutions)} usnesení pomocí nástroje pro stránku '{page_title}'.")
+            for idx, res_item in enumerate(resolutions):
+                if isinstance(res_item, dict):
+                    # Add common metadata
+                    res_item['SourceURL'] = source_url 
+                    res_item['OriginalCategory'] = category 
+                    
+                    # These are the page-level defaults, passed as parameters to this function.
+                    # default_rok and default_datum_konani are directly used here.
+                    # No need for separate current_default_rok/current_default_datum_konani 
+                    # if these parameters are consistently passed and not None when they should have values.
+                    # The --- NEW --- block you had for re-fetching defaults if params were None is complex;
+                    # it's better if process_url_content ensures valid defaults are passed if available.
+                    # For this block, we'll assume default_rok and default_datum_konani are the correct
+                    # page-level defaults to use if item-specific data is missing.
+
+                    # Get what the LLM returned for this specific item
+                    llm_item_datum_konani_str = res_item.get('DatumKonani')
+                    llm_item_rok_str = res_item.get('Rok')
+
+                    # Initialize with page-level defaults (which might be None if not found at page level)
+                    final_datum_konani_to_set = default_datum_konani # Parameter passed to function
+                    final_rok_to_set = default_rok                 # Parameter passed to function
+
+                    # Attempt to parse and use date from the LLM item if it's valid
+                    parsed_date_from_llm_item = None
+                    if isinstance(llm_item_datum_konani_str, str) and llm_item_datum_konani_str.strip():
+                        for fmt in ["%Y%m%d", "%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d. %m. %Y", "%d. %m.%Y"]:
+                            try:
+                                parsed_date_from_llm_item = datetime.strptime(llm_item_datum_konani_str.strip(), fmt)
+                                break 
+                            except ValueError:
+                                continue 
+                    
+                    if parsed_date_from_llm_item:
+                        final_datum_konani_to_set = int(parsed_date_from_llm_item.strftime("%Y%m%d"))
+                        final_rok_to_set = parsed_date_from_llm_item.year 
+                        logger.info(f"Used item-specific date from LLM: {final_datum_konani_to_set}, Rok: {final_rok_to_set} for item '{res_item.get('Popis')}'")
+                    
+                    # Refine Rok based on LLM's item-specific 'Rok' field
+                    candidate_item_rok_from_llm_field = None
+                    if isinstance(llm_item_rok_str, str) and llm_item_rok_str.strip().isdigit() and len(llm_item_rok_str.strip()) == 4:
+                        candidate_item_rok_from_llm_field = int(llm_item_rok_str.strip())
+                    elif isinstance(llm_item_rok_str, int) and 1900 <= llm_item_rok_str <= datetime.now().year + 10:
+                        candidate_item_rok_from_llm_field = llm_item_rok_str
+
+                    if parsed_date_from_llm_item:
+                        # Year is already set from the item's specific date.
+                        # If llm_item_rok_str is different but valid, it could indicate an inconsistency
+                        # For now, prioritize year from parsed full date.
+                        pass
+                    elif candidate_item_rok_from_llm_field is not None:
+                        # No valid item date from LLM, but LLM provided a valid item Rok. Use it.
+                        final_rok_to_set = candidate_item_rok_from_llm_field
+                        logger.info(f"Used item-specific Rok from LLM field: {final_rok_to_set} for item '{res_item.get('Popis')}' (as item date was not parsable/present)")
+                    # If after these, final_rok_to_set is still its initial value (default_rok from params), it means:
+                    # 1. Item's date was not parsable/present.
+                    # 2. Item's Rok field was not parsable/present or invalid.
+                    # So, the page-level default_rok (if any) is used.
+
+                    # Final fallback: if Rok is still None (e.g. page default rok was None, item date and item rok were unusable)
+                    # but we have a final_datum_konani_to_set (possibly from page default date), derive Rok.
+                    if final_rok_to_set is None and final_datum_konani_to_set:
+                        if isinstance(final_datum_konani_to_set, int) and len(str(final_datum_konani_to_set)) == 8:
+                            try:
+                                final_rok_to_set = int(str(final_datum_konani_to_set)[:4])
+                                logger.info(f"Derived Rok from final_datum_konani_to_set ({final_datum_konani_to_set}): {final_rok_to_set} for item '{res_item.get('Popis')}'")
+                            except ValueError:
+                                logger.warning(f"Could not derive Rok from final_datum_konani_to_set {final_datum_konani_to_set} for item '{res_item.get('Popis')}'")
+                    
+                    # Assign the processed (and potentially defaulted) values to the res_item dictionary
+                    res_item['DatumKonani'] = final_datum_konani_to_set # Will be an int (YYYYMMDD) or None
+                    res_item['Rok'] = final_rok_to_set                 # Will be an int (YYYY) or None
+                # End of: if isinstance(res_item, dict):
+            # End of: for idx, res_item in enumerate(resolutions):
+            return resolutions
+        else:
+            logger.error(f"Klíč 'resolutions' v odpovědi nástroje pro '{page_title}' není seznam (typ: {type(resolutions)}). Data: {response_data}")
+            return []
+    elif response_data is None:
+         logger.error(f"Nepodařilo se získat údaje o usneseních pro '{page_title}' (API volání selhalo nebo nevrátilo data).")
+         return []
+    else:
+        logger.error(f"Neočekávaný formát odpovědi nebo chybí klíč 'resolutions' při extrakci usnesení pro '{page_title}'. Data: {str(response_data)[:500]}...")
+        return []
+
+def save_resolutions_payload(url, resolution_items, original_category):
+    """
+    Saves extracted resolution items to a JSON file.
+    Filename: {original_category}_{url_based_name}_usneseni_table.json
+    Schema: searchableFields: Popis, CisloUsneseni
+            metadataFields: DatumKonani, Rok, Prilohy, Pro, Proti, ZdrzelSe, SourceURL, OriginalCategory
+    """
+    output_dir = "payloads"
+    os.makedirs(output_dir, exist_ok=True)
+
+    parsed_url = urlparse(url)
+    url_path = parsed_url.path.strip('/')
+    if not url_path:
+        url_path = 'home'
+
+    url_based_name = url_path.replace('/', '_')
+    url_based_name = remove_accents(url_based_name)
+    url_based_name = re.sub(r"[<>:\"/\\|?*]", "_", url_based_name)
+    url_based_name = re.sub(r"\s+", "_", url_based_name)
+    url_based_name = re.sub(r"_+", "_", url_based_name)
+    url_based_name = url_based_name.strip("_").lower()
+    url_based_name = url_based_name[:MAX_FILENAME_LENGTH]
+
+    filename_category_prefix = original_category.lower().replace(' ', '_')
+    table_name = f"{filename_category_prefix}_{url_based_name}_usneseni_table"
+    filename = f"{output_dir}/{table_name}.json"
+
+    processed_items = []
+    for item in resolution_items:
+        if not isinstance(item, dict):
+            logger.warning(f"Skipping non-dictionary item in resolution_items for {url}: {item}")
+            continue
+
+                # Process DatumKonani
+        raw_datum_konani = item.get("DatumKonani")
+        processed_datum_konani = None
+        if isinstance(raw_datum_konani, int):
+            processed_datum_konani = raw_datum_konani
+        elif isinstance(raw_datum_konani, str) and raw_datum_konani.strip().isdigit():
+            try:
+                # Ensure it's a plausible YYYYMMDD format if it's a long number string
+                if len(raw_datum_konani.strip()) == 8:
+                    parsed_dt = datetime.strptime(raw_datum_konani.strip(), "%Y%m%d") # Validate format
+                    processed_datum_konani = int(raw_datum_konani.strip())
+                else: 
+                    logger.warning(f"DatumKonani string '{raw_datum_konani}' is not YYYYMMDD format. Setting to None.")
+            except ValueError:
+                logger.warning(f"Could not convert DatumKonani string '{raw_datum_konani}' to int or invalid YYYYMMDD. Setting to None.")
+        elif raw_datum_konani is not None and str(raw_datum_konani).strip() != "": # Catch other non-empty, non-None that aren't parsable
+            logger.warning(f"Unexpected DatumKonani value '{raw_datum_konani}' (type: {type(raw_datum_konani)}). Setting to None.")
+
+        # Process Rok
+        raw_rok = item.get("Rok")
+        processed_rok = None
+        if isinstance(raw_rok, int):
+            if 1900 <= raw_rok <= datetime.now().year + 10: # Basic sanity check for year
+                processed_rok = raw_rok
+            else:
+                logger.warning(f"Rok integer value '{raw_rok}' out of plausible range. Setting to None.")
+        elif isinstance(raw_rok, str) and raw_rok.strip().isdigit():
+            try:
+                year_val = int(raw_rok.strip())
+                if 1900 <= year_val <= datetime.now().year + 10: # Basic sanity check
+                    processed_rok = year_val
+                else:
+                    logger.warning(f"Rok string value '{raw_rok}' converts to int '{year_val}' out of plausible range. Setting to None.")            
+            except ValueError:
+                logger.warning(f"Could not convert Rok string '{raw_rok}' to int. Setting to None.")
+        elif raw_rok is not None and str(raw_rok).strip() != "": # Catch other non-empty, non-None
+            logger.warning(f"Unexpected Rok value '{raw_rok}' (type: {type(raw_rok)}). Setting to None.")
+
+        new_item = {
+            "BodUsneseni": item.get("BodUsneseni", ""),
+            "Popis": item.get("Popis", ""),
+            "CisloUsneseni": item.get("CisloUsneseni", ""),
+            "DatumKonani": processed_datum_konani, # Will be int or None
+            "Rok": processed_rok,                 # Will be int or None
+            "Prilohy": item.get("Prilohy", ""),
+            "Pro": item.get("Pro", ""),
+            "Proti": item.get("Proti", ""),
+            "ZdrzelSe": item.get("ZdrzelSe", ""),
+            "SubCategory": item.get("SubCategory", ""),
+            "URL": item.get("SourceURL", url), 
+            "Category": item.get("OriginalCategory", original_category), 
+            "Type": "Data"
+        }
+
+
+        processed_items.append(new_item)
+
+    payload = {
+        "data": {
+            "schema": {
+                "searchableFields": ["Popis", "CisloUsneseni"],
+                # This is the target list for metadataFields
+                "metadataFields": [
+                    "BodUsneseni",
+                    "DatumKonani",
+                    "Rok",
+                    "Prilohy",
+                    "Pro",
+                    "Proti",
+                    "ZdrzelSe",
+                    "SubCategory", # Added SubCategory
+                    "URL",
+                    "Category",
+                    "Type"
+                ]
+            },
+            "name": table_name,
+            "items": processed_items
+        }
+    }
+
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info(f"Saved resolutions payload for URL '{url}' ({len(processed_items)} items) to file: {filename}")
+        return filename
+    except Exception as e:
+        logger.error(f"Error writing resolutions payload file {filename}: {str(e)}")
+        return None
 
 def add_url_to_existing_qa_files():
     payloads_dir = "payloads"
@@ -3360,6 +4165,76 @@ def add_url_to_existing_qa_files():
             logger.error(f"Unexpected error processing file {filename}: {str(e)}")
     
     logger.info(f"URL field update process for existing Q/A files finished. {updated_files_count} files were modified.")
+
+def generate_table_question_llm(page_title, table_headers, category_for_context):
+    """
+    Generates a RAG-optimized question for a given table using an LLM.
+
+    Args:
+        page_title (str): The title of the page where the table is found.
+        table_headers (list): A list of strings representing the column headers of the table.
+        category_for_context (str): The category of the page for additional context.
+
+    Returns:
+        str: A string containing the Czech and English questions, separated by " | ", or None if generation fails.
+    """
+    if not table_headers:
+        logger.warning("No table headers provided to generate_table_question_llm. Skipping LLM call.")
+        return None
+
+    headers_string = ", ".join([f"'{h.strip()}'" for h in table_headers if h.strip()])
+    if not headers_string:
+        logger.warning("Table headers were empty or whitespace only. Skipping LLM call for table question.")
+        return None
+
+    # Using a standard multi-line string and .format() to avoid f-string issues with backslashes or quotes.
+    prompt_template = '''Na stránce "{page_title}" (kategorie: {category_for_context}) jsou dostupné tyto konkrétní typy informací:
+{headers_string}
+
+ÚKOL:
+1. Vytvořte ČTYŘI různé, specifické, konverzační a RAG-optimalizované otázky v ČEŠTINĚ a ČTYŘI různé v ANGLIČTINĚ.
+2. Každá otázka se musí ptát na KONKRÉTNÍ ÚDAJE/DATA, která jsou dostupná na stránce "{page_title}" a která reprezentují uvedené typy informací.
+3. NIKDY se neptejte na strukturu, formát, uspořádání nebo organizaci dat. Místo toho se ptejte přímo na OBSAH a FAKTA.
+4. České otázky by měly začínat frázemi jako "Jaké jsou...", "Jaká jsou čísla...", "Kdo jsou...", "Které body...", "Kolik je...", "Kde najdu údaje o...", nebo podobně.
+5. Každá otázka musí být specifická pro kombinaci stránky "{page_title}" a typů informací reprezentovaných klíčovými body: {headers_string}
+6. DŮRAZNĚ ZAKÁZÁNO: Nepoužívejte slova "tabulka", "seznam", "list", "sloupce", "řádky", "table", "list", "columns", "rows", "data", "údaje v tabulce", "obsah tabulky" ani podobné strukturální termíny.
+7. Místo toho se ptejte přímo na informace: např. místo "Jaké údaje obsahuje tabulka?" použijte "Jaké byly všechny projednávané body?", "Jaká jsou čísla usnesení?", "Kdo jsou členové?" apod.
+
+Formát odpovědi MUSÍ být POUZE (8 částí oddělených svislítkem):
+Česká otázka varianta 1 | Česká otázka varianta 2 | Česká otázka varianta 3 | Česká otázka varianta 4 | Anglická otázka varianta 1 | Anglická otázka varianta 2 | Anglická otázka varianta 3 | Anglická otázka varianta 4
+
+Příklad (pro stránku "Usnesení z 1. zasedání Zastupitelstva KHK" a typy informací: 'bod', 'název bodu jednání', 'č.hl.', 'č.usnesení'):
+SPRÁVNÝ výstup: Jaké byly všechny projednávané body z 1. ustavujícího zasedání zastupitelstva Královéhradeckého kraje? | Jaká jsou čísla jednotlivých usnesení z 1. ustavujícího zasedání zastupitelstva Královéhradeckého kraje? | Které konkrétní body jednání byly schváleny na 1. ustavujícím zasedání zastupitelstva KHK? | Kolik usnesení bylo přijato během 1. ustavujícího zasedání zastupitelstva Královéhradeckého kraje? | What were all the agenda items discussed at the 1st constituent meeting of the Hradec Králové Regional Assembly? | What are the numbers of individual resolutions from the 1st constituent meeting of the Hradec Králové Regional Assembly? | Which specific agenda items were approved at the 1st constituent meeting of the KHK Regional Assembly? | How many resolutions were adopted during the 1st constituent meeting of the Hradec Králové Regional Assembly?
+
+ŠPATNÝ příklad (NIKDY nepoužívejte): "Co obsahuje tabulka z 1. zasedání?", "Jaké údaje najdu v tabulce?", "Jak jsou organizována data?"
+
+NEPŘIDÁVEJTE žádný další text, poznámky ani vysvětlení. Pouze požadovaný řetězec 8 otázek ve specifikovaném formátu.
+'''
+    prompt = prompt_template.format(
+        page_title=page_title,
+        category_for_context=category_for_context,
+        headers_string=headers_string
+    )
+
+    messages = [{"role": "user", "content": prompt}]
+    
+    logger.info(f"Generating 4+4 questions for table with headers: {headers_string} on page '{page_title}'")
+    generated_question = call_llm_api(messages=messages, max_tokens=400, temperature=0.2) # Increased max_tokens, slightly higher temp for variation
+
+    if generated_question and generated_question.count('|') == 7:
+        parts = [part.strip() for part in generated_question.split('|')]
+        if len(parts) == 8 and all(p for p in parts): # Ensure all 8 parts are non-empty
+            clean_question = " | ".join(parts)
+            logger.info(f"Successfully generated and cleaned 4+4 table questions: {clean_question}")
+            return clean_question
+        else:
+            logger.error(f"Generated table questions were not in the expected 8-part format after splitting and stripping: {generated_question}")
+            return None
+    else:
+        logger.error(f"Failed to generate a valid 8-part question string (expected 7 '|', got {generated_question.count('|') if generated_question else 'None'}). Response: {generated_question}")
+        return None
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and upload data to Voiceflow")
