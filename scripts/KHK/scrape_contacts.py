@@ -63,7 +63,7 @@ MAX_RETRIES = 3  # Maximum number of retry attempts
 INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 
 # Přejmenujeme proměnnou a nastavíme ji na 10 sekund
-JINA_AI_TIMEOUT = 90
+JINA_AI_TIMEOUT = 30
 
 def requests_retry_session(
     retries=3,

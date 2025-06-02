@@ -117,9 +117,11 @@ CUSTOM_URLS = [
    
 ]
 
-# Global list for blacklisted URLs
+# Global list for blacklisted URLs => ZAKÁZANÉ URL PRO SCRAPE - PRO NÍŽE ZMÍNĚNÉ URL MÁME JINÉ SKRIPTY
 BLACKLISTED_URLS = [
-    "https://khk.cz/urad/kontakty-telefonni-seznam"
+    "https://khk.cz/urad/kontakty-telefonni-seznam",
+    "https://www.khk.cz/kraj/zastupitelstvo/vybory-zastupitelstva-kralovehradeckeho-kraje",
+    "https://www.khk.cz/kraj/rada/komise-rady"
 ]
 
 # ============================================================================
