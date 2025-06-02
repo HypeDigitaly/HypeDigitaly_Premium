@@ -63,7 +63,7 @@ MAX_RETRIES = 3  # Maximum number of retry attempts
 INITIAL_RETRY_DELAY = 5  # Initial retry delay in seconds
 
 # Přejmenujeme proměnnou a nastavíme ji na 10 sekund
-JINA_AI_TIMEOUT = 10
+JINA_AI_TIMEOUT = 90
 
 def requests_retry_session(
     retries=3,
@@ -220,6 +220,7 @@ def extract_odbory_contacts(table, department_name, subdepartment_name):
             "URL": "N/A", # URL not directly available per person in this structure
             "Origin": "Odbor",
             "Category": "Kontakt",
+            "Type": "Data",
         })
     return items
 
@@ -259,6 +260,7 @@ def extract_vybor_komise_members(table, committee_name, origin):
             "URL": "N/A",
             "Origin": origin, # "Vybor" or "Komise"
             "Category": "Kontakt",
+            "Type": "Data",
         })
     return items
 
@@ -296,6 +298,7 @@ def extract_tajemnik(table, committee_name, origin):
             "URL": "N/A",
             "Origin": origin,
             "Category": "Kontakt",
+            "Type": "Data",
         })
     return items
 
@@ -308,97 +311,145 @@ def extract_contacts(soup, url, title):
         return items # Return empty list if no main content
 
     # --- Logic for Odbory.html ---
-    # Find potential department headers (h3) and table wrappers directly within main content
+    # Find potential department headers (h3) and table wrappers anywhere within main content
     potential_headers = main_content.find_all('h3')
     potential_table_wrappers = main_content.find_all('div', class_='table-wrapper')
 
     logger.debug(f"Found {len(potential_headers)} potential h3 headers in main content.")
     logger.debug(f"Found {len(potential_table_wrappers)} potential table wrappers in main content.")
 
-    # Try to associate headers with subsequent tables
-    current_department_name = "Neznámý odbor" # Default department
+    # Log all h3 headers found for debugging
+    for i, header in enumerate(potential_headers):
+        header_text = header.get_text(strip=True)
+        logger.debug(f"H3 Header {i+1}: '{header_text}'")
+
+    # EFFICIENT LOGIC: Pre-analyze DOM structure and create department-table mappings
     processed_tables = set() # Keep track of tables already processed
 
-    for header in potential_headers:
-        current_department_name = header.get_text(strip=True)
-        logger.debug(f"Processing potential department header: {current_department_name}")
+    # Create a mapping of headers to their following tables
+    header_table_mapping = {}
+    
+    if potential_headers:
+        # Convert DOM elements to a list for position-based processing
+        all_content_elements = main_content.find_all(['h3', 'div'])
+        
+        # Create position mapping
+        element_positions = {}
+        for idx, elem in enumerate(all_content_elements):
+            element_positions[elem] = idx
 
-        # Find the next sibling table wrapper after this header
-        # We need to check siblings carefully, as the structure might vary
-        next_element = header.find_next_sibling()
-        table_wrapper = None
-        while next_element:
-            if next_element.name == 'div' and 'table-wrapper' in next_element.get('class', []):
-                 table_wrapper = next_element
-                 break # Found the first table wrapper after the header
-            if next_element.name == 'h3': # Stop if we hit the next header
-                 break
-            next_element = next_element.find_next_sibling()
+        for i, header in enumerate(potential_headers):
+            current_department_name = header.get_text(strip=True)
+            logger.debug(f"Processing department header: '{current_department_name}'")
 
+            # Find the position of this header
+            header_pos = element_positions.get(header, -1)
+            if header_pos == -1:
+                logger.debug(f"Header position not found for: {current_department_name}")
+                continue
 
-        if table_wrapper and table_wrapper not in processed_tables:
-            table = table_wrapper.find('table')
-            if table:
-                logger.debug(f"Found table associated with header: {current_department_name}")
-                processed_tables.add(table_wrapper) # Mark as processed
+            # Find the next h3 header position
+            next_header_pos = len(all_content_elements)  # Default to end
+            if i + 1 < len(potential_headers):
+                next_header = potential_headers[i + 1]
+                next_header_pos = element_positions.get(next_header, len(all_content_elements))
 
-                caption = table.find('caption')
-                subdepartment_name = caption.get_text(strip=True) if caption else ""
-                logger.debug(f"Table caption (subdepartment): '{subdepartment_name}'")
+            # Find table wrappers between this header and the next
+            department_tables = []
+            for elem_idx in range(header_pos + 1, next_header_pos):
+                elem = all_content_elements[elem_idx]
+                if elem.name == 'div' and 'table-wrapper' in elem.get('class', []):
+                    department_tables.append(elem)
 
-                # Check if it looks like an Odbor table (use existing criteria)
-                th_elements = table.select('thead th')
-                th_texts = [th.get_text(strip=True).lower() for th in th_elements]
-                logger.debug(f"Table headers found: {th_texts}")
+            # Also check for nested table wrappers in divs between headers
+            for elem_idx in range(header_pos + 1, min(header_pos + 50, next_header_pos)):  # Limit search to next 50 elements
+                elem = all_content_elements[elem_idx]
+                if elem.name == 'div':
+                    nested_wrappers = elem.find_all('div', class_='table-wrapper')
+                    for wrapper in nested_wrappers:
+                        if wrapper not in department_tables:
+                            department_tables.append(wrapper)
 
-                is_odbory_table = 'příjmení, jméno, titul' in th_texts and 'činnost' in th_texts
-                logger.debug(f"Checking if it's an Odbory table: {is_odbory_table}")
+            logger.debug(f"Found {len(department_tables)} tables for department: '{current_department_name}'")
+            header_table_mapping[header] = (current_department_name, department_tables)
 
-                if is_odbory_table:
-                    logger.info(f"Parsing Odbor table for: {current_department_name} / {subdepartment_name}")
-                    items.extend(extract_odbory_contacts(table, current_department_name, subdepartment_name))
-                else:
-                    logger.debug("Table did not match Odbory header criteria.")
-            else:
-                logger.debug(f"No table element found inside the table wrapper following header: {current_department_name}")
-        else:
-            logger.debug(f"No unprocessed table wrapper found following header: {current_department_name}")
+        # Process each header's tables
+        for header, (dept_name, dept_tables) in header_table_mapping.items():
+            for table_wrapper in dept_tables:
+                if table_wrapper not in processed_tables:
+                    table = table_wrapper.find('table')
+                    if table:
+                        logger.debug(f"Processing table for department: '{dept_name}'")
+                        processed_tables.add(table_wrapper)
 
-    # Process any tables that were not preceded by an h3 (might happen at the start or if structure is unusual)
-    logger.debug("Checking for any remaining table wrappers not associated with a header.")
+                        caption = table.find('caption')
+                        subdepartment_name = caption.get_text(strip=True) if caption else ""
+                        logger.debug(f"Table caption (subdepartment): '{subdepartment_name}'")
+
+                        # Check if it looks like an Odbor table
+                        th_elements = table.select('thead th')
+                        th_texts = [th.get_text(strip=True).lower() for th in th_elements]
+                        logger.debug(f"Table headers found: {th_texts}")
+
+                        is_odbory_table = 'příjmení, jméno, titul' in th_texts and 'činnost' in th_texts
+                        logger.debug(f"Is Odbory table: {is_odbory_table}")
+
+                        if is_odbory_table:
+                            logger.info(f"Parsing Odbor table for: '{dept_name}' / '{subdepartment_name}'")
+                            items.extend(extract_odbory_contacts(table, dept_name, subdepartment_name))
+                        else:
+                            logger.debug("Table did not match Odbory header criteria.")
+                    else:
+                        logger.debug(f"No table element found inside table wrapper for department: '{dept_name}'")
+
+    # Process any remaining tables that were not associated with any h3 header
+    logger.debug("Checking for any remaining table wrappers not associated with any header.")
     for wrapper in potential_table_wrappers:
         if wrapper not in processed_tables:
-             # Check if this wrapper has a preceding h3 sibling (even if distant)
-             # to avoid processing tables already potentially linked above
-             has_preceding_h3 = False
-             prev_element = wrapper.find_previous_sibling()
-             while prev_element:
-                 if prev_element.name == 'h3':
-                     has_preceding_h3 = True
-                     break
-                 prev_element = prev_element.find_previous_sibling()
+            table = wrapper.find('table')
+            if table:
+                logger.debug("Found table wrapper not associated with any h3 header.")
+                processed_tables.add(wrapper)
 
-             if not has_preceding_h3:
-                 table = wrapper.find('table')
-                 if table:
-                     logger.debug("Found table wrapper potentially not associated with a preceding h3.")
-                     processed_tables.add(wrapper) # Mark as processed
+                caption = table.find('caption')
+                subdepartment_name = caption.get_text(strip=True) if caption else "N/A"
+                
+                # Try to infer department name from context
+                inferred_department = "Neznámý odbor (bez záhlaví)"
+                
+                # Look for the closest preceding h3 header
+                for header in potential_headers:
+                    try:
+                        # Check if this header comes before the table in the DOM
+                        if header.sourceline and hasattr(wrapper, 'sourceline'):
+                            if wrapper.sourceline and header.sourceline < wrapper.sourceline:
+                                inferred_department = header.get_text(strip=True)
+                        else:
+                            # Fallback: check DOM order using position in parent
+                            wrapper_parent = wrapper.find_parent()
+                            header_parent = header.find_parent()
+                            if wrapper_parent and header_parent:
+                                wrapper_elements = list(wrapper_parent.find_all())
+                                if header in wrapper_elements and wrapper in wrapper_elements:
+                                    header_idx = wrapper_elements.index(header)
+                                    wrapper_idx = wrapper_elements.index(wrapper)
+                                    if header_idx < wrapper_idx:
+                                        inferred_department = header.get_text(strip=True)
+                    except (AttributeError, ValueError):
+                        continue
 
-                     caption = table.find('caption')
-                     subdepartment_name = caption.get_text(strip=True) if caption else "N/A" # Default subdept if no caption
-                     current_department_name = "Neznámý odbor (bez záhlaví)" # Assign a default department name
+                logger.debug(f"Inferred department from context: '{inferred_department}'")
+                current_department_name = inferred_department
 
-                     th_elements = table.select('thead th')
-                     th_texts = [th.get_text(strip=True).lower() for th in th_elements]
-                     is_odbory_table = 'příjmení, jméno, titul' in th_texts and 'činnost' in th_texts
+                th_elements = table.select('thead th')
+                th_texts = [th.get_text(strip=True).lower() for th in th_elements]
+                is_odbory_table = 'příjmení, jméno, titul' in th_texts and 'činnost' in th_texts
 
-                     if is_odbory_table:
-                         logger.info(f"Parsing Odbor table (no preceding header) for: {current_department_name} / {subdepartment_name}")
-                         items.extend(extract_odbory_contacts(table, current_department_name, subdepartment_name))
-                     else:
-                         logger.debug("Orphan table did not match Odbory header criteria.")
-             else:
-                 logger.debug(f"Skipping table wrapper as it has a preceding h3: {wrapper.find('table').find('caption').get_text(strip=True) if wrapper.find('table') and wrapper.find('table').find('caption') else 'Unknown Caption'}")
+                if is_odbory_table:
+                    logger.info(f"Parsing orphan Odbor table: '{current_department_name}' / '{subdepartment_name}'")
+                    items.extend(extract_odbory_contacts(table, current_department_name, subdepartment_name))
+                else:
+                    logger.debug("Orphan table did not match Odbory header criteria.")
 
     # --- Logic for Vybory.html and Komise.html ---
     sections = main_content.select('article > div.node-content > div.paragraph--type--body')
@@ -589,7 +640,7 @@ def upload_to_voiceflow(table_name, items):
         "data": {
             "schema": {
                 "searchableFields": ["FullName", "Title", "Role", "Department", "Subdepartment", "PhoneNumber", "Email", "Office", "URL", "Origin"],
-                "metadataFields": ["FirstName", "LastName", "Role", "Title", "Department", "Subdepartment", "PhoneNumber", "Email", "Office", "Origin", "Category"]
+                "metadataFields": ["FirstName", "LastName", "Role", "Title", "Department", "Subdepartment", "PhoneNumber", "Email", "Office", "Origin", "Category", "Type"]
             },
             "name": table_name,
             "items": items
@@ -658,7 +709,7 @@ def process_urls(url_data, start_index=0, upper_threshold=None, upload_to_voicef
                                     "FullName", "Title", "Role", "Department", "Subdepartment", "PhoneNumber", "Email", "Office", "URL", "Origin"
                                 ],
                                 "metadataFields": [
-                                     "FirstName", "LastName", "Role", "Title", "Department", "Subdepartment", "PhoneNumber", "Email", "Office", "Origin", "Category"
+                                     "FirstName", "LastName", "Role", "Title", "Department", "Subdepartment", "PhoneNumber", "Email", "Office", "Origin", "Category", "Type"
                                 ]
                             },
                             "name": base_name,
