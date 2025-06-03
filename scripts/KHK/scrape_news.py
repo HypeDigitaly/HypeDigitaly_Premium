@@ -240,7 +240,8 @@ def extract_item_data(item):
         "Description": description,
         "ImageURL": image_url,
         "Category": categories,
-        "Date": formatted_date
+        "Date": formatted_date,
+        "Type": "Data"
     }
 
 def create_initial_payload(filename_without_extension):
@@ -248,7 +249,7 @@ def create_initial_payload(filename_without_extension):
         "data": {
             "schema": {
                 "searchableFields": ["Title", "URL", "Description", "ImageURL", "Date"],
-                "metadataFields": ["Category", "Date"]
+                "metadataFields": ["Category", "Date", "Type"]
             },
             "name": filename_without_extension,  # Use the filename as the table name
             "items": []
