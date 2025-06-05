@@ -580,3 +580,130 @@ def validate_groq_messages(messages):
     # However, call_llm_api handles the conversation flow, this function just validates the current list.
 
     return final_validated_messages 
+
+def assess_content_type(content, page_title, llm_providers, llm_sequence, max_retries=3, initial_retry_delay=5, api_call_delay=10):
+    """
+    Uses LLM to assess whether content contains contact information or resolution information.
+    
+    Args:
+        content (str): The text content to analyze
+        page_title (str): Title of the page being processed (for context)
+        llm_providers (dict): Dictionary of LLM provider configurations
+        llm_sequence (str): Comma-separated sequence of LLM provider IDs
+        max_retries (int): Maximum number of retry attempts
+        initial_retry_delay (int): Initial delay for retries
+        api_call_delay (int): Delay between API calls
+        
+    Returns:
+        tuple: (contains_contacts: bool, contains_resolutions: bool)
+    """
+    
+    # Define the tool schema for content assessment
+    assessment_tool = [
+        {
+            "name": "assess_content_type",
+            "description": "Analyzes text content to determine if it contains contact information or resolution information.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "contains_contacts": {
+                        "type": "boolean",
+                        "description": "True if the content contains identifiable human contact details such as names with emails, phone numbers, job titles, roles, or departments. False if it's just general text without specific contact information."
+                    },
+                    "contains_resolutions": {
+                        "type": "boolean",
+                        "description": "True ONLY if the content contains actual resolution documents, voting records, meeting minutes, formal decisions (usnesení), agenda items with voting results, or official council/committee decisions. False for contact lists, staff directories, organizational charts, or general information about council members."
+                    }
+                },
+                "required": ["contains_contacts", "contains_resolutions"]
+            }
+        }
+    ]
+    
+    tool_choice = {"type": "tool", "name": "assess_content_type"}
+    
+    system_prompt = f"""You are a content classification specialist. Your task is to analyze the provided text content and determine whether it contains:
+
+1. **CONTACT INFORMATION**: Identifiable human contact details including:
+   - Names with email addresses
+   - Names with phone numbers  
+   - Job titles and roles
+   - Department assignments
+   - Office locations
+   - Staff directories or contact lists
+
+2. **RESOLUTION INFORMATION**: Official governmental/organizational documents including:
+   - Formal resolutions (usnesení)
+   - Voting records and results
+   - Meeting minutes with decisions
+   - Agenda items with voting outcomes
+   - Official council/committee decisions
+   - Document attachments related to resolutions
+
+**IMPORTANT DISTINCTIONS:**
+- Contact information about council members (names, emails, phones, roles) = CONTACTS, NOT resolutions
+- Lists of people in governmental positions = CONTACTS, NOT resolutions  
+- Organizational charts or staff directories = CONTACTS, NOT resolutions
+- Only actual decision documents, voting records, or meeting minutes = RESOLUTIONS
+
+**CONTEXT:** You are analyzing content from page titled: "{page_title}"
+
+Use the `assess_content_type` tool to provide your assessment."""
+
+    user_prompt = f"""Please analyze the following content and determine if it contains contact information and/or resolution information:
+
+**Content to analyze:**
+```
+{content}
+```
+
+**Instructions:**
+- Set `contains_contacts` to true if the content has identifiable people with contact details (emails, phones, roles, departments)
+- Set `contains_resolutions` to true ONLY if the content has actual resolution documents, voting records, or formal decisions
+- Remember: Contact information about officials/council members is CONTACTS, not resolutions
+
+Use the `assess_content_type` tool to provide your assessment."""
+
+    messages = [{"role": "user", "content": user_prompt}]
+    
+    try:
+        response_data = call_llm_api(
+            messages=messages,
+            system_prompt=system_prompt,
+            max_tokens=512,  # Small response needed
+            temperature=0.0,
+            tools=assessment_tool,
+            tool_choice=tool_choice,
+            max_retries=max_retries,
+            initial_retry_delay=initial_retry_delay,
+            api_call_delay=api_call_delay,
+            llm_providers=llm_providers,
+            llm_sequence=llm_sequence
+        )
+
+        if response_data is None:
+            logger.error(f"Failed to assess content type for '{page_title}' (API call failed or returned no data).")
+            return False, False
+
+        # Handle tool response
+        if isinstance(response_data, dict):
+            contains_contacts = response_data.get('contains_contacts', False)
+            contains_resolutions = response_data.get('contains_resolutions', False)
+            
+            # Ensure they are booleans
+            if not isinstance(contains_contacts, bool):
+                logger.warning(f"contains_contacts is not boolean: {contains_contacts}. Setting to False.")
+                contains_contacts = False
+            if not isinstance(contains_resolutions, bool):
+                logger.warning(f"contains_resolutions is not boolean: {contains_resolutions}. Setting to False.")
+                contains_resolutions = False
+            
+            logger.info(f"Content assessment for '{page_title}': contacts={contains_contacts}, resolutions={contains_resolutions}")
+            return contains_contacts, contains_resolutions
+        else:
+            logger.error(f"Invalid response structure for content assessment from '{page_title}': {response_data}")
+            return False, False
+
+    except Exception as e:
+        logger.error(f"Error during content type assessment for '{page_title}': {str(e)}")
+        return False, False 

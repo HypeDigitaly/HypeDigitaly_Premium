@@ -43,15 +43,20 @@ def extract_contact_details_llm(content, page_title, category, source_url, llm_p
                                 "FullName": {"type": "string", "description": "Full name of the contact, including titles if available directly with the name."},
                                 "Title": {"type": "string", "description": "Academic or professional titles (e.g., Ing., Mgr., Ph.D.). May be part of FullName but also separate if clearly delineated."},
                                 "Role": {"type": "string", "description": "Job title or role of the contact (e.g., Vedoucí oddělení, Referent)."},
-                                "Department": {"type": "string", "description": "The main department or organizational unit the contact belongs to."},
+                                "Department": {"type": "string", "description": "The main department or organizational unit the contact belongs to. (eg.)"},
                                 "Subdepartment": {"type": "string", "description": "A sub-department or more specific team, if applicable."},
                                 "Email": {"type": "string", "description": "Email address of the contact."},
                                 "PhoneNumber": {"type": "string", "description": "Phone number of the contact. Include all listed numbers, separated by comma or semicolon."},
                                 "ProfileURL": {"type": "string", "description": "Direct URL to the contact's profile page, if available in the text."},
                                 "Office": {"type": "string", "description": "Office number or location description (e.g., Dveře č. 123, Budova A)."},
-                                "OfficeURL": {"type": "string", "description": "URL specifically for the office location or map, if available."}
+                                "OfficeURL": {"type": "string", "description": "URL specifically for the office location or map, if available."},
+                                "Origin": {
+                                    "type": "string", 
+                                    "enum": ["Odbor", "Vybor", "Komise", "Rada", "Zastupitelstvo"],
+                                    "description": "The organizational origin/type of the contact based on the page title and context. Must be one of: Odbor, Vybor, Komise, Rada, Zastupitelstvo."
+                                }
                             },
-                            "required": ["LastName", "FullName"] # Minimum requirement
+                            "required": ["LastName", "FullName", "Origin"] # Origin is now required
                         }
                     }
                 },
@@ -88,10 +93,11 @@ def extract_contact_details_llm(content, page_title, category, source_url, llm_p
 **NO GENERAL URLs**: Don't use page source URL for personal profiles
 
 ## EXTRACTION FIELDS (ALL PERSONS):
-**REQUIRED**: `LastName`, `FullName` (with titles if present)
+**REQUIRED**: `LastName`, `FullName` (with titles if present), `Origin`
 **OPTIONAL**: `FirstName`, `Title`, `Role`, `Department`, `Subdepartment`, `Email`, `PhoneNumber`, `ProfileURL`, `Office`, `OfficeURL`
 **MULTIPLE VALUES**: Comma-separated (multiple phones/emails per person)
 **DEPARTMENT CONTEXT**: Use `page_title` and surrounding text to populate Department/Subdepartment fields accurately.
+**ORIGIN DETERMINATION**: Analyze `page_title` and content to determine organizational origin. Must be one of: "Odbor", "Vybor", "Komise", "Rada", "Zastupitelstvo".
 
 ## PREPROCESSING: Replace ALL quote types with single apostrophes (`'`) before analysis.
 
@@ -101,8 +107,17 @@ def extract_contact_details_llm(content, page_title, category, source_url, llm_p
 - If `page_title` shows "ředitel", use this to inform the Role.
 - Use hierarchical context from `page_title` and the content itself to populate Department/Subdepartment fields.
 
+## ORIGIN DETERMINATION RULES (Based on `page_title` and Content Analysis):
+**CRITICAL**: Every contact MUST have an Origin field set to one of the enum values based on the nature of the contact/page:
+- **"Odbor"**: If `page_title` contains "odbor", "oddělení", "úřad", "kancelář", or refers to administrative departments/offices
+- **"Vybor"**: If `page_title` contains "výbor", "committee", or refers to committee structures  
+- **"Komise"**: If `page_title` contains "komise", "commission", or refers to commission structures
+- **"Rada"**: If `page_title` contains "rada", "council", "radní", or refers to council/advisory structures
+- **"Zastupitelstvo"**: If `page_title` contains "zastupitelstvo", "zastupitel", "assembly", or refers to representative assembly structures
+**DEFAULT FALLBACK**: If unclear from title/content, analyze the organizational context and choose the most appropriate value. "Odbor" is the default for general administrative contacts.
+
 ## VALIDATION CHECKLIST:
-✓ Scanned entire text? ✓ Every person captured? ✓ All contact details preserved? ✓ Applied quote preprocessing? ✓ Department/Subdepartment fields reflect context derived from `page_title` and content?
+✓ Scanned entire text? ✓ Every person captured? ✓ All contact details preserved? ✓ Applied quote preprocessing? ✓ Department/Subdepartment fields reflect context derived from `page_title` and content? ✓ Origin field set correctly based on page title analysis?
 
 ## EXAMPLE WITH SECTION CONTEXT (DERIVED FROM PAGE TITLE AND CONTENT):
 **Page Title**: "Kontakty - KAH - odbor kancelář hejtmana - oddělení legislativní a právní"
@@ -123,7 +138,8 @@ def extract_contact_details_llm(content, page_title, category, source_url, llm_p
       "PhoneNumber": "495817124, 720987134",
       "ProfileURL": "",
       "Office": "4a-N3.411",
-      "OfficeURL": ""
+      "OfficeURL": "",
+      "Origin": "Odbor" // Inferred from "odbor kancelář hejtmana" in title
     }},
     {{
       "FirstName": "Martina",
@@ -137,7 +153,8 @@ def extract_contact_details_llm(content, page_title, category, source_url, llm_p
       "PhoneNumber": "607029476",
       "ProfileURL": "",
       "Office": "4a-N3.411",
-      "OfficeURL": ""
+      "OfficeURL": "",
+      "Origin": "Odbor" // Inferred from "odbor kancelář hejtmana" in title
     }}
   ]
 }}
@@ -145,11 +162,12 @@ def extract_contact_details_llm(content, page_title, category, source_url, llm_p
 
 **CRITICAL PATTERN**: Notice how:
 - Department and Subdepartment are inferred from the `page_title` and potentially confirmed or refined by surrounding text.
+- Origin is determined from the `page_title` analysis ("odbor kancelář hejtmana" → "Odbor").
 - Section context from `page_title` and content determines accurate organizational placement.
 
-**ZERO TOLERANCE: No person omissions, no contact data losses, no shortcuts. Department/Subdepartment fields must reflect context derived from `page_title` and content analysis.**
+**ZERO TOLERANCE: No person omissions, no contact data losses, no shortcuts. Department/Subdepartment/Origin fields must reflect context derived from `page_title` and content analysis.**
 
-Extract ALL individuals with COMPLETE contact information and ACCURATE section-based department assignment based on `page_title` and content analysis.'''
+Extract ALL individuals with COMPLETE contact information, ACCURATE section-based department assignment, and CORRECT Origin determination based on `page_title` and content analysis.'''
 
     user_prompt = f'''# TEXT TO ANALYZE:
 ```
@@ -168,20 +186,25 @@ Extract ALL individuals with COMPLETE contact information and ACCURATE section-b
 **REQUIREMENTS:**
 - **100% COMPLETENESS**: Every person mentioned, no exceptions (staff lists, directories).
 - **SECTION-SPECIFIC EXTRACTION**: Focus on contacts relevant to the section implied by the `page_title` and surrounding text.
-- **ALL CONTACT DATA**: Names, titles, emails, phones, offices, departments.
+- **ALL CONTACT DATA**: Names, titles, emails, phones, offices, departments, origin.
 - **ACCURATE DEPARTMENT ASSIGNMENT**: Use `page_title` and surrounding text in the `content` to populate Department/Subdepartment fields.
+- **CORRECT ORIGIN DETERMINATION**: Analyze `page_title` to set Origin field to one of: "Odbor", "Vybor", "Komise", "Rada", "Zastupitelstvo".
 - **URL PRESERVATION**: ProfileURL/OfficeURL only if explicitly mentioned.
 - **MULTIPLE VALUES**: Comma-separated for multiple emails/phones per person.
 - **PREPROCESSING**: Apply quote→apostrophe conversion.
 
-**SECTION-AWARE DEPARTMENT EXAMPLES (Based on `page_title` and Content Analysis)**:
-- Title "...oddělení legislativní a právní" → Infer Subdepartment: "oddělení legislativní a právní".
-- Title "...KAH - odbor kancelář hejtmana" → Infer Department: "KAH - odbor kancelář hejtmana".
-- Title "...ředitel" → Use this to inform the Role.
+**SECTION-AWARE DEPARTMENT & ORIGIN EXAMPLES (Based on `page_title` and Content Analysis)**:
+- Title "...oddělení legislativní a právní" → Infer Subdepartment: "oddělení legislativní a právní", Origin: "Odbor".
+- Title "...KAH - odbor kancelář hejtmana" → Infer Department: "KAH - odbor kancelář hejtmana", Origin: "Odbor".
+- Title "...výbor pro..." → Origin: "Vybor".
+- Title "...komise..." → Origin: "Komise".
+- Title "...rada..." → Origin: "Rada".
+- Title "...zastupitelstvo..." → Origin: "Zastupitelstvo".
+- Title "...ředitel" → Use this to inform the Role, Origin: "Odbor" (default for administrative).
 
 **ZERO TOLERANCE**: 100 contacts = extract ALL 100 | 3 phone numbers = include ALL 3.
 
-**OUTPUT**: Valid JSON via tool schema with section-aware Department/Subdepartment assignment based on `page_title` and content analysis.
+**OUTPUT**: Valid JSON via tool schema with section-aware Department/Subdepartment assignment and correct Origin determination based on `page_title` and content analysis.
 '''
     messages = [{"role": "user", "content": user_prompt}]
     

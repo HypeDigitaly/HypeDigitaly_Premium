@@ -73,7 +73,7 @@ def convert_to_qa(content, title, category, llm_providers, llm_sequence, max_ret
                     },
                     "contains_resolutions": {
                         "type": "boolean",
-                        "description": "Set to true if the analyzed text contains information about resolutions (usnesení) from zastupitelstva, rada, komise, or výbory (councils, committees, boards), otherwise false."
+                        "description": "Set to true ONLY if the analyzed text contains actual resolution documents, voting records, meeting minutes, or formal decisions (usnesení) from zastupitelstva, rada, komise, or výbory. Do NOT set to true for contact information about council members, staff lists, or organizational charts. This should be false for pages that only list people and their contact details."
                     }
                 },
                 "required": ["qa_pairs", "contains_contact_info", "contains_resolutions"]
@@ -124,7 +124,7 @@ def convert_to_qa(content, title, category, llm_providers, llm_sequence, max_ret
 - **NO REDUNDANT Q/A PAIRS**: Avoid creating multiple Q/A pairs that essentially ask for the same information in different ways.
 
 ## CONTACT ASSESSMENT: True if identifiable individuals with names + contact details (email, phone) AND/OR specific roles/departments.
-## RESOLUTION ASSESSMENT: True if contains usnesení/rozhodnutí from councils/committees
+## RESOLUTION ASSESSMENT: True ONLY if contains actual resolution documents, voting records, meeting minutes, or formal decisions (usnesení). FALSE for contact lists, staff directories, or organizational information about council members.
 
 ## PREPROCESSING: Replace ALL quote types with single apostrophes (`'`) before analysis.
 
@@ -176,6 +176,24 @@ def convert_to_qa(content, title, category, llm_providers, llm_sequence, max_ret
     {{
       "Question": "Kdo je ředitel a jaké jsou jeho kontaktní údaje? | Kontaktní údaje na ředitele | Who is the director and what are his contact details?",
       "Answer": "ředitel\\n\\n| Příjmení, jméno, titul | Činnost | Dveře | Telefon |\\n|------------------------|---------|-------|----------|\\n| Vrba Miroslav Ing. MPA | ředitel | 1a-N4.118 | 495817280 |",
+      "Category": "Kontakt"
+    }}
+  ],
+  "contains_contact_info": true,
+  "contains_resolutions": false
+}}
+```
+
+### Example 4: Board Member/Council Member (RADNÍ) Context - CRITICAL FOR RAG RETRIEVAL
+**Title**: "Jan Jarolím - 1. náměstek hejtmana"
+**Text**: "## Jan Jarolím - 1. náměstek hejtmana\\n\\n![jarolím - menší](https://www.khk.cz/sites/default/files/styles/image/public/2025-02/Jarol%C3%ADm%20Jan_0.jpg?itok=c3WNT1a3)\\n\\n|     |     |\\n| --- | --- |\\n| _Zodpovědný za:_ | **oblast dopravy, inovací  a informačních technologií** |\\n| _Politická příslušnost:_ | ANO 2011 |\\n| _Bydliště:_ | Dvůr Králové nad Labem |\\n| _Rok narození:_ | 1974 |\\n| _Telefon:_ | +420 495 817 548 |\\n| _E-mail:_ | [jjarolim@khk.cz](mailto:jjarolim@khk.cz@khk.cz) |"
+**Expected JSON**:
+```json
+{{
+  "qa_pairs": [
+    {{
+      "Question": "Kdo je radním za dopravu? | Kdo má na starost oblast dopravy? | Který radní má na starost dopravu? | Kdo je zodpovědný za dopravu? | Kdo má v gesci oblast dopravy? | Who is the councilor for transport? | Who is responsible for transport? | Which councilor handles transport? | Who is in charge of transportation?",
+      "Answer": "Jan Jarolím - 1. náměstek hejtmana je zodpovědný za oblast dopravy, inovací a informačních technologií. Kontakt: +420 495 817 548, [jjarolim@khk.cz](mailto:jjarolim@khk.cz@khk.cz). Politická příslušnost: ANO 2011, bydliště: Dvůr Králové nad Labem, rok narození: 1974.",
       "Category": "Kontakt"
     }}
   ],

@@ -17,7 +17,7 @@ import random
 from anthropic import InternalServerError, RateLimitError
 
 # Import utility modules
-from llmUtils.llm_utils import call_llm_api, requests_retry_session
+from llmUtils.llm_utils import call_llm_api, requests_retry_session, assess_content_type
 from llmUtils.categorization_utils import categorize_link, generate_rag_question
 from llmUtils.qa_extraction_utils import convert_to_qa, convert_to_qa_with_retry, extract_json_from_text
 from llmUtils.contact_extraction_utils import extract_contact_details_llm
@@ -121,7 +121,8 @@ CUSTOM_URLS = [
 BLACKLISTED_URLS = [
     "https://khk.cz/urad/kontakty-telefonni-seznam",
     "https://www.khk.cz/kraj/zastupitelstvo/vybory-zastupitelstva-kralovehradeckeho-kraje",
-    "https://www.khk.cz/kraj/rada/komise-rady"
+    "https://www.khk.cz/kraj/rada/komise-rady",
+    "https://www.khk.cz/kraj/zastupitelstvo/seznam-clenu-zastupitelstva-kralovehradeckeho-kraje-2024-2028"
 ]
 
 # ============================================================================
@@ -2029,7 +2030,7 @@ def save_contacts_payload(url, contact_items, category):
 
     # Ensure all required fields for the schema are present in items, adding them as empty strings if missing.
     expected_fields = ["FirstName", "LastName", "FullName", "Title", "Role", "Department", 
-                       "Subdepartment", "Email", "PhoneNumber", "ProfileURL", "Office", "OfficeURL"]
+                       "Subdepartment", "Email", "PhoneNumber", "ProfileURL", "Office", "OfficeURL", "Origin"]
 
     processed_items = []
     for item in contact_items:
@@ -2047,8 +2048,8 @@ def save_contacts_payload(url, contact_items, category):
     payload = {
         "data": {
             "schema": {
-                "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Department", "Subdepartment", "Email", "PhoneNumber", "Office", "OfficeURL"],
-                "metadataFields": ["Category", "FirstName", "LastName", "PhoneNumber", "Email", "Type"]
+                "searchableFields": ["FirstName", "LastName", "FullName", "Title", "Role", "Department", "Subdepartment", "Email", "PhoneNumber", "Office", "OfficeURL", "Origin"],
+                "metadataFields": ["Category", "FirstName", "LastName", "PhoneNumber", "Email", "Type", "Origin"]
             },
             "name": table_name,
             "items": processed_items
@@ -2319,10 +2320,20 @@ URL: {parent_context['url']}
             elif content_type == "table_row":
                 # Skip Q/A extraction for table rows, but still assess for contacts and resolutions
                 logger.info(f"Skipping Q/A extraction for table row {i+1}{part_info} (table rows only processed for contacts/resolutions)")
-                # We still need to assess for contacts and resolutions, so we'll call a lightweight assessment
-                # For now, we'll assume table rows might contain contacts and resolutions
-                contains_contacts = True  # Always check table rows for contacts
-                contains_resolutions = True  # Always check table rows for resolutions
+                
+                # Use LLM-based assessment for table rows
+                logger.info(f"Using LLM assessment for table row {i+1}{part_info}")
+                contains_contacts, contains_resolutions = assess_content_type(
+                    content_item,
+                    metadata.get('title', 'Unknown Page') + part_info,
+                    LLM_PROVIDERS,
+                    LLM_SEQUENCE,
+                    MAX_RETRIES,
+                    INITIAL_RETRY_DELAY,
+                    API_CALL_DELAY
+                )
+                
+                logger.info(f"LLM assessment for table row {i+1}{part_info}: contacts={contains_contacts}, resolutions={contains_resolutions}")
 
             # If conversion succeeded and returned pairs for this item (only for chunks)
             if item_qa_pairs:
@@ -2392,14 +2403,44 @@ URL: {parent_context['url']}
                         logger.info(f"Extracted {len(chunk_contact_items)} new contact items from processing unit {i+1}{part_info}.")
                         accumulated_contacts_this_run.extend(chunk_contact_items)
 
-                        seen_contacts_tuples = set()
+                        # Improved contact deduplication logic
+                        seen_contacts_by_email = {}
+                        seen_contacts_by_name_phone = {}
                         deduplicated_contacts_list = []
-                        unique_contact_keys_for_dedup = ("FullName", "Email", "PhoneNumber", "Role", "Department") 
+                        
                         for contact_to_dedup in reversed(accumulated_contacts_this_run):
-                            contact_tuple_for_dedup = tuple(contact_to_dedup.get(key, "") for key in unique_contact_keys_for_dedup)
-                            if contact_tuple_for_dedup not in seen_contacts_tuples:
-                                seen_contacts_tuples.add(contact_tuple_for_dedup)
-                                deduplicated_contacts_list.append(contact_to_dedup)
+                            email = contact_to_dedup.get('Email', '').strip()
+                            full_name = contact_to_dedup.get('FullName', '').strip()
+                            phone = contact_to_dedup.get('PhoneNumber', '').strip()
+                            
+                            # Primary deduplication by email (most reliable)
+                            if email and email != '':
+                                if email in seen_contacts_by_email:
+                                    # Keep the contact with more complete information
+                                    existing_contact = seen_contacts_by_email[email]
+                                    current_score = sum(1 for field in ['FirstName', 'LastName', 'Role', 'Department', 'PhoneNumber'] 
+                                                      if contact_to_dedup.get(field, '').strip())
+                                    existing_score = sum(1 for field in ['FirstName', 'LastName', 'Role', 'Department', 'PhoneNumber'] 
+                                                       if existing_contact.get(field, '').strip())
+                                    
+                                    if current_score > existing_score:
+                                        # Replace with more complete contact
+                                        seen_contacts_by_email[email] = contact_to_dedup
+                                        # Remove the old one from the list and add the new one
+                                        deduplicated_contacts_list = [c for c in deduplicated_contacts_list if c.get('Email', '') != email]
+                                        deduplicated_contacts_list.append(contact_to_dedup)
+                                    # else: keep the existing one, skip current
+                                else:
+                                    seen_contacts_by_email[email] = contact_to_dedup
+                                    deduplicated_contacts_list.append(contact_to_dedup)
+                            else:
+                                # Secondary deduplication by name + phone for contacts without email
+                                name_phone_key = (full_name.lower(), phone)
+                                if name_phone_key not in seen_contacts_by_name_phone and full_name:
+                                    seen_contacts_by_name_phone[name_phone_key] = contact_to_dedup
+                                    deduplicated_contacts_list.append(contact_to_dedup)
+                                # else: skip duplicate
+                        
                         accumulated_contacts_this_run = list(reversed(deduplicated_contacts_list))
                         logger.info(f"Total accumulated contact items after processing unit {i+1} and deduplicating: {len(accumulated_contacts_this_run)}")
                         

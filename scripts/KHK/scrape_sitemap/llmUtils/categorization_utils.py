@@ -31,6 +31,7 @@ DŮLEŽITÉ INSTRUKCE:
      * všechna sportoviště, aquacentra, sportovní arény, sportovní zařízení
      * všechny portály (mapové, eGovernment, informační, atd.)
      * platformy a systémy pro komunikaci s úřadem
+     * otvírací hodiny (úřad, podatelna, czechpoint, dílčí odbory/oddělení)
    - Administrativa_Uredni_Zalezitosti:
      * úřední dokumenty, postupy, vyhlášky
      * veškeré vyřizování a zařizování úředních záležitostí
