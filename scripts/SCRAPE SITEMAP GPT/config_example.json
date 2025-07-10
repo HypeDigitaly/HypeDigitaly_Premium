@@ -38,13 +38,7 @@
   },
   "processing": {
     "check_last_modified": true,
-    "max_filename_length": 150,
-    "request_delay": 2
-  },
-  "output": {
-    "directory": "scraped_content",
-    "log_directory": "example_logs",
-    "last_run_file": "example_last_run.txt"
+    "max_filename_length": 150
   },
   "script_info": {
     "name": "example_scraper",

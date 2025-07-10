@@ -35,13 +35,7 @@
   },
   "processing": {
     "check_last_modified": true,
-    "max_filename_length": 200,
-    "request_delay": 1
-  },
-  "output": {
-    "directory": "files",
-    "log_directory": "logs",
-    "last_run_file": "last_run_time.txt"
+    "max_filename_length": 200
   },
   "script_info": {
     "name": "scrape_sitemap_universal",

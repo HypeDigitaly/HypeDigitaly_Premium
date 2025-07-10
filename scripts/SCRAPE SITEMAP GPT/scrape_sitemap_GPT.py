@@ -17,6 +17,49 @@ from urllib3.util.retry import Retry
 # CONFIG LOADING
 # ============================================================================
 
+def extract_config_identifier(config_file):
+    """Extract unique identifier from config filename for generating unique paths."""
+    import os
+    import re
+    
+    # Get base filename without path and extension
+    base_name = os.path.splitext(os.path.basename(config_file))[0]
+    
+    # Try to extract meaningful identifier from various naming patterns
+    patterns = [
+        r'.*_config_(.+)$',           # pattern: scrape_sitemap_GPT_config_Stredocesky
+        r'config_(.+)$',              # pattern: config_example
+        r'(.+)_config$',              # pattern: example_config
+        r'^(.+)$'                     # fallback: use whole filename
+    ]
+    
+    for pattern in patterns:
+        match = re.match(pattern, base_name, re.IGNORECASE)
+        if match:
+            identifier = match.group(1)
+            # Clean identifier - remove special characters, keep only alphanumeric and underscores
+            identifier = re.sub(r'[^a-zA-Z0-9_]', '_', identifier)
+            # Remove multiple underscores
+            identifier = re.sub(r'_+', '_', identifier)
+            # Remove leading/trailing underscores
+            identifier = identifier.strip('_')
+            
+            if identifier:  # Make sure we have something
+                return identifier
+    
+    # Ultimate fallback
+    return "default"
+
+def generate_unique_paths(config_file):
+    """Generate unique directory and file paths based on config filename."""
+    identifier = extract_config_identifier(config_file)
+    
+    return {
+        'files_directory': f"{identifier}_files",
+        'log_directory': f"{identifier}_logs", 
+        'last_run_file': f"{identifier}_last_run_time.txt"
+    }
+
 def load_config(config_file="config.json"):
     """Load configuration from JSON file."""
     if not os.path.exists(config_file):
@@ -105,11 +148,17 @@ def load_configuration(config_file="config.json"):
     CONFIG = load_config(config_file)
     validate_config(CONFIG)
     
+    # Generate unique paths based on config filename
+    unique_paths = generate_unique_paths(config_file)
+    
     # Set script identification
     SCRIPT_NAME = CONFIG["script_info"]["name"]
-    LOG_DIR = CONFIG["output"]["log_directory"]
+    
+    # Override paths with unique ones generated from config filename
+    # This allows multiple configs to run independently
+    LOG_DIR = unique_paths["log_directory"]
     LOG_FILE = os.path.join(LOG_DIR, f"{SCRIPT_NAME}_detailed.log")
-    OUTPUT_DIR = CONFIG["output"]["directory"]
+    OUTPUT_DIR = unique_paths["files_directory"]
     
     # Set API keys
     JINA_AI_API_KEY = CONFIG["api_keys"]["jina_ai"]
@@ -150,8 +199,8 @@ def load_configuration(config_file="config.json"):
     CHECK_LAST_MODIFIED = CONFIG["processing"]["check_last_modified"]
     MAX_FILENAME_LENGTH = CONFIG["processing"]["max_filename_length"]
     
-    # Set file paths
-    LAST_RUN_FILE = CONFIG["output"]["last_run_file"]
+    # Set file paths (use unique path generated from config filename)
+    LAST_RUN_FILE = unique_paths["last_run_file"]
     
     # Initialize markdown providers
     MARKDOWN_PROVIDERS = {
@@ -171,6 +220,8 @@ def load_configuration(config_file="config.json"):
     print(f"🌐 Target website: {BASE_URL}")
     print(f"📁 Output directory: {OUTPUT_DIR}")
     print(f"📊 Log directory: {LOG_DIR}")
+    print(f"🏷️  Config identifier: {extract_config_identifier(config_file)}")
+    print(f"📄 Last run file: {LAST_RUN_FILE}")
 
 # ============================================================================
 # CONSTANTS (will be set by load_configuration)
@@ -220,15 +271,21 @@ console_handler = None
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def requests_retry_session(retries=REQUEST_RETRY_COUNT, backoff_factor=REQUEST_BACKOFF_FACTOR):
+def requests_retry_session(retries=None, backoff_factor=None):
     """Create a requests session with retry configuration."""
+    # Use global config values if available, otherwise use defaults
+    if retries is None:
+        retries = getattr(globals(), 'REQUEST_RETRY_COUNT', 3)
+    if backoff_factor is None:
+        backoff_factor = getattr(globals(), 'REQUEST_BACKOFF_FACTOR', 0.3)
+    
     session = requests.Session()
     retry = Retry(
         total=retries,
         read=retries,
         connect=retries,
         backoff_factor=backoff_factor,
-        status_forcelist=REQUEST_RETRY_CODES
+        status_forcelist=getattr(globals(), 'REQUEST_RETRY_CODES', (500, 502, 503, 504, 524))
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('http://', adapter)
@@ -247,7 +304,9 @@ def sanitize_filename(filename):
     filename = re.sub(r"\s+", "_", filename)
     filename = re.sub(r"_+", "_", filename)
     filename = filename.strip("_")
-    return filename[:MAX_FILENAME_LENGTH]
+    # Use global config value if available, otherwise use default
+    max_length = getattr(globals(), 'MAX_FILENAME_LENGTH', 200)
+    return filename[:max_length]
 
 # ============================================================================
 # JINA AI API FUNCTIONS
@@ -1294,6 +1353,8 @@ def main(args=None):
     """Main function to orchestrate the scraping process."""
     global CONFIG, JINA_REMOVE_SELECTORS, OPENAI_VECTOR_STORE_ID, ENABLE_DEDUPLICATION
     global DEFAULT_CHUNKING_STRATEGY, DEFAULT_MAX_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
+    global BASE_URL, SITEMAP_URL, XML_SITEMAP_URL, OUTPUT_DIR, CHECK_LAST_MODIFIED
+    global JINA_AI_API_KEY, FIRECRAWL_API_KEY, OPENAI_API_KEY, MARKDOWN_PROVIDERS
     
     # Load configuration
     config_file = "config.json"
