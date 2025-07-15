@@ -12,6 +12,10 @@ import unicodedata
 from logging.handlers import RotatingFileHandler
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+try:
+    from dateutil import parser as dateutil_parser
+except ImportError:
+    dateutil_parser = None
 
 # ============================================================================
 # CONFIG LOADING
@@ -141,7 +145,7 @@ def load_configuration(config_file="config.json"):
     global DEFAULT_CHUNKING_STRATEGY, DEFAULT_MAX_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
     global BASE_URL, PARSED_BASE_URL, BASE_NETLOC, NON_WWW_BASE_NETLOC, BASE_SCHEME
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
-    global BLACKLISTED_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
+    global BLACKLISTED_URLS, RSS_FEEDS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
     
     # Load configuration
@@ -189,6 +193,9 @@ def load_configuration(config_file="config.json"):
     # Set blacklisted URLs
     BLACKLISTED_URLS = CONFIG["website"]["blacklisted_urls"]
     
+    # Set RSS feeds
+    RSS_FEEDS = CONFIG["website"].get("rss_feeds", [])
+    
     # Set HTTP settings
     REQUEST_TIMEOUT = CONFIG["http_settings"]["request_timeout"]
     REQUEST_RETRY_CODES = tuple(CONFIG["http_settings"]["retry_codes"])
@@ -201,6 +208,12 @@ def load_configuration(config_file="config.json"):
     
     # Set file paths (use unique path generated from config filename)
     LAST_RUN_FILE = unique_paths["last_run_file"]
+    
+    # Create separate timestamp files for RSS and sitemap
+    identifier = extract_config_identifier(config_file)
+    global RSS_LAST_RUN_FILE, SITEMAP_LAST_RUN_FILE
+    RSS_LAST_RUN_FILE = f"{identifier}_rss_last_run_time.txt"
+    SITEMAP_LAST_RUN_FILE = f"{identifier}_sitemap_last_run_time.txt"
     
     # Initialize markdown providers
     MARKDOWN_PROVIDERS = {
@@ -221,7 +234,10 @@ def load_configuration(config_file="config.json"):
     print(f"📁 Output directory: {OUTPUT_DIR}")
     print(f"📊 Log directory: {LOG_DIR}")
     print(f"🏷️  Config identifier: {extract_config_identifier(config_file)}")
-    print(f"📄 Last run file: {LAST_RUN_FILE}")
+    print(f"📄 Combined last run file: {LAST_RUN_FILE}")
+    print(f"📡 RSS last run file: {RSS_LAST_RUN_FILE}")
+    print(f"🗺️  Sitemap last run file: {SITEMAP_LAST_RUN_FILE}")
+    print(f"📡 RSS feeds: {len(RSS_FEEDS)} configured")
 
 # ============================================================================
 # CONSTANTS (will be set by load_configuration)
@@ -997,6 +1013,241 @@ def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timesta
     return extracted_urls
 
 # ============================================================================
+# RSS FEED FUNCTIONS
+# ============================================================================
+
+def parse_rss_feed(rss_url):
+    """Parse RSS/Atom feed and extract URLs with metadata."""
+    logger.info(f"Parsing RSS feed: {rss_url}")
+    
+    try:
+        response = requests_retry_session().get(rss_url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        
+        # Try to parse as XML
+        soup = BeautifulSoup(response.content, 'xml')
+        
+        # Check if it's Atom feed
+        if soup.find('feed') and soup.find('feed').get('xmlns') == 'http://www.w3.org/2005/Atom':
+            logger.info(f"Detected Atom feed format for: {rss_url}")
+            return parse_atom_feed(soup, rss_url)
+        
+        # Check if it's RSS 2.0 feed
+        elif soup.find('rss') or soup.find('channel'):
+            logger.info(f"Detected RSS 2.0 feed format for: {rss_url}")
+            return parse_rss_2_0_feed(soup, rss_url)
+        
+        # Try parsing as HTML/XML with generic approach
+        else:
+            logger.info(f"Attempting generic XML parsing for: {rss_url}")
+            return parse_generic_feed(soup, rss_url)
+            
+    except Exception as e:
+        logger.error(f"Error parsing RSS feed {rss_url}: {str(e)}")
+        return []
+
+def parse_atom_feed(soup, rss_url):
+    """Parse Atom feed format."""
+    extracted_urls = []
+    
+    entries = soup.find_all('entry')
+    logger.info(f"Found {len(entries)} entries in Atom feed")
+    
+    for entry in entries:
+        try:
+            # Extract URL from link element
+            link_elem = entry.find('link', {'rel': 'alternate'})
+            if not link_elem:
+                link_elem = entry.find('link')
+            
+            if link_elem:
+                url = link_elem.get('href')
+                if url:
+                    # Make URL absolute
+                    absolute_url = urljoin(BASE_URL, url)
+                    
+                    # Extract title
+                    title_elem = entry.find('title')
+                    title = title_elem.text.strip() if title_elem else 'No title'
+                    
+                    # Extract publication date
+                    published_elem = entry.find('published') or entry.find('updated')
+                    published = published_elem.text.strip() if published_elem else None
+                    
+                    # Extract summary
+                    summary_elem = entry.find('summary')
+                    summary = summary_elem.text.strip() if summary_elem else None
+                    
+                    # Create navigation path for RSS items
+                    path = f"RSS: {rss_url} > {title}"
+                    
+                    extracted_urls.append({
+                        'url': absolute_url,
+                        'title': title,
+                        'path': path,
+                        'published': published,
+                        'summary': summary,
+                        'source_feed': rss_url
+                    })
+                    
+                    logger.debug(f"Extracted from Atom: {absolute_url} - {title}")
+                    
+        except Exception as e:
+            logger.error(f"Error processing Atom entry: {str(e)}")
+            continue
+    
+    return extracted_urls
+
+def parse_rss_2_0_feed(soup, rss_url):
+    """Parse RSS 2.0 feed format."""
+    extracted_urls = []
+    
+    items = soup.find_all('item')
+    logger.info(f"Found {len(items)} items in RSS 2.0 feed")
+    
+    for item in items:
+        try:
+            # Extract URL from link element
+            link_elem = item.find('link')
+            if link_elem:
+                url = link_elem.text.strip() if link_elem.text else link_elem.get('href')
+                if url:
+                    # Make URL absolute
+                    absolute_url = urljoin(BASE_URL, url)
+                    
+                    # Extract title
+                    title_elem = item.find('title')
+                    title = title_elem.text.strip() if title_elem else 'No title'
+                    
+                    # Extract publication date
+                    published_elem = item.find('pubDate')
+                    published = published_elem.text.strip() if published_elem else None
+                    
+                    # Extract description
+                    description_elem = item.find('description')
+                    description = description_elem.text.strip() if description_elem else None
+                    
+                    # Create navigation path for RSS items
+                    path = f"RSS: {rss_url} > {title}"
+                    
+                    extracted_urls.append({
+                        'url': absolute_url,
+                        'title': title,
+                        'path': path,
+                        'published': published,
+                        'description': description,
+                        'source_feed': rss_url
+                    })
+                    
+                    logger.debug(f"Extracted from RSS 2.0: {absolute_url} - {title}")
+                    
+        except Exception as e:
+            logger.error(f"Error processing RSS 2.0 item: {str(e)}")
+            continue
+    
+    return extracted_urls
+
+def parse_generic_feed(soup, rss_url):
+    """Generic parser for unknown feed formats - looks for any URLs."""
+    extracted_urls = []
+    
+    # Look for any links in the feed
+    all_links = []
+    
+    # Find all elements that might contain URLs
+    for elem in soup.find_all(['link', 'a']):
+        href = elem.get('href')
+        if href:
+            all_links.append(href)
+        elif elem.text and elem.text.strip().startswith('http'):
+            all_links.append(elem.text.strip())
+    
+    # Also look for text content that might be URLs
+    import re
+    url_pattern = r'https?://[^\s<>"\']*'
+    text_urls = re.findall(url_pattern, str(soup))
+    all_links.extend(text_urls)
+    
+    # Filter and process URLs
+    seen_urls = set()
+    for url in all_links:
+        try:
+            # Clean URL
+            url = url.strip()
+            if not url or url in seen_urls:
+                continue
+                
+            # Make URL absolute
+            absolute_url = urljoin(BASE_URL, url)
+            
+            # Filter out non-relevant URLs
+            if (absolute_url.startswith(BASE_URL) and 
+                absolute_url not in BLACKLISTED_URLS and
+                absolute_url != rss_url):
+                
+                seen_urls.add(url)
+                
+                # Create basic metadata
+                title = f"Link from {rss_url}"
+                path = f"RSS: {rss_url} > Generic Link"
+                
+                extracted_urls.append({
+                    'url': absolute_url,
+                    'title': title,
+                    'path': path,
+                    'published': None,
+                    'source_feed': rss_url
+                })
+                
+                logger.debug(f"Extracted generic URL: {absolute_url}")
+                
+        except Exception as e:
+            logger.error(f"Error processing generic URL {url}: {str(e)}")
+            continue
+    
+    logger.info(f"Found {len(extracted_urls)} URLs in generic feed parsing")
+    return extracted_urls
+
+def process_rss_feeds(url_last_modified_map, last_run_timestamp):
+    """Process all configured RSS feeds and extract URLs."""
+    logger.info(f"Processing {len(RSS_FEEDS)} RSS feeds")
+    
+    all_rss_urls = []
+    
+    for rss_url in RSS_FEEDS:
+        logger.info(f"Processing RSS feed: {rss_url}")
+        
+        # Parse the RSS feed
+        feed_urls = parse_rss_feed(rss_url)
+        
+        # Filter URLs based on last modified check if available
+        filtered_urls = []
+        for url_info in feed_urls:
+            url = url_info['url']
+            
+            # Check if URL is blacklisted
+            if url in BLACKLISTED_URLS:
+                logger.info(f"RSS URL {url} is blacklisted. Skipping.")
+                continue
+            
+            # Find last modified date from sitemap.xml (if available)
+            last_modified = find_url_last_modified(url, url_last_modified_map)
+            
+            # For RSS feeds, we'll be more lenient with last modified check
+            # since RSS items are typically recent
+            if should_process_url(url, last_modified, last_run_timestamp):
+                filtered_urls.append(url_info)
+            else:
+                logger.info(f"Skipping RSS URL {url} as it hasn't changed since last run.")
+        
+        all_rss_urls.extend(filtered_urls)
+        
+        logger.info(f"Extracted {len(filtered_urls)} URLs from RSS feed: {rss_url}")
+    
+    logger.info(f"Total RSS URLs to process: {len(all_rss_urls)}")
+    return all_rss_urls
+
+# ============================================================================
 # XML SITEMAP FUNCTIONS
 # ============================================================================
 
@@ -1206,36 +1457,94 @@ def should_process_url(url, last_modified, last_run_timestamp):
         
     return is_modified
 
+def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None):
+    """Extract URLs from XML sitemap data for processing."""
+    extracted_urls = []
+    
+    logger.info(f"Extracting URLs from XML sitemap data")
+    
+    for url, last_modified in url_last_modified_map.items():
+        logger.info(f"\n=== Processing URL: {url} ===")
+        
+        # Check if URL is blacklisted
+        if url in BLACKLISTED_URLS:
+            logger.info(f"URL {url} is blacklisted. Skipping.")
+            continue
+        
+        # Check if the URL should be processed
+        if should_process_url(url, last_modified, last_run_timestamp):
+            # Extract title from URL path as fallback
+            parsed_url = urlparse(url)
+            path_parts = [part for part in parsed_url.path.split('/') if part]
+            title = path_parts[-1] if path_parts else 'Homepage'
+            
+            # Create a basic path from URL structure
+            path = f"XML Sitemap > {' > '.join(path_parts)}" if path_parts else "XML Sitemap > Homepage"
+            
+            extracted_urls.append({
+                'url': url,
+                'title': title,
+                'path': path
+            })
+            logger.info(f"Added URL from XML sitemap: {url}")
+        else:
+            logger.info(f"Skipping URL {url} as it hasn't changed since last run.")
+    
+    logger.info(f"Extracted {len(extracted_urls)} URLs from XML sitemap")
+    return extracted_urls
+
 # ============================================================================
 # TIMESTAMP FUNCTIONS
 # ============================================================================
 
-def get_last_run_timestamp():
-    """Get the timestamp of the last script run."""
+def get_last_run_timestamp(timestamp_type="combined"):
+    """Get the timestamp of the last script run.
+    
+    Args:
+        timestamp_type: "combined", "rss", or "sitemap"
+    """
     try:
-        if os.path.exists(LAST_RUN_FILE):
-            with open(LAST_RUN_FILE, 'r') as f:
+        if timestamp_type == "rss":
+            timestamp_file = RSS_LAST_RUN_FILE
+        elif timestamp_type == "sitemap":
+            timestamp_file = SITEMAP_LAST_RUN_FILE
+        else:
+            timestamp_file = LAST_RUN_FILE
+            
+        if os.path.exists(timestamp_file):
+            with open(timestamp_file, 'r') as f:
                 timestamp_str = f.read().strip()
                 return datetime.fromisoformat(timestamp_str)
         return None
     except Exception as e:
-        logger.error(f"Error reading last run timestamp: {str(e)}")
+        logger.error(f"Error reading {timestamp_type} timestamp: {str(e)}")
         return None
 
-def save_last_run_timestamp():
-    """Save the current timestamp as the last run timestamp."""
+def save_last_run_timestamp(timestamp_type="combined"):
+    """Save the current timestamp as the last run timestamp.
+    
+    Args:
+        timestamp_type: "combined", "rss", or "sitemap"
+    """
     try:
-        with open(LAST_RUN_FILE, 'w') as f:
+        if timestamp_type == "rss":
+            timestamp_file = RSS_LAST_RUN_FILE
+        elif timestamp_type == "sitemap":
+            timestamp_file = SITEMAP_LAST_RUN_FILE
+        else:
+            timestamp_file = LAST_RUN_FILE
+            
+        with open(timestamp_file, 'w') as f:
             f.write(datetime.now().astimezone(timezone(timedelta(hours=2))).isoformat())
-        logger.info(f"Saved current UTC+02:00 timestamp to {LAST_RUN_FILE}")
+        logger.info(f"Saved current UTC+02:00 timestamp to {timestamp_file}")
     except Exception as e:
-        logger.error(f"Error saving last run timestamp: {str(e)}")
+        logger.error(f"Error saving {timestamp_type} timestamp: {str(e)}")
 
 # ============================================================================
 # FILE SAVING FUNCTIONS
 # ============================================================================
 
-def create_metadata_header(url, title, last_modified=None, path=None, provider_used=None):
+def create_metadata_header(url, title, last_modified=None, path=None, provider_used=None, rss_metadata=None):
     """
     Create a Markdown-formatted metadata header for the file.
     
@@ -1245,6 +1554,7 @@ def create_metadata_header(url, title, last_modified=None, path=None, provider_u
         last_modified (datetime, optional): Last modification date from sitemap
         path (str, optional): Navigation path from sitemap
         provider_used (str, optional): API provider used (jina/firecrawl)
+        rss_metadata (dict, optional): RSS-specific metadata (published, summary, source_feed)
     
     Returns:
         str: Formatted Markdown metadata header with table and emojis
@@ -1284,16 +1594,74 @@ def create_metadata_header(url, title, last_modified=None, path=None, provider_u
         "",
         f"## 📅 **DATUM POSLEDNÍ MODIFIKACE URL NA WEBU:**",
         f"### **{last_mod_str}**",
-        "",
+        ""
+    ]
+    
+    # Add RSS-specific metadata if available
+    if rss_metadata:
+        # Determine source type
+        source_type = "📡 RSS Feed" if rss_metadata.get('source_feed') else "🗺️ Sitemap"
+        metadata_lines.extend([
+            f"## 📊 **TYP ZDROJE:**",
+            f"### **{source_type}**",
+            ""
+        ])
+        
+        # Add RSS publication date if available
+        if rss_metadata.get('published'):
+            pub_date = rss_metadata['published']
+            # Try to parse and format the date if it's a string
+            if isinstance(pub_date, str) and dateutil_parser:
+                try:
+                    parsed_date = dateutil_parser.parse(pub_date)
+                    pub_date = parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    # If parsing fails, use the original string
+                    pass
+            
+            metadata_lines.extend([
+                f"## 📅 **DATUM PUBLIKACE (RSS):**",
+                f"### **{pub_date}**",
+                ""
+            ])
+        
+        # Add RSS source feed if available
+        if rss_metadata.get('source_feed'):
+            metadata_lines.extend([
+                f"## 📡 **ZDROJOVÝ RSS FEED:**",
+                f"### **{rss_metadata['source_feed']}**",
+                ""
+            ])
+        
+        # Add RSS summary/description if available
+        if rss_metadata.get('summary') or rss_metadata.get('description'):
+            summary = rss_metadata.get('summary') or rss_metadata.get('description')
+            # Truncate if too long
+            if len(summary) > 200:
+                summary = summary[:200] + "..."
+            metadata_lines.extend([
+                f"## 📝 **POPIS/SHRNUTÍ (RSS):**",
+                f"### **{summary}**",
+                ""
+            ])
+    else:
+        # If no RSS metadata, indicate it's from sitemap
+        metadata_lines.extend([
+            f"## 📊 **TYP ZDROJE:**",
+            f"### **🗺️ Sitemap**",
+            ""
+        ])
+    
+    metadata_lines.extend([
         "---",
         "",
         ""   # Empty line before content
-    ]
+    ])
     
     return "\n".join(metadata_lines)
 
 
-def save_markdown_to_file(content, title, url, upload_to_vector_store=False, vector_store_id=None, enable_deduplication=True, chunking_strategy=None, vector_store_cache=None, last_modified=None, path=None, provider_used=None):
+def save_markdown_to_file(content, title, url, upload_to_vector_store=False, vector_store_id=None, enable_deduplication=True, chunking_strategy=None, vector_store_cache=None, last_modified=None, path=None, provider_used=None, rss_metadata=None):
     """Save markdown content to a txt file with metadata header and optionally upload to OpenAI Vector Store."""
     try:
         # Create filename from title
@@ -1321,7 +1689,7 @@ def save_markdown_to_file(content, title, url, upload_to_vector_store=False, vec
             counter += 1
         
         # Create metadata header
-        metadata_header = create_metadata_header(url, title, last_modified, path, provider_used)
+        metadata_header = create_metadata_header(url, title, last_modified, path, provider_used, rss_metadata)
         
         # Combine metadata header with content
         full_content = metadata_header + content
@@ -1367,6 +1735,13 @@ def main(args=None):
     except Exception as e:
         print(f"❌ Error loading configuration: {str(e)}")
         return
+    
+    # Validate mutually exclusive arguments
+    if args:
+        exclusive_modes = [args.rss_only, args.sitemap_only, getattr(args, 'xml_only', False)]
+        if sum(exclusive_modes) > 1:
+            print("❌ Error: --rss-only, --sitemap-only, and --xml-only are mutually exclusive")
+            return
     
     # Override config with command line arguments
     if args:
@@ -1451,39 +1826,125 @@ def main(args=None):
         vector_store_cache = build_vector_store_cache(vector_store_id)
         print(f"🚀 Vector Store cache built with {len(vector_store_cache)} files")
     
-    # Get last run timestamp
-    last_run_timestamp = get_last_run_timestamp()
+    # Determine processing mode
+    rss_only = args.rss_only if args else False
+    sitemap_only = args.sitemap_only if args else False
+    xml_only = getattr(args, 'xml_only', False) if args else False
+    
+    # Get appropriate last run timestamp
+    if rss_only:
+        last_run_timestamp = get_last_run_timestamp("rss")
+        logger.info("RSS-only mode enabled")
+    elif sitemap_only:
+        last_run_timestamp = get_last_run_timestamp("sitemap")
+        logger.info("Sitemap-only mode enabled")
+    elif xml_only:
+        last_run_timestamp = get_last_run_timestamp("sitemap")
+        logger.info("XML-only mode enabled")
+    else:
+        last_run_timestamp = get_last_run_timestamp("combined")
+        logger.info("Combined mode (RSS + Sitemap)")
+    
     if last_run_timestamp:
         logger.info(f"Last run timestamp: {last_run_timestamp.isoformat()}")
     else:
         logger.info("No last run timestamp found, will process all URLs")
     
     try:
-        # Step 1: Get HTML sitemap content
-        logger.info(f"Step 1: Fetching HTML sitemap from {SITEMAP_URL}")
-        html_content, _ = get_html_content_via_jina(SITEMAP_URL, remove_selectors)
-        if not html_content:
-            logger.error(f"Failed to get HTML sitemap content from {SITEMAP_URL}")
-            return
+        extracted_urls = []
         
-        # Step 2: Parse the sitemap menu
-        logger.info("Step 2: Parsing sitemap menu structure")
-        main_menu = parse_menu(html_content)
-        if not main_menu:
-            logger.error("Failed to find main menu in sitemap")
-            return
+        # Initialize sitemap processing variables
+        main_menu = None
+        url_last_modified_map = {}
         
-        # Step 3: Fetch XML sitemap data
-        logger.info("Step 3: Fetching XML sitemap for last modified dates")
-        url_last_modified_map = fetch_xml_sitemap()
-        logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+        # Step 1-4: Process sitemap (unless RSS-only mode)
+        if not rss_only:
+            if xml_only:
+                # XML-only mode: Skip HTML sitemap, only use XML sitemap
+                logger.info("XML-only mode: Skipping HTML sitemap processing")
+                
+                # Step 3: Fetch XML sitemap data
+                logger.info("Step 3: Fetching XML sitemap for URLs and last modified dates")
+                url_last_modified_map = fetch_xml_sitemap()
+                logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                
+                # Step 4: Extract URLs from XML sitemap
+                logger.info("Step 4: Extracting URLs from XML sitemap")
+                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                
+                logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
+            elif SITEMAP_URL and SITEMAP_URL.strip():
+                # Normal sitemap processing with HTML sitemap (only if URL is provided)
+                # Step 1: Get HTML sitemap content
+                logger.info(f"Step 1: Fetching HTML sitemap from {SITEMAP_URL}")
+                html_content, _ = get_html_content_via_jina(SITEMAP_URL, remove_selectors)
+                if not html_content:
+                    logger.error(f"Failed to get HTML sitemap content from {SITEMAP_URL}")
+                    logger.info("Falling back to XML-only processing...")
+                    
+                    # Fallback to XML-only processing
+                    url_last_modified_map = fetch_xml_sitemap()
+                    logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                    extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                    logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
+                else:
+                    # Step 2: Parse the sitemap menu
+                    logger.info("Step 2: Parsing sitemap menu structure")
+                    main_menu = parse_menu(html_content)
+                    if not main_menu:
+                        logger.error("Failed to find main menu in sitemap")
+                        logger.info("Falling back to XML-only processing...")
+                        
+                        # Fallback to XML-only processing
+                        url_last_modified_map = fetch_xml_sitemap()
+                        logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                        extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                        logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
+                    else:
+                        # Step 3: Fetch XML sitemap data
+                        logger.info("Step 3: Fetching XML sitemap for last modified dates")
+                        url_last_modified_map = fetch_xml_sitemap()
+                        logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                        
+                        # Step 4: Extract URLs from HTML sitemap
+                        logger.info("Step 4: Extracting URLs from HTML sitemap")
+                        extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
+                                                     last_run_timestamp=last_run_timestamp)
+                        
+                        logger.info(f"Found {len(extracted_urls)} URLs from sitemap")
+            else:
+                # No HTML sitemap URL provided, use XML-only processing
+                logger.info("No HTML sitemap URL provided, using XML-only processing")
+                
+                # Step 3: Fetch XML sitemap data
+                logger.info("Step 3: Fetching XML sitemap for URLs and last modified dates")
+                url_last_modified_map = fetch_xml_sitemap()
+                logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                
+                # Step 4: Extract URLs from XML sitemap
+                logger.info("Step 4: Extracting URLs from XML sitemap")
+                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                
+                logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
+        else:
+            logger.info("Skipping sitemap processing (RSS-only mode)")
+            # Still fetch XML sitemap for RSS last modified dates
+            url_last_modified_map = fetch_xml_sitemap()
         
-        # Step 4: Extract URLs from HTML sitemap
-        logger.info("Step 4: Extracting URLs from HTML sitemap")
-        extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
-                                     last_run_timestamp=last_run_timestamp)
+        # Step 4.5: Process RSS feeds (unless sitemap-only or xml-only mode)
+        if not sitemap_only and not xml_only and RSS_FEEDS:
+            logger.info("Step 4.5: Processing RSS feeds")
+            rss_urls = process_rss_feeds(url_last_modified_map, last_run_timestamp)
+            extracted_urls.extend(rss_urls)
+            logger.info(f"Added {len(rss_urls)} URLs from RSS feeds")
+        elif sitemap_only:
+            logger.info("Skipping RSS processing (sitemap-only mode)")
+        elif xml_only:
+            logger.info("Skipping RSS processing (XML-only mode)")
+        else:
+            logger.info("Step 4.5: No RSS feeds configured, skipping RSS processing")
         
-        logger.info(f"Found {len(extracted_urls)} URLs to process")
+        logger.info(f"Total URLs to process: {len(extracted_urls)}")
         
         # Step 5: Process each URL
         logger.info("Step 5: Processing individual URLs")
@@ -1499,6 +1960,17 @@ def main(args=None):
             logger.info(f"URL: {url}")
             logger.info(f"Title: {title}")
             logger.info(f"Path: {path}")
+            
+            # Prepare RSS metadata if available
+            rss_metadata = None
+            if any(key in url_info for key in ['published', 'summary', 'description', 'source_feed']):
+                rss_metadata = {
+                    'published': url_info.get('published'),
+                    'summary': url_info.get('summary'),
+                    'description': url_info.get('description'),
+                    'source_feed': url_info.get('source_feed')
+                }
+                logger.info(f"RSS metadata available - Published: {rss_metadata['published']}, Source: {rss_metadata['source_feed']}")
             
             # Get markdown content
             content, api_title, metadata, provider_used = get_markdown_content(url, remove_selectors)
@@ -1519,7 +1991,8 @@ def main(args=None):
                                                  vector_store_cache=vector_store_cache,
                                                  last_modified=last_modified,
                                                  path=path,
-                                                 provider_used=provider_used)
+                                                 provider_used=provider_used,
+                                                 rss_metadata=rss_metadata)
                 if saved_file:
                     success_count += 1
                     logger.info(f"✅ Successfully processed: {url}")
@@ -1534,7 +2007,17 @@ def main(args=None):
             time.sleep(1)
         
         # Save timestamp of this run
-        save_last_run_timestamp()
+        if rss_only:
+            save_last_run_timestamp("rss")
+        elif sitemap_only:
+            save_last_run_timestamp("sitemap")
+        elif xml_only:
+            save_last_run_timestamp("sitemap")
+        else:
+            save_last_run_timestamp("combined")
+            # Also save separate timestamps for future selective runs
+            save_last_run_timestamp("rss")
+            save_last_run_timestamp("sitemap")
         
         end_time = datetime.now()
         duration = end_time - start_time
@@ -1549,6 +2032,18 @@ def main(args=None):
         logger.info(f"Files saved to: {os.path.abspath(OUTPUT_DIR)}")
         logger.info(f"Config file used: {config_file}")
         logger.info(f"Target website: {BASE_URL}")
+        
+        # Log processing mode
+        if rss_only:
+            logger.info("Processing mode: RSS-only")
+        elif sitemap_only:
+            logger.info("Processing mode: Sitemap-only")
+        elif xml_only:
+            logger.info("Processing mode: XML-only")
+        else:
+            logger.info("Processing mode: Combined (RSS + Sitemap)")
+            
+        logger.info(f"RSS feeds processed: {len(RSS_FEEDS) if not sitemap_only and not xml_only else 0}")
         if vector_store_id:
             logger.info(f"Vector Store uploads enabled: {vector_store_id}")
         
@@ -1556,6 +2051,18 @@ def main(args=None):
         print(f"📁 Files saved to: {os.path.abspath(OUTPUT_DIR)}")
         print(f"📊 Success: {success_count}/{processed_count} URLs processed")
         print(f"🌐 Target website: {BASE_URL}")
+        
+        # Print processing mode
+        if rss_only:
+            print(f"📡 Mode: RSS-only ({len(RSS_FEEDS)} feeds)")
+        elif sitemap_only:
+            print(f"🗺️  Mode: Sitemap-only")
+        elif xml_only:
+            print(f"🗂️  Mode: XML-only")
+        else:
+            print(f"🔄 Mode: Combined (RSS + Sitemap)")
+            print(f"📡 RSS feeds processed: {len(RSS_FEEDS)}")
+            
         print(f"⚙️  Config file: {config_file}")
         if vector_store_id:
             print(f"🔄 Vector Store uploads: {vector_store_id}")
@@ -1592,6 +2099,12 @@ if __name__ == "__main__":
                         help="Enable debug mode with verbose output")
     parser.add_argument("--no-check-modified", action="store_true", 
                         help="Disable last modified checking (process all URLs)")
+    parser.add_argument("--rss-only", action="store_true",
+                        help="Process only RSS feeds, skip sitemap processing")
+    parser.add_argument("--sitemap-only", action="store_true",
+                        help="Process only sitemap, skip RSS feeds processing")
+    parser.add_argument("--xml-only", action="store_true",
+                        help="Process only XML sitemap URLs, skip HTML sitemap and RSS feeds")
     
     # Vector Store options
     parser.add_argument("--vector-store-id", type=str,

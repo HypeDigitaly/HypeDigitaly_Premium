@@ -6,6 +6,11 @@
     "blacklisted_urls": [
       "https://example.com/private-page",
       "https://example.com/admin"
+    ],
+    "rss_feeds": [
+      "https://example.com/rss",
+      "https://example.com/feed.xml",
+      "https://example.com/news.rss"
     ]
   },
   "api_keys": {
