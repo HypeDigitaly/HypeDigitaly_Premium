@@ -152,6 +152,7 @@ def load_configuration(config_file="config.json"):
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
     global BLACKLISTED_URLS, RSS_FEEDS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
+    global VERBOSE_URL_MATCHING
     
     # Load configuration
     CONFIG = load_config(config_file)
@@ -213,6 +214,9 @@ def load_configuration(config_file="config.json"):
     
     # Set file paths (use unique path generated from config filename)
     LAST_RUN_FILE = unique_paths["last_run_file"]
+    
+    # Initialize verbose URL matching (can be overridden by command line)
+    VERBOSE_URL_MATCHING = False
     
     # Create separate timestamp files for RSS and sitemap
     identifier = extract_config_identifier(config_file)
@@ -1464,39 +1468,193 @@ def fetch_xml_sitemap():
         return {}
 
 def find_url_last_modified(url, url_last_modified_map):
-    """Find the last modified date for a given URL."""
+    """
+    Find the last modified date for a given URL with improved matching.
+    Handles domain variations (www vs non-www) and flexible path matching.
+    """
     logger.debug(f"Finding last modified date for URL: {url}")
     last_modified = None
     matched_sitemap_url = None
     
+    # Normalize the input URL
     normalized_url = url.rstrip('/')
+    parsed_input = urlparse(normalized_url)
+    input_domain = parsed_input.netloc.lower()
+    input_path = parsed_input.path.lower()
     
-    # Try exact match
-    if url in url_last_modified_map:
-        last_modified = url_last_modified_map[url]
-        matched_sitemap_url = url
-    elif normalized_url in url_last_modified_map:
-        last_modified = url_last_modified_map[normalized_url]
-        matched_sitemap_url = normalized_url
-    else:
-        # Try substring matching
-        matching_urls = [sitemap_url for sitemap_url in url_last_modified_map.keys() 
-                         if normalized_url in sitemap_url or sitemap_url in normalized_url]
+    # Remove www prefix for comparison
+    input_domain_no_www = input_domain[4:] if input_domain.startswith("www.") else input_domain
+    
+    # Try different matching strategies
+    matching_strategies = [
+        # 1. Exact match
+        lambda: url if url in url_last_modified_map else None,
         
-        if matching_urls:
-            matched_sitemap_url = matching_urls[0]
-            last_modified = url_last_modified_map.get(matched_sitemap_url)
+        # 2. Normalized exact match
+        lambda: normalized_url if normalized_url in url_last_modified_map else None,
+        
+        # 3. Domain variation matching (www vs non-www)
+        lambda: _find_domain_variation_match(normalized_url, url_last_modified_map),
+        
+        # 4. Path-based matching (same path, different domain)
+        lambda: _find_path_based_match(input_path, input_domain_no_www, url_last_modified_map),
+        
+        # 5. Flexible substring matching (improved)
+        lambda: _find_flexible_substring_match(normalized_url, input_domain_no_www, input_path, url_last_modified_map),
+        
+        # 6. Legacy substring matching (fallback)
+        lambda: _find_legacy_substring_match(normalized_url, url_last_modified_map)
+    ]
+    
+    # Try each strategy until we find a match
+    for i, strategy in enumerate(matching_strategies, 1):
+        try:
+            result = strategy()
+            if result:
+                matched_sitemap_url = result
+                last_modified = url_last_modified_map.get(matched_sitemap_url)
+                logger.info(f"URL matched using strategy {i}: {matched_sitemap_url}")
+                break
+        except Exception as e:
+            logger.debug(f"Strategy {i} failed: {str(e)}")
+            continue
 
-    print(f"\n=== URL MATCHING ===")
-    print(f"SITEMAP_URL: {url}")
-    if matched_sitemap_url:
-        print(f"XML_SITEMAP_URL: {matched_sitemap_url}")
-        print(f"Last modified date: {last_modified}")
-    else:
-        print(f"XML_SITEMAP_URL: No matching URL found")
-    print("===================\n")
+    # Debug output (can be controlled by debug level or verbose flag)
+    # Check if verbose URL matching is enabled (we'll set this as a global variable)
+    verbose_url_matching = getattr(globals(), 'VERBOSE_URL_MATCHING', False)
+    show_debug = (logger.isEnabledFor(logging.DEBUG) or 
+                  not matched_sitemap_url or  # Always show if no match found
+                  verbose_url_matching)  # Show if verbose flag is set
+    
+    if show_debug:
+        print(f"\n=== URL MATCHING ===")
+        print(f"SITEMAP_URL: {url}")
+        if matched_sitemap_url:
+            print(f"XML_SITEMAP_URL: {matched_sitemap_url}")
+            print(f"Last modified date: {last_modified}")
+            # Show which strategy worked
+            strategy_names = [
+                "Exact match",
+                "Normalized exact match", 
+                "Domain variation match",
+                "Path-based match",
+                "Flexible substring match",
+                "Legacy substring match"
+            ]
+            for i, strategy in enumerate(matching_strategies, 1):
+                try:
+                    if strategy() == matched_sitemap_url:
+                        print(f"Matching strategy: {i}. {strategy_names[i-1]}")
+                        break
+                except:
+                    continue
+        else:
+            print(f"XML_SITEMAP_URL: No matching URL found")
+            print(f"Available XML URLs count: {len(url_last_modified_map)}")
+            # Show a few sample XML URLs for debugging
+            if len(url_last_modified_map) > 0:
+                sample_urls = list(url_last_modified_map.keys())[:3]
+                print(f"Sample XML URLs: {sample_urls}")
+        print("===================\n")
         
     return last_modified
+
+
+def _find_domain_variation_match(normalized_url, url_last_modified_map):
+    """Find match by trying www/non-www domain variations."""
+    parsed = urlparse(normalized_url)
+    domain = parsed.netloc.lower()
+    
+    if domain.startswith("www."):
+        # Try without www
+        non_www_url = normalized_url.replace(f"www.{domain[4:]}", domain[4:], 1)
+        if non_www_url in url_last_modified_map:
+            return non_www_url
+    else:
+        # Try with www
+        www_url = normalized_url.replace(domain, f"www.{domain}", 1)
+        if www_url in url_last_modified_map:
+            return www_url
+    
+    return None
+
+
+def _find_path_based_match(input_path, input_domain_no_www, url_last_modified_map):
+    """Find match based on path similarity, ignoring domain differences."""
+    for sitemap_url in url_last_modified_map.keys():
+        try:
+            parsed_sitemap = urlparse(sitemap_url)
+            sitemap_domain = parsed_sitemap.netloc.lower()
+            sitemap_path = parsed_sitemap.path.lower()
+            
+            # Remove www for domain comparison
+            sitemap_domain_no_www = sitemap_domain[4:] if sitemap_domain.startswith("www.") else sitemap_domain
+            
+            # Check if domains are related (same base domain)
+            if sitemap_domain_no_www == input_domain_no_www and sitemap_path == input_path:
+                return sitemap_url
+                
+        except Exception:
+            continue
+    
+    return None
+
+
+def _find_flexible_substring_match(normalized_url, input_domain_no_www, input_path, url_last_modified_map):
+    """Improved substring matching with domain awareness."""
+    best_match = None
+    best_score = 0
+    
+    for sitemap_url in url_last_modified_map.keys():
+        try:
+            parsed_sitemap = urlparse(sitemap_url)
+            sitemap_domain = parsed_sitemap.netloc.lower()
+            sitemap_path = parsed_sitemap.path.lower()
+            
+            # Remove www for comparison
+            sitemap_domain_no_www = sitemap_domain[4:] if sitemap_domain.startswith("www.") else sitemap_domain
+            
+            score = 0
+            
+            # Domain matching bonus
+            if sitemap_domain_no_www == input_domain_no_www:
+                score += 100
+            elif input_domain_no_www in sitemap_domain_no_www or sitemap_domain_no_www in input_domain_no_www:
+                score += 50
+            
+            # Path matching
+            if sitemap_path == input_path:
+                score += 200  # Exact path match
+            elif input_path in sitemap_path:
+                score += 100  # Input path is substring of sitemap path
+            elif sitemap_path in input_path:
+                score += 80   # Sitemap path is substring of input path
+            else:
+                # Check for common path segments
+                input_segments = [seg for seg in input_path.split('/') if seg]
+                sitemap_segments = [seg for seg in sitemap_path.split('/') if seg]
+                
+                common_segments = set(input_segments) & set(sitemap_segments)
+                if len(common_segments) > 0:
+                    score += len(common_segments) * 10
+            
+            # Only consider matches with minimum score
+            if score > best_score and score >= 150:  # Require domain match + some path similarity
+                best_score = score
+                best_match = sitemap_url
+                
+        except Exception:
+            continue
+    
+    return best_match
+
+
+def _find_legacy_substring_match(normalized_url, url_last_modified_map):
+    """Original substring matching logic as fallback."""
+    matching_urls = [sitemap_url for sitemap_url in url_last_modified_map.keys() 
+                     if normalized_url in sitemap_url or sitemap_url in normalized_url]
+    
+    return matching_urls[0] if matching_urls else None
 
 def should_process_url(url, last_modified, last_run_timestamp):
     """Decide whether a URL should be processed based on modification time."""
@@ -2055,6 +2213,12 @@ def main(args=None):
         if args.no_check_modified:
             CHECK_LAST_MODIFIED = False
             logger.info("Last modified checking disabled - will process all URLs")
+        
+        # Set verbose URL matching if requested
+        if args.verbose_url_matching:
+            global VERBOSE_URL_MATCHING
+            VERBOSE_URL_MATCHING = True
+            logger.info("Verbose URL matching enabled - will show detailed matching info")
     
     start_time = datetime.now()
     logger.info(f"=== Starting {SCRIPT_NAME} at {start_time} ===")
@@ -2407,6 +2571,8 @@ if __name__ == "__main__":
                         help="Process only XML sitemap URLs, skip HTML sitemap and RSS feeds")
     parser.add_argument("--legacy-html-parsing", action="store_true",
                         help="Use legacy HTML parsing instead of generalized Jina AI links summary")
+    parser.add_argument("--verbose-url-matching", action="store_true",
+                        help="Show detailed URL matching information for all URLs")
     parser.add_argument("--resume", action="store_true",
                         help="Resume processing by skipping URLs that already have local files")
     parser.add_argument("--test-resume", action="store_true",

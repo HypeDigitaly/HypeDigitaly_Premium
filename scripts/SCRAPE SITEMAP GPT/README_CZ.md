@@ -207,6 +207,7 @@ python scrape_sitemap_GPT.py --config web.json --debug
 ```bash
 --debug                     # Zapnout detailní debug výstup
 --no-check-modified         # Vypnout kontrolu posledních změn
+--verbose-url-matching      # Zobrazit detailní info o párování URL
 --jina-remove-selectors "CSS"  # CSS selektory k odstranění
 ```
 
