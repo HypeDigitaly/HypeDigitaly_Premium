@@ -1544,6 +1544,141 @@ def save_last_run_timestamp(timestamp_type="combined"):
         logger.error(f"Error saving {timestamp_type} timestamp: {str(e)}")
 
 # ============================================================================
+# RESUME FUNCTIONALITY
+# ============================================================================
+
+def build_local_files_cache(output_dir):
+    """Build a cache of already processed URLs from local files with multiple format support."""
+    logger.info(f"Building local files cache from {output_dir}")
+    print(f"🔄 Building local files cache...")
+    start_time = time.time()
+    
+    url_to_file_cache = {}
+    processed_files = 0
+    format_stats = {"current_format": 0, "legacy_format": 0, "filename_based": 0, "no_url_found": 0}
+    
+    if not os.path.exists(output_dir):
+        logger.info("Output directory doesn't exist, no local files to cache")
+        return {}
+    
+    # Define multiple URL extraction patterns for different file formats
+    url_patterns = [
+        # Current format (most specific first)
+        r'## 🔗 \*\*ZDROJOVÁ URL:\*\*\s*\n### \*\*(.+?)\*\*',
+        
+        # Legacy formats (broader patterns)
+        r'ZDROJOVÁ URL:\s*\n.*?(\bhttps?://[^\s\n]+)',
+        r'Source URL:\s*(\bhttps?://[^\s\n]+)',
+        r'URL:\s*(\bhttps?://[^\s\n]+)',
+        
+        # Very broad patterns for any HTTP URL in first 2KB
+        r'(\bhttps?://[^\s<>"\']+)',
+    ]
+    
+    # Scan all .txt files in output directory
+    for filename in os.listdir(output_dir):
+        if not filename.endswith('.txt'):
+            continue
+            
+        filepath = os.path.join(output_dir, filename)
+        source_url = None
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                # Read first few KB to find URL in metadata
+                content = f.read(3000)  # Read first 3KB to find metadata
+                
+                # Try each pattern in order of specificity
+                for i, pattern in enumerate(url_patterns):
+                    url_matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
+                    
+                    if url_matches:
+                        # Take the first URL that looks like it belongs to the target domain
+                        for url_candidate in url_matches:
+                            # Clean up the URL
+                            url_candidate = url_candidate.strip().rstrip('.,;)')
+                            
+                            # Basic URL validation
+                            if (url_candidate.startswith(('http://', 'https://')) and 
+                                len(url_candidate) > 10 and
+                                '.' in url_candidate):
+                                
+                                source_url = url_candidate
+                                
+                                # Track which pattern worked
+                                if i == 0:
+                                    format_stats["current_format"] += 1
+                                elif i < 4:
+                                    format_stats["legacy_format"] += 1
+                                else:
+                                    format_stats["filename_based"] += 1
+                                break
+                        
+                        if source_url:
+                            break
+                
+                # If we found a URL, add to cache
+                if source_url:
+                    url_to_file_cache[source_url] = {
+                        'filepath': filepath,
+                        'filename': filename
+                    }
+                    processed_files += 1
+                    logger.debug(f"Found URL in {filename}: {source_url}")
+                else:
+                    format_stats["no_url_found"] += 1
+                    logger.debug(f"No URL found in {filename}")
+                    
+        except Exception as e:
+            logger.warning(f"Error reading file {filepath}: {str(e)}")
+            format_stats["no_url_found"] += 1
+            continue
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"Built local files cache in {elapsed_time:.2f}s")
+    logger.info(f"Cache contains {len(url_to_file_cache)} processed URLs from {processed_files} files")
+    
+    # Log format statistics
+    total_files = sum(format_stats.values())
+    if total_files > 0:
+        logger.info(f"File format breakdown:")
+        logger.info(f"  Current format: {format_stats['current_format']} files")
+        logger.info(f"  Legacy format: {format_stats['legacy_format']} files") 
+        logger.info(f"  Filename-based: {format_stats['filename_based']} files")
+        logger.info(f"  No URL found: {format_stats['no_url_found']} files")
+        
+        print(f"✅ Local cache built: {len(url_to_file_cache)} URLs indexed in {elapsed_time:.1f}s")
+        print(f"📊 Format compatibility: {processed_files}/{total_files} files had extractable URLs")
+    
+    return url_to_file_cache
+
+
+def is_url_already_processed_locally(url, local_cache):
+    """Check if URL has already been processed based on local files cache."""
+    return url in local_cache
+
+
+def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False):
+    """Enhanced version of should_process_url that supports resume functionality."""
+    logger.debug(f"Checking if URL should be processed (with resume): {url}")
+    
+    # Step 1: Check local resume cache first (if enabled)
+    if enable_resume and local_cache is not None:
+        if is_url_already_processed_locally(url, local_cache):
+            logger.info(f"URL {url} already processed locally. Skipping (RESUME).")
+            print(f"\n=== URL PROCESSING STATUS (RESUME) ===")
+            print(f"URL: {url}")
+            print(f"Local file exists: YES")
+            print(f"Processing: SKIPPED (RESUME)")
+            print("=====================================\n")
+            return False
+        else:
+            logger.info(f"URL {url} not found in local cache. Will process.")
+    
+    # Step 2: Fall back to original timestamp-based logic
+    return should_process_url(url, last_modified, last_run_timestamp)
+
+# ============================================================================
 # FILE SAVING FUNCTIONS
 # ============================================================================
 
@@ -2179,138 +2314,3 @@ if __name__ == "__main__":
     
     # Run main function (config loading and logging setup happens inside main)
     main(args)
-
-# ============================================================================
-# RESUME FUNCTIONALITY
-# ============================================================================
-
-def build_local_files_cache(output_dir):
-    """Build a cache of already processed URLs from local files with multiple format support."""
-    logger.info(f"Building local files cache from {output_dir}")
-    print(f"🔄 Building local files cache...")
-    start_time = time.time()
-    
-    url_to_file_cache = {}
-    processed_files = 0
-    format_stats = {"current_format": 0, "legacy_format": 0, "filename_based": 0, "no_url_found": 0}
-    
-    if not os.path.exists(output_dir):
-        logger.info("Output directory doesn't exist, no local files to cache")
-        return {}
-    
-    # Define multiple URL extraction patterns for different file formats
-    url_patterns = [
-        # Current format (most specific first)
-        r'## 🔗 \*\*ZDROJOVÁ URL:\*\*\s*\n### \*\*(.+?)\*\*',
-        
-        # Legacy formats (broader patterns)
-        r'ZDROJOVÁ URL:\s*\n.*?(\bhttps?://[^\s\n]+)',
-        r'Source URL:\s*(\bhttps?://[^\s\n]+)',
-        r'URL:\s*(\bhttps?://[^\s\n]+)',
-        
-        # Very broad patterns for any HTTP URL in first 2KB
-        r'(\bhttps?://[^\s<>"\']+)',
-    ]
-    
-    # Scan all .txt files in output directory
-    for filename in os.listdir(output_dir):
-        if not filename.endswith('.txt'):
-            continue
-            
-        filepath = os.path.join(output_dir, filename)
-        source_url = None
-        
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                # Read first few KB to find URL in metadata
-                content = f.read(3000)  # Read first 3KB to find metadata
-                
-                # Try each pattern in order of specificity
-                for i, pattern in enumerate(url_patterns):
-                    url_matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
-                    
-                    if url_matches:
-                        # Take the first URL that looks like it belongs to the target domain
-                        for url_candidate in url_matches:
-                            # Clean up the URL
-                            url_candidate = url_candidate.strip().rstrip('.,;)')
-                            
-                            # Basic URL validation
-                            if (url_candidate.startswith(('http://', 'https://')) and 
-                                len(url_candidate) > 10 and
-                                '.' in url_candidate):
-                                
-                                source_url = url_candidate
-                                
-                                # Track which pattern worked
-                                if i == 0:
-                                    format_stats["current_format"] += 1
-                                elif i < 4:
-                                    format_stats["legacy_format"] += 1
-                                else:
-                                    format_stats["filename_based"] += 1
-                                break
-                        
-                        if source_url:
-                            break
-                
-                # If we found a URL, add to cache
-                if source_url:
-                    url_to_file_cache[source_url] = {
-                        'filepath': filepath,
-                        'filename': filename
-                    }
-                    processed_files += 1
-                    logger.debug(f"Found URL in {filename}: {source_url}")
-                else:
-                    format_stats["no_url_found"] += 1
-                    logger.debug(f"No URL found in {filename}")
-                    
-        except Exception as e:
-            logger.warning(f"Error reading file {filepath}: {str(e)}")
-            format_stats["no_url_found"] += 1
-            continue
-    
-    elapsed_time = time.time() - start_time
-    logger.info(f"Built local files cache in {elapsed_time:.2f}s")
-    logger.info(f"Cache contains {len(url_to_file_cache)} processed URLs from {processed_files} files")
-    
-    # Log format statistics
-    total_files = sum(format_stats.values())
-    if total_files > 0:
-        logger.info(f"File format breakdown:")
-        logger.info(f"  Current format: {format_stats['current_format']} files")
-        logger.info(f"  Legacy format: {format_stats['legacy_format']} files") 
-        logger.info(f"  Filename-based: {format_stats['filename_based']} files")
-        logger.info(f"  No URL found: {format_stats['no_url_found']} files")
-        
-        print(f"✅ Local cache built: {len(url_to_file_cache)} URLs indexed in {elapsed_time:.1f}s")
-        print(f"📊 Format compatibility: {processed_files}/{total_files} files had extractable URLs")
-    
-    return url_to_file_cache
-
-
-def is_url_already_processed_locally(url, local_cache):
-    """Check if URL has already been processed based on local files cache."""
-    return url in local_cache
-
-
-def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False):
-    """Enhanced version of should_process_url that supports resume functionality."""
-    logger.debug(f"Checking if URL should be processed (with resume): {url}")
-    
-    # Step 1: Check local resume cache first (if enabled)
-    if enable_resume and local_cache is not None:
-        if is_url_already_processed_locally(url, local_cache):
-            logger.info(f"URL {url} already processed locally. Skipping (RESUME).")
-            print(f"\n=== URL PROCESSING STATUS (RESUME) ===")
-            print(f"URL: {url}")
-            print(f"Local file exists: YES")
-            print(f"Processing: SKIPPED (RESUME)")
-            print("=====================================\n")
-            return False
-        else:
-            logger.info(f"URL {url} not found in local cache. Will process.")
-    
-    # Step 2: Fall back to original timestamp-based logic
-    return should_process_url(url, last_modified, last_run_timestamp)
