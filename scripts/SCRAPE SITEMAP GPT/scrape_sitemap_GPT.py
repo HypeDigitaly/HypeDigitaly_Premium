@@ -124,6 +124,9 @@ OUTPUT_DIR = None
 # Basic usage: python scrape_sitemap_GPT.py
 # With debug mode: python scrape_sitemap_GPT.py --debug
 # Skip last modified check: python scrape_sitemap_GPT.py --no-check-modified
+# Test resume cache: python scrape_sitemap_GPT.py --test-resume
+# Resume from crashed run: python scrape_sitemap_GPT.py --resume
+# Resume + Vector Store: python scrape_sitemap_GPT.py --resume --vector-store-id vs_abc123
 # Upload to Vector Store: python scrape_sitemap_GPT.py --vector-store-id vs_abc123
 # Upload with deduplication disabled: python scrape_sitemap_GPT.py --vector-store-id vs_abc123 --disable-deduplication
 # Custom chunking strategy: python scrape_sitemap_GPT.py --vector-store-id vs_abc123 --chunking-strategy static --max-chunk-size 1200 --chunk-overlap 200
@@ -936,7 +939,7 @@ def parse_menu(html_content):
 
     return main_menu
 
-def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timestamp=None):
+def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
     """Recursively extract links from the sitemap menu structure."""
     extracted_urls = []
     
@@ -992,23 +995,23 @@ def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timesta
                     last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
                     
                     # Check if the URL should be processed
-                    if should_process_url(absolute_url, last_modified, last_run_timestamp):
+                    if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
                         extracted_urls.append({
                             'url': absolute_url,
                             'title': link_text,
                             'path': absolute_path
                         })
                     else:
-                        logger.info(f"Skipping URL {absolute_url} as it hasn't changed since last run.")
+                        logger.info(f"Skipping URL {absolute_url} (timestamp check or already processed locally).")
 
             # Continue with submenu
             sub_menu = menu_item.find("ul", recursive=False)
             if sub_menu:
-                extracted_urls.extend(extract_links(sub_menu, current_path, url_last_modified_map, last_run_timestamp))
+                extracted_urls.extend(extract_links(sub_menu, current_path, url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume))
 
     elif menu_item.name == "ul":
         for item in menu_item.find_all("li", recursive=False):
-            extracted_urls.extend(extract_links(item, path, url_last_modified_map, last_run_timestamp))
+            extracted_urls.extend(extract_links(item, path, url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume))
     
     return extracted_urls
 
@@ -1208,7 +1211,7 @@ def parse_generic_feed(soup, rss_url):
     logger.info(f"Found {len(extracted_urls)} URLs in generic feed parsing")
     return extracted_urls
 
-def process_rss_feeds(url_last_modified_map, last_run_timestamp):
+def process_rss_feeds(url_last_modified_map, last_run_timestamp, local_files_cache=None, enable_resume=False):
     """Process all configured RSS feeds and extract URLs."""
     logger.info(f"Processing {len(RSS_FEEDS)} RSS feeds")
     
@@ -1235,10 +1238,10 @@ def process_rss_feeds(url_last_modified_map, last_run_timestamp):
             
             # For RSS feeds, we'll be more lenient with last modified check
             # since RSS items are typically recent
-            if should_process_url(url, last_modified, last_run_timestamp):
+            if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
                 filtered_urls.append(url_info)
             else:
-                logger.info(f"Skipping RSS URL {url} as it hasn't changed since last run.")
+                logger.info(f"Skipping RSS URL {url} (timestamp check or already processed locally).")
         
         all_rss_urls.extend(filtered_urls)
         
@@ -1457,7 +1460,7 @@ def should_process_url(url, last_modified, last_run_timestamp):
         
     return is_modified
 
-def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None):
+def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
     """Extract URLs from XML sitemap data for processing."""
     extracted_urls = []
     
@@ -1472,7 +1475,7 @@ def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None
             continue
         
         # Check if the URL should be processed
-        if should_process_url(url, last_modified, last_run_timestamp):
+        if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
             # Extract title from URL path as fallback
             parsed_url = urlparse(url)
             path_parts = [part for part in parsed_url.path.split('/') if part]
@@ -1488,7 +1491,7 @@ def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None
             })
             logger.info(f"Added URL from XML sitemap: {url}")
         else:
-            logger.info(f"Skipping URL {url} as it hasn't changed since last run.")
+            logger.info(f"Skipping URL {url} (timestamp check or already processed locally).")
     
     logger.info(f"Extracted {len(extracted_urls)} URLs from XML sitemap")
     return extracted_urls
@@ -1745,6 +1748,36 @@ def main(args=None):
     
     # Override config with command line arguments
     if args:
+        # Test resume functionality and exit early if requested
+        if args.test_resume:
+            print(f"🧪 Testing resume cache functionality...")
+            print(f"📁 Output directory: {OUTPUT_DIR}")
+            
+            if os.path.exists(OUTPUT_DIR):
+                test_cache = build_local_files_cache(OUTPUT_DIR)
+                print(f"\n📊 RESUME CACHE TEST RESULTS:")
+                print(f"✅ Cache would contain {len(test_cache)} URLs")
+                print(f"📁 Scanned directory: {os.path.abspath(OUTPUT_DIR)}")
+                
+                if len(test_cache) > 0:
+                    print(f"\n📝 Sample URLs found:")
+                    sample_urls = list(test_cache.keys())[:5]  # Show first 5 URLs
+                    for i, url in enumerate(sample_urls, 1):
+                        filename = test_cache[url]['filename']
+                        print(f"   {i}. {url}")
+                        print(f"      → {filename}")
+                    
+                    if len(test_cache) > 5:
+                        print(f"   ... and {len(test_cache) - 5} more URLs")
+                        
+                print(f"\n✅ Resume functionality test completed!")
+                print(f"💡 Use --resume flag to actually skip these URLs during processing")
+            else:
+                print(f"❌ Output directory does not exist: {OUTPUT_DIR}")
+                print(f"💡 Run the script normally first to create files, then test resume")
+            
+            return  # Exit early for test mode
+        
         # Override API keys if provided
         if args.jina_api_key:
             JINA_AI_API_KEY = args.jina_api_key
@@ -1826,6 +1859,14 @@ def main(args=None):
         vector_store_cache = build_vector_store_cache(vector_store_id)
         print(f"🚀 Vector Store cache built with {len(vector_store_cache)} files")
     
+    # Build local files cache for resume functionality (if enabled)
+    local_files_cache = None
+    enable_resume = args.resume if args else False
+    if enable_resume:
+        logger.info("Resume mode enabled - building local files cache...")
+        local_files_cache = build_local_files_cache(OUTPUT_DIR)
+        print(f"🔄 Resume cache built with {len(local_files_cache)} processed URLs")
+    
     # Determine processing mode
     rss_only = args.rss_only if args else False
     sitemap_only = args.sitemap_only if args else False
@@ -1870,7 +1911,7 @@ def main(args=None):
                 
                 # Step 4: Extract URLs from XML sitemap
                 logger.info("Step 4: Extracting URLs from XML sitemap")
-                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                 
                 logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
             elif SITEMAP_URL and SITEMAP_URL.strip():
@@ -1885,7 +1926,7 @@ def main(args=None):
                     # Fallback to XML-only processing
                     url_last_modified_map = fetch_xml_sitemap()
                     logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
-                    extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                    extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                     logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
                 else:
                     # Step 2: Parse the sitemap menu
@@ -1898,7 +1939,7 @@ def main(args=None):
                         # Fallback to XML-only processing
                         url_last_modified_map = fetch_xml_sitemap()
                         logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
-                        extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                        extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                         logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
                     else:
                         # Step 3: Fetch XML sitemap data
@@ -1909,7 +1950,7 @@ def main(args=None):
                         # Step 4: Extract URLs from HTML sitemap
                         logger.info("Step 4: Extracting URLs from HTML sitemap")
                         extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
-                                                     last_run_timestamp=last_run_timestamp)
+                                                     last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume)
                         
                         logger.info(f"Found {len(extracted_urls)} URLs from sitemap")
             else:
@@ -1923,7 +1964,7 @@ def main(args=None):
                 
                 # Step 4: Extract URLs from XML sitemap
                 logger.info("Step 4: Extracting URLs from XML sitemap")
-                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp)
+                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                 
                 logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
         else:
@@ -1934,7 +1975,7 @@ def main(args=None):
         # Step 4.5: Process RSS feeds (unless sitemap-only or xml-only mode)
         if not sitemap_only and not xml_only and RSS_FEEDS:
             logger.info("Step 4.5: Processing RSS feeds")
-            rss_urls = process_rss_feeds(url_last_modified_map, last_run_timestamp)
+            rss_urls = process_rss_feeds(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
             extracted_urls.extend(rss_urls)
             logger.info(f"Added {len(rss_urls)} URLs from RSS feeds")
         elif sitemap_only:
@@ -2043,6 +2084,10 @@ def main(args=None):
         else:
             logger.info("Processing mode: Combined (RSS + Sitemap)")
             
+        # Log resume mode
+        if enable_resume:
+            logger.info(f"Resume mode: ENABLED - Skipped {len(local_files_cache) if local_files_cache else 0} already processed URLs")
+            
         logger.info(f"RSS feeds processed: {len(RSS_FEEDS) if not sitemap_only and not xml_only else 0}")
         if vector_store_id:
             logger.info(f"Vector Store uploads enabled: {vector_store_id}")
@@ -2066,6 +2111,8 @@ def main(args=None):
         print(f"⚙️  Config file: {config_file}")
         if vector_store_id:
             print(f"🔄 Vector Store uploads: {vector_store_id}")
+        if enable_resume:
+            print(f"🔄 Resume mode: ENABLED - Skipped {len(local_files_cache) if local_files_cache else 0} already processed URLs")
         
     except Exception as e:
         logger.error(f"Critical error in main function: {str(e)}", exc_info=True)
@@ -2105,6 +2152,10 @@ if __name__ == "__main__":
                         help="Process only sitemap, skip RSS feeds processing")
     parser.add_argument("--xml-only", action="store_true",
                         help="Process only XML sitemap URLs, skip HTML sitemap and RSS feeds")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume processing by skipping URLs that already have local files")
+    parser.add_argument("--test-resume", action="store_true",
+                        help="Test resume cache building and show statistics without processing")
     
     # Vector Store options
     parser.add_argument("--vector-store-id", type=str,
@@ -2128,3 +2179,138 @@ if __name__ == "__main__":
     
     # Run main function (config loading and logging setup happens inside main)
     main(args)
+
+# ============================================================================
+# RESUME FUNCTIONALITY
+# ============================================================================
+
+def build_local_files_cache(output_dir):
+    """Build a cache of already processed URLs from local files with multiple format support."""
+    logger.info(f"Building local files cache from {output_dir}")
+    print(f"🔄 Building local files cache...")
+    start_time = time.time()
+    
+    url_to_file_cache = {}
+    processed_files = 0
+    format_stats = {"current_format": 0, "legacy_format": 0, "filename_based": 0, "no_url_found": 0}
+    
+    if not os.path.exists(output_dir):
+        logger.info("Output directory doesn't exist, no local files to cache")
+        return {}
+    
+    # Define multiple URL extraction patterns for different file formats
+    url_patterns = [
+        # Current format (most specific first)
+        r'## 🔗 \*\*ZDROJOVÁ URL:\*\*\s*\n### \*\*(.+?)\*\*',
+        
+        # Legacy formats (broader patterns)
+        r'ZDROJOVÁ URL:\s*\n.*?(\bhttps?://[^\s\n]+)',
+        r'Source URL:\s*(\bhttps?://[^\s\n]+)',
+        r'URL:\s*(\bhttps?://[^\s\n]+)',
+        
+        # Very broad patterns for any HTTP URL in first 2KB
+        r'(\bhttps?://[^\s<>"\']+)',
+    ]
+    
+    # Scan all .txt files in output directory
+    for filename in os.listdir(output_dir):
+        if not filename.endswith('.txt'):
+            continue
+            
+        filepath = os.path.join(output_dir, filename)
+        source_url = None
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                # Read first few KB to find URL in metadata
+                content = f.read(3000)  # Read first 3KB to find metadata
+                
+                # Try each pattern in order of specificity
+                for i, pattern in enumerate(url_patterns):
+                    url_matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
+                    
+                    if url_matches:
+                        # Take the first URL that looks like it belongs to the target domain
+                        for url_candidate in url_matches:
+                            # Clean up the URL
+                            url_candidate = url_candidate.strip().rstrip('.,;)')
+                            
+                            # Basic URL validation
+                            if (url_candidate.startswith(('http://', 'https://')) and 
+                                len(url_candidate) > 10 and
+                                '.' in url_candidate):
+                                
+                                source_url = url_candidate
+                                
+                                # Track which pattern worked
+                                if i == 0:
+                                    format_stats["current_format"] += 1
+                                elif i < 4:
+                                    format_stats["legacy_format"] += 1
+                                else:
+                                    format_stats["filename_based"] += 1
+                                break
+                        
+                        if source_url:
+                            break
+                
+                # If we found a URL, add to cache
+                if source_url:
+                    url_to_file_cache[source_url] = {
+                        'filepath': filepath,
+                        'filename': filename
+                    }
+                    processed_files += 1
+                    logger.debug(f"Found URL in {filename}: {source_url}")
+                else:
+                    format_stats["no_url_found"] += 1
+                    logger.debug(f"No URL found in {filename}")
+                    
+        except Exception as e:
+            logger.warning(f"Error reading file {filepath}: {str(e)}")
+            format_stats["no_url_found"] += 1
+            continue
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"Built local files cache in {elapsed_time:.2f}s")
+    logger.info(f"Cache contains {len(url_to_file_cache)} processed URLs from {processed_files} files")
+    
+    # Log format statistics
+    total_files = sum(format_stats.values())
+    if total_files > 0:
+        logger.info(f"File format breakdown:")
+        logger.info(f"  Current format: {format_stats['current_format']} files")
+        logger.info(f"  Legacy format: {format_stats['legacy_format']} files") 
+        logger.info(f"  Filename-based: {format_stats['filename_based']} files")
+        logger.info(f"  No URL found: {format_stats['no_url_found']} files")
+        
+        print(f"✅ Local cache built: {len(url_to_file_cache)} URLs indexed in {elapsed_time:.1f}s")
+        print(f"📊 Format compatibility: {processed_files}/{total_files} files had extractable URLs")
+    
+    return url_to_file_cache
+
+
+def is_url_already_processed_locally(url, local_cache):
+    """Check if URL has already been processed based on local files cache."""
+    return url in local_cache
+
+
+def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False):
+    """Enhanced version of should_process_url that supports resume functionality."""
+    logger.debug(f"Checking if URL should be processed (with resume): {url}")
+    
+    # Step 1: Check local resume cache first (if enabled)
+    if enable_resume and local_cache is not None:
+        if is_url_already_processed_locally(url, local_cache):
+            logger.info(f"URL {url} already processed locally. Skipping (RESUME).")
+            print(f"\n=== URL PROCESSING STATUS (RESUME) ===")
+            print(f"URL: {url}")
+            print(f"Local file exists: YES")
+            print(f"Processing: SKIPPED (RESUME)")
+            print("=====================================\n")
+            return False
+        else:
+            logger.info(f"URL {url} not found in local cache. Will process.")
+    
+    # Step 2: Fall back to original timestamp-based logic
+    return should_process_url(url, last_modified, last_run_timestamp)
