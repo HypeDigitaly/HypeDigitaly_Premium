@@ -368,6 +368,12 @@ def get_html_content_via_jina(url, remove_selectors=None):
             logger.info(f"Successfully fetched HTML content from {url}")
             logger.info(f"Found {len(links_data)} links in links summary")
             
+            # Debug: Log structure of links data
+            if logger.isEnabledFor(logging.DEBUG) and len(links_data) > 0:
+                logger.debug(f"Links data structure: {type(links_data)}")
+                logger.debug(f"First link structure: {type(links_data[0])}")
+                logger.debug(f"Sample links: {links_data[:2]}")
+            
             if content:
                 return content, data["data"]
             else:
@@ -943,19 +949,32 @@ def extract_links_from_jina_summary(jina_data, url_last_modified_map={}, last_ru
     
     if not links_data:
         logger.warning("No links found in Jina AI response")
+        logger.debug(f"Available keys in jina_data: {list(jina_data.keys())}")
         return extracted_urls
     
     logger.info(f"Processing {len(links_data)} links from Jina AI summary")
     
+    # Debug: Log the structure of the first few links to understand the format
+    if logger.isEnabledFor(logging.DEBUG) and len(links_data) > 0:
+        logger.debug(f"Structure of first link: {type(links_data[0])}")
+        logger.debug(f"First link content: {links_data[0]}")
+        if len(links_data) > 1:
+            logger.debug(f"Second link content: {links_data[1]}")
+    
     for i, link_info in enumerate(links_data, 1):
         try:
+            # Debug: Check what type link_info actually is
+            if not isinstance(link_info, dict):
+                logger.error(f"Link {i} is not a dict but {type(link_info)}: {link_info}")
+                continue
+            
             # Extract URL and text from link info
             url = link_info.get("url", "").strip()
             text = link_info.get("text", "").strip()
             
             # Skip if no URL
             if not url:
-                logger.debug(f"Skipping link {i}: No URL found")
+                logger.debug(f"Skipping link {i}: No URL found in {link_info}")
                 continue
             
             # Make URL absolute if it's relative
@@ -999,6 +1018,8 @@ def extract_links_from_jina_summary(jina_data, url_last_modified_map={}, last_ru
                 
         except Exception as e:
             logger.error(f"Error processing link {i}: {str(e)}")
+            logger.error(f"Link data type: {type(link_info)}")
+            logger.error(f"Link data content: {link_info}")
             continue
     
     logger.info(f"Successfully extracted {len(extracted_urls)} URLs from Jina AI links summary")
@@ -2352,9 +2373,22 @@ def main(args=None):
                         
                         logger.info(f"Found {len(extracted_urls)} URLs from HTML sitemap (generalized approach)")
                         
-                        # Optional: Fallback to legacy parsing if no links found
+                        # Enhanced fallback logic for when generalized approach fails
                         if len(extracted_urls) == 0:
-                            logger.warning("No links found with generalized approach, trying legacy parsing...")
+                            logger.warning("No links found with generalized approach, analyzing the issue...")
+                            
+                            # Check if we have links data at all
+                            links_data = jina_data.get("links", [])
+                            if not links_data:
+                                logger.warning("No 'links' field in Jina AI response, trying legacy parsing...")
+                            else:
+                                logger.warning(f"Found {len(links_data)} links but none were processed successfully")
+                                # Log some sample links for debugging
+                                for i, link in enumerate(links_data[:3], 1):
+                                    logger.debug(f"Sample link {i}: {type(link)} - {link}")
+                            
+                            # Fallback to legacy parsing
+                            logger.info("Attempting legacy HTML parsing as fallback...")
                             main_menu = parse_menu(html_content)
                             if main_menu:
                                 extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
