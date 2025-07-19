@@ -130,6 +130,8 @@ OUTPUT_DIR = None
 # Upload to Vector Store: python scrape_sitemap_GPT.py --vector-store-id vs_abc123
 # Upload with deduplication disabled: python scrape_sitemap_GPT.py --vector-store-id vs_abc123 --disable-deduplication
 # Custom chunking strategy: python scrape_sitemap_GPT.py --vector-store-id vs_abc123 --chunking-strategy static --max-chunk-size 1200 --chunk-overlap 200
+# Legacy HTML parsing: python scrape_sitemap_GPT.py --legacy-html-parsing
+# Generalized HTML parsing (default): python scrape_sitemap_GPT.py
 #
 # OUTPUT: Each .txt file now includes metadata header with:
 # - Source URL, title, navigation path, last modified date
@@ -332,13 +334,14 @@ def sanitize_filename(filename):
 # ============================================================================
 
 def get_html_content_via_jina(url, remove_selectors=None):
-    """Fetch HTML content using Jina AI API."""
-    api_url = f"https://r.jina.ai/{url}"
+    """Fetch HTML content using Jina AI API with links summary for sitemap processing."""
+    api_url = f"https://eu-r-beta.jina.ai/{url}"
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
         "X-Return-Format": "html",
-        "X-Engine": "browser"
+        "X-Engine": "browser",
+        "X-With-Links-Summary": "all"
     }
     
     # Přidání CSS selektorů pro odstranění nežádoucích částí stránky
@@ -347,7 +350,7 @@ def get_html_content_via_jina(url, remove_selectors=None):
         headers["X-Remove-Selector"] = selectors
         logger.debug(f"Using remove selectors for HTML: {selectors}")
     
-    logger.info(f"Fetching HTML content from: {url}")
+    logger.info(f"Fetching HTML content with links summary from: {url}")
     
     try:
         response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -356,8 +359,12 @@ def get_html_content_via_jina(url, remove_selectors=None):
         data = response.json()
         if response.status_code == 200 and data.get("data"):
             content = data["data"].get("html", "")
+            links_data = data["data"].get("links", [])
+            
+            logger.info(f"Successfully fetched HTML content from {url}")
+            logger.info(f"Found {len(links_data)} links in links summary")
+            
             if content:
-                logger.info(f"Successfully fetched HTML content from {url}")
                 return content, data["data"]
             else:
                 logger.error(f"Jina API returned successful status but HTML content is missing for {url}")
@@ -910,8 +917,97 @@ def upload_and_add_to_vector_store(filepath, vector_store_id, url=None, title=No
 # SITEMAP PARSING FUNCTIONS
 # ============================================================================
 
+def extract_links_from_jina_summary(jina_data, url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
+    """
+    Extract and process links from Jina AI links summary data.
+    This is a generalized approach that works with any HTML sitemap structure.
+    
+    Args:
+        jina_data (dict): Full data response from Jina AI API
+        url_last_modified_map (dict): URL to last modified date mapping from XML sitemap
+        last_run_timestamp (datetime): Last run timestamp for filtering
+        local_files_cache (dict): Cache of already processed URLs for resume functionality
+        enable_resume (bool): Whether resume functionality is enabled
+    
+    Returns:
+        list: List of extracted URL dictionaries with metadata
+    """
+    logger.info("Extracting links from Jina AI links summary (generalized approach)")
+    
+    extracted_urls = []
+    links_data = jina_data.get("links", [])
+    
+    if not links_data:
+        logger.warning("No links found in Jina AI response")
+        return extracted_urls
+    
+    logger.info(f"Processing {len(links_data)} links from Jina AI summary")
+    
+    for i, link_info in enumerate(links_data, 1):
+        try:
+            # Extract URL and text from link info
+            url = link_info.get("url", "").strip()
+            text = link_info.get("text", "").strip()
+            
+            # Skip if no URL
+            if not url:
+                logger.debug(f"Skipping link {i}: No URL found")
+                continue
+            
+            # Make URL absolute if it's relative
+            absolute_url = urljoin(BASE_URL, url)
+            
+            # Skip if URL doesn't belong to our domain
+            parsed_url = urlparse(absolute_url)
+            if parsed_url.netloc not in [BASE_NETLOC, NON_WWW_BASE_NETLOC]:
+                logger.debug(f"Skipping external URL: {absolute_url}")
+                continue
+            
+            # Check if URL is blacklisted
+            if absolute_url in BLACKLISTED_URLS:
+                logger.info(f"URL {absolute_url} is blacklisted. Skipping.")
+                continue
+            
+            # Use text as title, fallback to URL path if no text
+            title = text if text else parsed_url.path.split('/')[-1] or 'Homepage'
+            
+            # Create a simple path for sitemap context
+            path = f"HTML Sitemap > {title}"
+            
+            logger.info(f"\n=== Processing URL {i}/{len(links_data)}: {absolute_url} ===")
+            logger.info(f"Title: {title}")
+            logger.info(f"Path: {path}")
+            
+            # Find last modified date from XML sitemap
+            last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
+            
+            # Check if the URL should be processed
+            if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
+                extracted_urls.append({
+                    'url': absolute_url,
+                    'title': title,
+                    'path': path,
+                    'jina_link_data': link_info  # Keep original Jina data for debugging
+                })
+                logger.info(f"✅ Added URL: {absolute_url}")
+            else:
+                logger.info(f"⏭️  Skipping URL {absolute_url} (timestamp check or already processed locally).")
+                
+        except Exception as e:
+            logger.error(f"Error processing link {i}: {str(e)}")
+            continue
+    
+    logger.info(f"Successfully extracted {len(extracted_urls)} URLs from Jina AI links summary")
+    return extracted_urls
+
 def parse_menu(html_content):
-    """Parse the HTML sitemap to find the main menu structure."""
+    """
+    DEPRECATED: Legacy HTML sitemap parsing function.
+    This function is kept for backward compatibility but is no longer recommended.
+    Use extract_links_from_jina_summary() for generalized sitemap processing.
+    """
+    logger.warning("Using DEPRECATED parse_menu function. Consider using extract_links_from_jina_summary() instead.")
+    
     soup = BeautifulSoup(html_content, "html.parser")
     
     selectors_to_try = [
@@ -2051,10 +2147,10 @@ def main(args=None):
                 logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
             elif SITEMAP_URL and SITEMAP_URL.strip():
                 # Normal sitemap processing with HTML sitemap (only if URL is provided)
-                # Step 1: Get HTML sitemap content
-                logger.info(f"Step 1: Fetching HTML sitemap from {SITEMAP_URL}")
-                html_content, _ = get_html_content_via_jina(SITEMAP_URL, remove_selectors)
-                if not html_content:
+                # Step 1: Get HTML sitemap content with Jina AI links summary
+                logger.info(f"Step 1: Fetching HTML sitemap with links summary from {SITEMAP_URL}")
+                html_content, jina_data = get_html_content_via_jina(SITEMAP_URL, remove_selectors)
+                if not html_content or not jina_data:
                     logger.error(f"Failed to get HTML sitemap content from {SITEMAP_URL}")
                     logger.info("Falling back to XML-only processing...")
                     
@@ -2064,30 +2160,45 @@ def main(args=None):
                     extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                     logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
                 else:
-                    # Step 2: Parse the sitemap menu
-                    logger.info("Step 2: Parsing sitemap menu structure")
-                    main_menu = parse_menu(html_content)
-                    if not main_menu:
-                        logger.error("Failed to find main menu in sitemap")
-                        logger.info("Falling back to XML-only processing...")
-                        
-                        # Fallback to XML-only processing
-                        url_last_modified_map = fetch_xml_sitemap()
-                        logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
-                        extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
-                        logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
+                    # Step 2: Fetch XML sitemap data for last modified dates
+                    logger.info("Step 2: Fetching XML sitemap for last modified dates")
+                    url_last_modified_map = fetch_xml_sitemap()
+                    logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                    
+                    # Step 3: Choose parsing approach based on arguments
+                    if args and args.legacy_html_parsing:
+                        # Use legacy HTML parsing approach
+                        logger.info("Step 3: Using legacy HTML sitemap parsing (as requested)")
+                        main_menu = parse_menu(html_content)
+                        if main_menu:
+                            extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
+                                                         last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume)
+                            logger.info(f"Found {len(extracted_urls)} URLs from legacy parsing")
+                        else:
+                            logger.error("Legacy parsing failed, falling back to XML-only")
+                            extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                     else:
-                        # Step 3: Fetch XML sitemap data
-                        logger.info("Step 3: Fetching XML sitemap for last modified dates")
-                        url_last_modified_map = fetch_xml_sitemap()
-                        logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
+                        # Use new generalized Jina AI links summary approach (DEFAULT)
+                        logger.info("Step 3: Extracting URLs from Jina AI links summary (generalized approach)")
+                        extracted_urls = extract_links_from_jina_summary(jina_data, 
+                                                                       url_last_modified_map=url_last_modified_map, 
+                                                                       last_run_timestamp=last_run_timestamp, 
+                                                                       local_files_cache=local_files_cache, 
+                                                                       enable_resume=enable_resume)
                         
-                        # Step 4: Extract URLs from HTML sitemap
-                        logger.info("Step 4: Extracting URLs from HTML sitemap")
-                        extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
-                                                     last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume)
+                        logger.info(f"Found {len(extracted_urls)} URLs from HTML sitemap (generalized approach)")
                         
-                        logger.info(f"Found {len(extracted_urls)} URLs from sitemap")
+                        # Optional: Fallback to legacy parsing if no links found
+                        if len(extracted_urls) == 0:
+                            logger.warning("No links found with generalized approach, trying legacy parsing...")
+                            main_menu = parse_menu(html_content)
+                            if main_menu:
+                                extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
+                                                             last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume)
+                                logger.info(f"Found {len(extracted_urls)} URLs from legacy parsing")
+                            else:
+                                logger.warning("Legacy parsing also failed, falling back to XML-only")
+                                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
             else:
                 # No HTML sitemap URL provided, use XML-only processing
                 logger.info("No HTML sitemap URL provided, using XML-only processing")
@@ -2244,6 +2355,13 @@ def main(args=None):
             print(f"📡 RSS feeds processed: {len(RSS_FEEDS)}")
             
         print(f"⚙️  Config file: {config_file}")
+        
+        # Print HTML parsing mode
+        if args and args.legacy_html_parsing:
+            print(f"🔧 HTML parsing: Legacy (BeautifulSoup selectors)")
+        else:
+            print(f"🚀 HTML parsing: Generalized (Jina AI links summary)")
+            
         if vector_store_id:
             print(f"🔄 Vector Store uploads: {vector_store_id}")
         if enable_resume:
@@ -2287,6 +2405,8 @@ if __name__ == "__main__":
                         help="Process only sitemap, skip RSS feeds processing")
     parser.add_argument("--xml-only", action="store_true",
                         help="Process only XML sitemap URLs, skip HTML sitemap and RSS feeds")
+    parser.add_argument("--legacy-html-parsing", action="store_true",
+                        help="Use legacy HTML parsing instead of generalized Jina AI links summary")
     parser.add_argument("--resume", action="store_true",
                         help="Resume processing by skipping URLs that already have local files")
     parser.add_argument("--test-resume", action="store_true",
