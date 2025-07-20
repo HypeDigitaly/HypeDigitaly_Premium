@@ -1005,7 +1005,7 @@ def extract_links_from_jina_summary(jina_data, url_last_modified_map={}, last_ru
             last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
             
             # Check if the URL should be processed
-            if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
+            if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
                 extracted_urls.append({
                     'url': absolute_url,
                     'title': title,
@@ -1116,7 +1116,7 @@ def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timesta
                     last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
                     
                     # Check if the URL should be processed
-                    if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
+                    if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
                         extracted_urls.append({
                             'url': absolute_url,
                             'title': link_text,
@@ -1194,8 +1194,12 @@ def parse_atom_feed(soup, rss_url):
                     title_elem = entry.find('title')
                     title = title_elem.text.strip() if title_elem else 'No title'
                     
-                    # Extract publication date
-                    published_elem = entry.find('published') or entry.find('updated')
+                    # Extract publication date - try multiple field names
+                    published_elem = (entry.find('published') or 
+                                    entry.find('updated') or 
+                                    entry.find('dc:date') or 
+                                    entry.find('dcterms:created') or 
+                                    entry.find('dcterms:modified'))
                     published = published_elem.text.strip() if published_elem else None
                     
                     # Extract summary
@@ -1243,8 +1247,13 @@ def parse_rss_2_0_feed(soup, rss_url):
                     title_elem = item.find('title')
                     title = title_elem.text.strip() if title_elem else 'No title'
                     
-                    # Extract publication date
-                    published_elem = item.find('pubDate')
+                    # Extract publication date - try multiple field names
+                    published_elem = (item.find('pubDate') or 
+                                    item.find('dc:date') or 
+                                    item.find('dcterms:created') or 
+                                    item.find('dcterms:modified') or
+                                    item.find('published') or
+                                    item.find('createdDate'))
                     published = published_elem.text.strip() if published_elem else None
                     
                     # Extract description
@@ -1344,7 +1353,7 @@ def process_rss_feeds(url_last_modified_map, last_run_timestamp, local_files_cac
         # Parse the RSS feed
         feed_urls = parse_rss_feed(rss_url)
         
-        # Filter URLs based on last modified check if available
+        # Filter URLs based on RSS-specific timestamp checking
         filtered_urls = []
         for url_info in feed_urls:
             url = url_info['url']
@@ -1354,12 +1363,11 @@ def process_rss_feeds(url_last_modified_map, last_run_timestamp, local_files_cac
                 logger.info(f"RSS URL {url} is blacklisted. Skipping.")
                 continue
             
-            # Find last modified date from sitemap.xml (if available)
-            last_modified = find_url_last_modified(url, url_last_modified_map)
+            # Get RSS published date from the feed item
+            rss_published_date = url_info.get('published')
             
-            # For RSS feeds, we'll be more lenient with last modified check
-            # since RSS items are typically recent
-            if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
+            # Use RSS-specific processing logic instead of XML sitemap matching
+            if should_process_url_with_resume(url, None, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=rss_published_date):
                 filtered_urls.append(url_info)
             else:
                 logger.info(f"Skipping RSS URL {url} (timestamp check or already processed locally).")
@@ -1735,6 +1743,90 @@ def should_process_url(url, last_modified, last_run_timestamp):
         
     return is_modified
 
+def should_process_rss_url(url, rss_published_date, last_run_timestamp):
+    """Decide whether an RSS URL should be processed based on its RSS publication date."""
+    logger.debug(f"Checking if RSS URL should be processed: {url}")
+    
+    # If checking is disabled, always process
+    if not CHECK_LAST_MODIFIED:
+        logger.info(f"CHECK_LAST_MODIFIED is False. Processing RSS URL {url}")
+        print(f"\n=== RSS URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"CHECK_LAST_MODIFIED is disabled")
+        print(f"Processing: WILL PROCEED")
+        print("=================================\n")
+        return True
+    
+    # If it's the first run, always process
+    if not last_run_timestamp:
+        logger.info(f"No last run timestamp. Processing RSS URL {url}")
+        print(f"\n=== RSS URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"Last Run Timestamp: None (first run)")
+        print(f"Processing: WILL PROCEED")
+        print("=================================\n")
+        return True
+    
+    # Parse RSS published date if it's a string
+    published_date = None
+    if rss_published_date:
+        if isinstance(rss_published_date, str):
+            # Try to parse the RSS date string
+            try:
+                if dateutil_parser:
+                    published_date = dateutil_parser.parse(rss_published_date)
+                else:
+                    # Fallback parsing for common RSS date formats
+                    import email.utils
+                    try:
+                        published_date = datetime.fromtimestamp(email.utils.mktime_tz(email.utils.parsedate_tz(rss_published_date)))
+                    except:
+                        logger.warning(f"Could not parse RSS published date: {rss_published_date}")
+                        # If we can't parse the date, process the item to be safe
+                        logger.info(f"Unable to parse RSS date, processing RSS URL {url} to be safe")
+                        return True
+            except Exception as e:
+                logger.warning(f"Error parsing RSS published date {rss_published_date}: {str(e)}")
+                # If we can't parse the date, process the item to be safe
+                logger.info(f"Unable to parse RSS date, processing RSS URL {url} to be safe")
+                return True
+        else:
+            published_date = rss_published_date
+    
+    # If no published date found, process to be safe
+    if published_date is None:
+        logger.info(f"No RSS published date found for {url}. Processing to be safe.")
+        print(f"\n=== RSS URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"RSS Published: Unknown")
+        print(f"Last Run: {last_run_timestamp}")
+        print(f"Processing: WILL PROCEED (safety)")
+        print("=================================\n")
+        return True
+
+    # Convert to UTC for comparison
+    if published_date.tzinfo is None:
+        published_date_utc = published_date.replace(tzinfo=timezone.utc)
+    else:
+        published_date_utc = published_date.astimezone(timezone.utc)
+        
+    is_newer = published_date_utc > last_run_timestamp
+    
+    print(f"\n=== RSS URL PROCESSING STATUS ===")
+    print(f"URL: {url}")
+    print(f"RSS Published: {published_date}")
+    print(f"Last Run: {last_run_timestamp}")
+    print(f"Is Published Since Last Run: {'YES' if is_newer else 'NO'}")
+    print(f"Processing: {'WILL PROCEED' if is_newer else 'SKIPPED'}")
+    print("=================================\n")
+    
+    if is_newer:
+        logger.info(f"RSS URL {url} was published after last run. Processing.")
+    else:
+        logger.info(f"RSS URL {url} was published before last run. Skipping.")
+        
+    return is_newer
+
 def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
     """Extract URLs from XML sitemap data for processing."""
     extracted_urls = []
@@ -1750,7 +1842,7 @@ def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None
             continue
         
         # Check if the URL should be processed
-        if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume):
+        if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
             # Extract title from URL path as fallback
             parsed_url = urlparse(url)
             path_parts = [part for part in parsed_url.path.split('/') if part]
@@ -1933,8 +2025,8 @@ def is_url_already_processed_locally(url, local_cache):
     return url in local_cache
 
 
-def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False):
-    """Enhanced version of should_process_url that supports resume functionality."""
+def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None):
+    """Enhanced version of should_process_url that supports resume functionality and RSS-specific handling."""
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
     
     # Step 1: Check local resume cache first (if enabled)
@@ -1950,7 +2042,11 @@ def should_process_url_with_resume(url, last_modified, last_run_timestamp, local
         else:
             logger.info(f"URL {url} not found in local cache. Will process.")
     
-    # Step 2: Fall back to original timestamp-based logic
+    # Step 2: Special handling for RSS URLs with published dates
+    if rss_published_date is not None:
+        return should_process_rss_url(url, rss_published_date, last_run_timestamp)
+    
+    # Step 3: Fall back to original timestamp-based logic for regular URLs
     return should_process_url(url, last_modified, last_run_timestamp)
 
 # ============================================================================
