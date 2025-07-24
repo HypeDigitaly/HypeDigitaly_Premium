@@ -360,7 +360,7 @@ def get_html_content_via_jina(url, remove_selectors=None):
         
         # NOVÉ: Logování celé HTML response pro kontrolu sitemap API odpovědi
         logger.info("=== CELÁ HTML RESPONSE Z JINA AI API PRO SITEMAP ===")
-        logger.info(f"Full HTML Response (first 2000 chars): {response.text[:2000]}...")
+        logger.info(f"Full HTML Response (complete): {response.text}")
         logger.info("=== KONEC HTML RESPONSE ===")
         
         if response.status_code == 200 and response.text:
@@ -854,10 +854,11 @@ def delete_vector_store_file(vector_store_id, file_id):
         return False
 
 
-def build_vector_store_cache(vector_store_id):
+def build_vector_store_cache(vector_store_id, timeout_seconds=300):
     """Build a fast lookup cache of all files in Vector Store with their metadata."""
     logger.info(f"Building Vector Store cache for {vector_store_id}")
     print(f"🔄 Building Vector Store cache...")
+    print(f"⏱️  Cache build timeout: {timeout_seconds}s (5 minutes)")
     start_time = time.time()
     
     # Get all files in vector store
@@ -879,14 +880,28 @@ def build_vector_store_cache(vector_store_id):
         if not file_id:
             continue
             
+        # Check timeout
+        elapsed_time = time.time() - start_time
+        if elapsed_time > timeout_seconds:
+            logger.warning(f"Vector Store cache build timed out after {elapsed_time:.1f}s")
+            print(f"⏰ Cache build timed out after {elapsed_time:.1f}s")
+            print(f"📊 Processed {i-1}/{len(files)} files before timeout")
+            print(f"💡 Using partial cache with {len(url_to_file_cache)} entries")
+            break
+            
         # Progress indicator for large Vector Stores
         if len(files) > 10 and i % max(1, len(files) // 10) == 0:
             progress = (i / len(files)) * 100
-            print(f"📊 Cache progress: {progress:.0f}% ({i}/{len(files)})")
+            elapsed = time.time() - start_time
+            print(f"📊 Cache progress: {progress:.0f}% ({i}/{len(files)}) - {elapsed:.1f}s elapsed")
             
         # Get file attributes (this is the expensive operation)
-        attributes = get_vector_store_file_attributes(vector_store_id, file_id)
-        metadata_fetch_count += 1
+        try:
+            attributes = get_vector_store_file_attributes(vector_store_id, file_id)
+            metadata_fetch_count += 1
+        except Exception as e:
+            logger.error(f"Failed to get attributes for file {file_id}: {str(e)}")
+            continue
         
         source_url = attributes.get('source_url')
         if source_url:
@@ -2443,10 +2458,16 @@ def main(args=None):
     
     # Build Vector Store cache for fast lookups (only if using vector store)
     vector_store_cache = None
-    if vector_store_id and deduplication_enabled:
+    skip_cache = args.skip_vector_cache if args else False
+    
+    if vector_store_id and deduplication_enabled and not skip_cache:
         logger.info("Building Vector Store cache for optimized deduplication...")
-        vector_store_cache = build_vector_store_cache(vector_store_id)
+        vector_store_cache = build_vector_store_cache(vector_store_id, timeout_seconds=300)  # 5 minute timeout
         print(f"🚀 Vector Store cache built with {len(vector_store_cache)} files")
+    elif skip_cache and vector_store_id:
+        logger.info("Skipping Vector Store cache build (--skip-vector-cache enabled)")
+        print(f"⚡ Skipping Vector Store cache build for faster startup")
+        print(f"⚠️  Deduplication will use slower API lookups")
     
     # Build local files cache for resume functionality (if enabled)
     local_files_cache = None
@@ -2780,6 +2801,8 @@ if __name__ == "__main__":
                         help="OpenAI Vector Store ID to upload processed files to")
     parser.add_argument("--disable-deduplication", action="store_true",
                         help="Disable deduplication (allow duplicate files for same URL)")
+    parser.add_argument("--skip-vector-cache", action="store_true",
+                        help="Skip Vector Store cache building (faster but no deduplication)")
     parser.add_argument("--chunking-strategy", type=str, choices=["auto", "static"],
                         help="Chunking strategy for Vector Store")
     parser.add_argument("--max-chunk-size", type=int,
