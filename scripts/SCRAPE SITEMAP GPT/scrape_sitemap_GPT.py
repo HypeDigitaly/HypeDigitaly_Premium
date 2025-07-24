@@ -338,14 +338,12 @@ def sanitize_filename(filename):
 # ============================================================================
 
 def get_html_content_via_jina(url, remove_selectors=None):
-    """Fetch HTML content using Jina AI API with links summary for sitemap processing."""
+    """Fetch HTML content using Jina AI API for sitemap processing."""
     api_url = f"https://eu-r-beta.jina.ai/{url}"
     headers = {
-        "Accept": "application/json",
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
         "X-Return-Format": "html",
-        "X-Engine": "browser",
-        "X-With-Links-Summary": "all"
+        "X-Engine": "browser"
     }
     
     # Přidání CSS selektorů pro odstranění nežádoucích částí stránky
@@ -360,39 +358,118 @@ def get_html_content_via_jina(url, remove_selectors=None):
         response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
-        data = response.json()
-        if response.status_code == 200 and data.get("data"):
-            content = data["data"].get("html", "")
-            links_data = data["data"].get("links", [])
-            
+        # NOVÉ: Logování celé HTML response pro kontrolu sitemap API odpovědi
+        logger.info("=== CELÁ HTML RESPONSE Z JINA AI API PRO SITEMAP ===")
+        logger.info(f"Full HTML Response (first 2000 chars): {response.text[:2000]}...")
+        logger.info("=== KONEC HTML RESPONSE ===")
+        
+        if response.status_code == 200 and response.text:
+            html_content = response.text
             logger.info(f"Successfully fetched HTML content from {url}")
-            logger.info(f"Found {len(links_data)} links in links summary")
+            logger.info(f"HTML content length: {len(html_content)} characters")
             
-            # Debug: Log structure of links data
-            if logger.isEnabledFor(logging.DEBUG) and len(links_data) > 0:
-                logger.debug(f"Links data structure: {type(links_data)}")
-                logger.debug(f"First link structure: {type(links_data[0])}")
-                logger.debug(f"Sample links: {links_data[:2]}")
-            
-            if content:
-                return content, data["data"]
-            else:
-                logger.error(f"Jina API returned successful status but HTML content is missing for {url}")
-                return None, None
+            return html_content
         else:
-            error_message = data.get("error", {}).get("message", f"HTTP Status {response.status_code}")
-            logger.error(f"Jina API error for {url}: {error_message}")
-            return None, None
+            logger.error(f"Jina API error for {url}: HTTP Status {response.status_code}")
+            return None
             
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error when fetching HTML from {url}: {str(e)}")
-        return None, None
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error for {url}: {str(e)}")
-        return None, None
+        return None
     except Exception as e:
         logger.error(f"Unexpected error fetching HTML from {url}: {str(e)}")
-        return None, None
+        return None
+
+def extract_links_from_html_sitemap(html_content, url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
+    """
+    Extract links from HTML sitemap by parsing <a> anchor tags.
+    
+    Args:
+        html_content (str): HTML content of the sitemap
+        url_last_modified_map (dict): Mapping of URLs to their last modified dates
+        last_run_timestamp (datetime): Timestamp of the last script run
+        local_files_cache (dict): Cache of already processed URLs for resume functionality
+        enable_resume (bool): Whether resume functionality is enabled
+    
+    Returns:
+        list: List of extracted URL dictionaries with metadata
+    """
+    logger.info("Extracting links from HTML sitemap by parsing <a> anchor tags")
+    
+    extracted_urls = []
+    
+    if not html_content:
+        logger.warning("No HTML content provided for link extraction")
+        return extracted_urls
+    
+    try:
+        # Parse HTML using BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Find all anchor tags with href attributes
+        anchor_tags = soup.find_all('a', href=True)
+        
+        logger.info(f"Found {len(anchor_tags)} anchor tags with href attributes")
+        
+        for i, anchor in enumerate(anchor_tags, 1):
+            try:
+                # Extract URL and text from anchor tag
+                url = anchor.get('href', '').strip()
+                text = anchor.get_text(strip=True) or anchor.get('title', '').strip()
+                
+                # Skip if no URL
+                if not url:
+                    logger.debug(f"Skipping anchor {i}: No URL found")
+                    continue
+                
+                # Make URL absolute if it's relative
+                absolute_url = urljoin(BASE_URL, url)
+                
+                # Skip if URL doesn't belong to our domain
+                parsed_url = urlparse(absolute_url)
+                if parsed_url.netloc not in [BASE_NETLOC, NON_WWW_BASE_NETLOC]:
+                    logger.debug(f"Skipping external URL: {absolute_url}")
+                    continue
+                
+                # Check if URL is blacklisted
+                if absolute_url in BLACKLISTED_URLS:
+                    logger.info(f"URL {absolute_url} is blacklisted. Skipping.")
+                    continue
+                
+                # Use text as title, fallback to URL path if no text
+                title = text if text else parsed_url.path.split('/')[-1] or 'Homepage'
+                
+                # Create a simple path for sitemap context
+                path = f"HTML Sitemap > {title}"
+                
+                logger.info(f"\n=== Processing URL {i}/{len(anchor_tags)}: {absolute_url} ===")
+                logger.info(f"Title: {title}")
+                logger.info(f"Path: {path}")
+                
+                # Find last modified date from XML sitemap
+                last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
+                
+                # Check if the URL should be processed
+                if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+                    extracted_urls.append({
+                        'url': absolute_url,
+                        'title': title,
+                        'path': path,
+                        'last_modified': last_modified
+                    })
+                else:
+                    logger.info(f"Skipping URL {absolute_url} (timestamp check or already processed locally).")
+                    
+            except Exception as e:
+                logger.error(f"Error processing anchor tag {i}: {str(e)}")
+                continue
+                
+        logger.info(f"Successfully extracted {len(extracted_urls)} valid URLs from HTML sitemap")
+        return extracted_urls
+        
+    except Exception as e:
+        logger.error(f"Error parsing HTML sitemap: {str(e)}")
+        return extracted_urls
 
 def get_markdown_content(url, remove_selectors=None):
     """
@@ -2428,10 +2505,10 @@ def main(args=None):
                 logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
             elif SITEMAP_URL and SITEMAP_URL.strip():
                 # Normal sitemap processing with HTML sitemap (only if URL is provided)
-                # Step 1: Get HTML sitemap content with Jina AI links summary
-                logger.info(f"Step 1: Fetching HTML sitemap with links summary from {SITEMAP_URL}")
-                html_content, jina_data = get_html_content_via_jina(SITEMAP_URL, remove_selectors)
-                if not html_content or not jina_data:
+                # Step 1: Get HTML sitemap content with Jina AI
+                logger.info(f"Step 1: Fetching HTML sitemap from {SITEMAP_URL}")
+                html_content = get_html_content_via_jina(SITEMAP_URL, remove_selectors)
+                if not html_content:
                     logger.error(f"Failed to get HTML sitemap content from {SITEMAP_URL}")
                     logger.info("Falling back to XML-only processing...")
                     
@@ -2459,29 +2536,19 @@ def main(args=None):
                             logger.error("Legacy parsing failed, falling back to XML-only")
                             extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
                     else:
-                        # Use new generalized Jina AI links summary approach (DEFAULT)
-                        logger.info("Step 3: Extracting URLs from Jina AI links summary (generalized approach)")
-                        extracted_urls = extract_links_from_jina_summary(jina_data, 
+                        # Use new HTML anchor tag extraction approach (DEFAULT)
+                        logger.info("Step 3: Extracting URLs from HTML sitemap by parsing <a> anchor tags")
+                        extracted_urls = extract_links_from_html_sitemap(html_content, 
                                                                        url_last_modified_map=url_last_modified_map, 
                                                                        last_run_timestamp=last_run_timestamp, 
                                                                        local_files_cache=local_files_cache, 
                                                                        enable_resume=enable_resume)
                         
-                        logger.info(f"Found {len(extracted_urls)} URLs from HTML sitemap (generalized approach)")
+                        logger.info(f"Found {len(extracted_urls)} URLs from HTML sitemap (anchor tag parsing)")
                         
-                        # Enhanced fallback logic for when generalized approach fails
+                        # Enhanced fallback logic for when anchor tag parsing fails
                         if len(extracted_urls) == 0:
-                            logger.warning("No links found with generalized approach, analyzing the issue...")
-                            
-                            # Check if we have links data at all
-                            links_data = jina_data.get("links", [])
-                            if not links_data:
-                                logger.warning("No 'links' field in Jina AI response, trying legacy parsing...")
-                            else:
-                                logger.warning(f"Found {len(links_data)} links but none were processed successfully")
-                                # Log some sample links for debugging
-                                for i, link in enumerate(links_data[:3], 1):
-                                    logger.debug(f"Sample link {i}: {type(link)} - {link}")
+                            logger.warning("No links found with anchor tag parsing, trying alternative approaches...")
                             
                             # Fallback to legacy parsing
                             logger.info("Attempting legacy HTML parsing as fallback...")
