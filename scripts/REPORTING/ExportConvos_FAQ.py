@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.colors as mcolors
 from collections import Counter
 from anthropic import Anthropic  # Add this import
+from openai import OpenAI  # Add this import for OpenRouter
 import logging
 from docx import Document  # Add this import
 from docx.shared import Pt, Inches
@@ -31,6 +32,9 @@ def load_config(config_file):
                 key, value = line.strip().split('=', 1)
                 if key == 'CATEGORIES':
                     config[key] = value.strip('[]').split(',')
+                elif key == 'OPENROUTER_MODELS':
+                    # Parse JSON array for OpenRouter models
+                    config[key] = json.loads(value.strip())
                 else:
                     config[key] = value.strip()
         logging.info("Configuration loaded successfully")
@@ -39,6 +43,40 @@ def load_config(config_file):
     except Exception as e:
         logging.error(f"Error loading config: {str(e)}")
         raise
+
+# Function to initialize LLM client based on provider
+def initialize_llm_client(config):
+    """Initialize the appropriate LLM client based on configuration"""
+    provider = config.get('LLM_PROVIDER', 'anthropic').lower()
+    
+    if provider == 'openrouter':
+        logging.info("Initializing OpenRouter client")
+        api_key = config.get('OPENROUTER_API_KEY')
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is required when using OpenRouter provider")
+        
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key
+        )
+        
+        models = config.get('OPENROUTER_MODELS', ['anthropic/claude-3.5-sonnet'])
+        logging.info(f"OpenRouter client initialized with models: {models}")
+        return client, 'openrouter', models
+    
+    elif provider == 'anthropic':
+        logging.info("Initializing Anthropic client")
+        api_key = config.get('ANTHROPIC_API_KEY')
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY is required when using Anthropic provider")
+        
+        client = Anthropic(api_key=api_key)
+        models = ['claude-sonnet-4-20250514']  # Default Anthropic model
+        logging.info(f"Anthropic client initialized with model: {models[0]}")
+        return client, 'anthropic', models
+    
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
 
 # Set up logging configuration
 def setup_logging(output_directory):
@@ -98,9 +136,11 @@ def main(config_file):
         # Rest of your configuration
         auth_token = config['AUTH_TOKEN']
         project_id = config['PROJECT_ID']
-        ANTHROPIC_API_KEY = config['ANTHROPIC_API_KEY']
         CATEGORIES = config['CATEGORIES']
         generate_faq = config.get('GenerateFAQ', 'true').lower() == 'true'  # New parameter with default value
+        
+        # Initialize LLM client based on provider
+        llm_client, llm_provider, llm_models = initialize_llm_client(config)
         
         base_url = "https://api.voiceflow.com/v2/transcripts"
         headers = {
@@ -134,8 +174,8 @@ def main(config_file):
         
         if generate_faq:
             logging.info("FAQ generation is enabled, proceeding with conversation analysis...")
-            print("Analyzing conversations with Claude...")
-            faq_analysis = analyze_conversations_with_claude(OUTPUT_DIRECTORY)
+            print(f"Analyzing conversations with LLM ({llm_provider})...")
+            faq_analysis = analyze_conversations_with_llm(OUTPUT_DIRECTORY, llm_client, llm_provider, llm_models, total_human_count)
             save_faq_to_word(faq_analysis)
         else:
             logging.info("FAQ generation is disabled, skipping conversation analysis...")
@@ -230,8 +270,10 @@ def save_transcript_to_txt(transcript_id, messages):
             for idx, message in enumerate(messages, 1):
                 if message['role'] == 'DEBUG':
                     file.write(f"DEBUG: {message['content']}\n")
+                    file.write(f"TIMESTAMP: {message['timestamp']}\n")
                 else:
                     file.write(f"{message['role']}: {message['content']}\n")
+                    file.write(f"TIMESTAMP: {message['timestamp']}\n")
                 file.write("----------\n")
         logging.info(f"✓ Successfully saved transcript {transcript_id} ({message_count} messages)")
         sys.stdout.flush()  # Force immediate console output
@@ -422,9 +464,10 @@ def print_summary(human_count, category_counts):
     for category, count in category_counts.items():
         print(f"   {category}: {count}")
 
-def analyze_conversations_with_claude(transcripts_directory):
-    logging.info("Starting conversation analysis with Claude")
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+def analyze_conversations_with_llm(transcripts_directory, client, provider, models, total_human_count):
+    logging.info(f"Starting conversation analysis with {provider}")
+    logging.info(f"Available models: {models}")
+    logging.info(f"Total human messages from Excel: {total_human_count}")
     
     qa_pairs = []
     transcript_count = 0
@@ -489,7 +532,51 @@ def analyze_conversations_with_claude(transcripts_directory):
     logging.info(f"Total Q&A pairs collected: {len(qa_pairs)}")
 
     batch_size = 100
-    return analyze_conversations_in_batches(client, qa_pairs, batch_size=batch_size)
+    return analyze_conversations_in_batches(client, provider, models, qa_pairs, total_human_count, batch_size=batch_size)
+
+def make_llm_api_call(client, provider, models, prompt):
+    """Make API call to the appropriate LLM provider"""
+    if provider == 'anthropic':
+        try:
+            message = client.messages.create(
+                model=models[0],
+                max_tokens=8000,
+                temperature=0,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            return message.content[0].text.strip()
+        except Exception as e:
+            logging.error(f"Anthropic API call failed: {str(e)}")
+            raise
+    
+    elif provider == 'openrouter':
+        try:
+            # Prepare the request parameters
+            request_params = {
+                "model": models[0],  # Primary model
+                "max_tokens": 8000,
+                "temperature": 0,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ]
+            }
+            
+            # Add all models (including primary) in extra_body for fallback support
+            if len(models) > 1:
+                request_params["extra_body"] = {
+                    "models": models  # All models for fallback routing
+                }
+            
+            completion = client.chat.completions.create(**request_params)
+            return completion.choices[0].message.content.strip()
+        except Exception as e:
+            logging.error(f"OpenRouter API call failed: {str(e)}")
+            raise
+    
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
 
 def save_faq_to_word(analysis_text):
     doc = Document()
@@ -564,11 +651,12 @@ def save_faq_to_word(analysis_text):
     doc.save(output_path)
     logging.info(f"FAQ analýza uložena do Word dokumentu: {output_path}")
 
-def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
+def analyze_conversations_in_batches(client, provider, models, qa_pairs, total_human_count, batch_size=100):
     """Analyze conversations in batches to handle large datasets"""
     logging.info("="*80)
     logging.info("STARTING BATCH ANALYSIS PROCESS")
     logging.info(f"Total Q&A pairs to analyze: {len(qa_pairs)}")
+    logging.info(f"Total human messages (from Excel): {total_human_count}")
     logging.info(f"Batch size: {batch_size}")
     logging.info("="*80)
     
@@ -622,17 +710,20 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
         
         # TVŮJ ULTIMÁTNÍ ÚKOL:
         1. Analyzuj pečlivě "TRANSKRIPCE KONVERZACE" a identifikuj skutečně NEJČASTĚJŠÍ a NEJDŮLEŽITĚJŠÍ témata dotazů uvnitř všech HUMAN & BOT párů dotazů a odpovědí jejich variace
-        2. Vyber a seřaď PŘESNĚ 15 NEJRELEVANTNĚJŠÍCH témat podle četnosti jejich výskytů
-        3. DŮLEŽITÉ: Poskytni KOMPLETNÍ analýzu všech 15 témat najednou, bez rozdělování do částí
-        4. Pro každé téma analyzuj zpětnou vazbu uživatelů
+        2. **SLEDUJ ČETNOSTI A SESKUPUJ INTELIGENTNĚ:** Pro každé téma spočítej PŘESNÝ počet výskytů významově podobných dotazů a seskupuj i drobné variace (např. "dej mi číslo na Frontze" + "dej mi číslo na pana Frontze" = 2 výskyty téhož dotazu)
+        3. Vyber a seřaď PŘESNĚ 15 NEJRELEVANTNĚJŠÍCH témat podle četnosti jejich výskytů
+        4. **IDENTIFIKUJ CIZÍ JAZYKY:** Rozpoznej všechny dotazy v jiných jazycích než češtině a pro každý jazyk identifikuj 3 nejčastější dotazy
+        5. DŮLEŽITÉ: Poskytni KOMPLETNÍ analýzu všech 15 témat najednou, bez rozdělování do částí
+        6. Pro každé téma analyzuj zpětnou vazbu uživatelů
+        7. **DŮLEŽITÉ - POUZE RELEVANTNÍ DOTAZY:** Zaměř se výhradně na relevantní dotazy, které vyžadovaly informace k zodpovězení
 
         -----------------------
 
         # VYŽADOVANÝ FORMÁT VÝSTUPU: Pro každé z 15 témat použij tento formát:
 
-        ## **[SEM VLOŽIT POŘADOVÉ ČÍSLO OTÁZKY]** | [SOUHRNNÝ NÁZEV TÉMATU DOTAZU] 
-        ### ([SEZNAM NEJČASTĚJŠÍCH VARIANT DOTAZU PŘÍMO EXTRAHOVANÝCH Z "ZDROJOVÉ ANALÝZY"])
-        * **SUMARIZACE ODPOVĚĎÍ CHATBOTA:** [ZDE VLOŽ SOUHRNNÉ SUMARIZACE JAKÝM ZPŮSOBEM CHATBOT DOKÁZAL ODPOVĚDĚT NA DANÉ TÉMA A VARIANTY DOTAZŮ. VYSVĚTLI JAK DOBŘE A KOMPLEXNĚ BYLY ODPOVĚDI STRUKTUROVANÉ (ZDA OBSAHOVALY: URL, ČÍSLA, DATA, FAKTICKÉ INFORMACE)]
+        ## **[POŘADOVÉ ČÍSLO]** | [SOUHRNNÝ NÁZEV TÉMATU] ([CELKOVÝ POČET VÝSKYTŮ]x)
+        ### ([SEZNAM NEJČASTĚJŠÍCH VARIANT s četnostmi - např. "kdy byla uzavřena Duchcovská?" (2x), "uzavírka Duchcovské ulice" (1x)])
+        * **SUMARIZACE ODPOVĚĎÍ CHATBOTA:** [SOUHRNNÉ SUMARIZACE JAKÝM ZPŮSOBEM CHATBOT DOKÁZAL ODPOVĚDĚT - včetně kvality strukturování (URL, čísla, data, faktické informace)]
 
         [VLOŽIT 1 PRÁZDNÝ ŘÁDEK A POKRAČOVAT AŽ DO TÉMATU 15.]
 
@@ -646,18 +737,36 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
         * **CELKOVÁ SPOKOJENOST UŽIVATELŮ:** [PRŮMĚR VŠECH POZITIVNÍCH ZPĚTNÝCH VAZEB]%
         * **ANALÝZA TRENDU:** [IDENTIFIKACE HLAVNÍCH DŮVODŮ SPOKOJENOSTI/NESPOKOJENOSTI]
 
-        ## JAZYKOVÁ DISTRIBUCE: [ZDE VLOŽ JAZYKOVOU DISTRIBUCI VŠECH DOTAZŮ A ODPOVĚDÍ V "TRANSKRIPCE KONVERZACE" - TZN. PROCENTA VYPOČÍTEJ PRO KAŽDÝ JAZYK JEHO PROCENTUÁLNÍ ZASTOUPENÍ]
+        ## JAZYKOVÁ DISTRIBUCE: 
+        * **ČEŠTINA:** [PROCENTO]%
+        * **OSTATNÍ JAZYKY:** Pokud byly identifikovány dotazy v jiných jazycích, pro každý jazyk uveď:
+          - **[NÁZEV JAZYKA]:** [PROCENTO]%
+          - **TOP 3 NEJČASTĚJŠÍ DOTAZY:** 1) "[dotaz 1]", 2) "[dotaz 2]", 3) "[dotaz 3]"
+
+        ## ANALÝZA NEJVYTĚŽOVANĚJŠÍCH HODIN
+        * **NEJAKTIVNĚJŠÍ HODINY:** [IDENTIFIKUJ 3-5 KONKRÉTNÍCH HODIN V PRŮBĚHU DNE, KDY BYLO NEJVÍCE DOTAZŮ]
+        * **ANALÝZA TRENDŮ:** [VYSVĚTLENÍ PROČ JSOU TYTO HODINY NEJVYTĚŽOVANĚJŠÍ]
+
+        ## ODHADOVANÁ UŠETŘENÁ PRÁCA A FINANCE
+        * **CELKOVÝ POČET DOTAZŮ:** {total_human_count} dotazů (ze statistik v Excel reportu)
+        * **ODHADOVANÉ UŠETŘENÉ HODINY:** {total_human_count * 0.25} hodin (předpoklad 15 minut na dotaz)
+        * **ODHADOVANÉ UŠETŘENÉ FINANCE:** {total_human_count * 0.25 * 200} Kč (při sazbě 200 Kč/hodina pro úředníka)
+        * **ROČNÍ PROJEKCE:** [EXTRAPOLACE NA CELÝ ROK PODLE SOUČASNÉHO TRENDU]
         -----------------------
 
         
         # CELKOVÁ OMEZENÍ A POŽADAVKY:
         - Musíš analyzovat a vrátit VŠECH 15 témat najednou
-        - Pro každé téma uveď 3-5 nejčastějších variant dotazu v závorce
+        - **POVINNÉ ČETNOSTI:** Pro každé téma a variantu MUSÍŠ uvést přesný počet výskytů ve formátu "(Xx)"
+        - **INTELIGENTNÍ SESKUPOVÁNÍ:** Seskupuj významově totožné dotazy i s drobnými variacemi (např. "dej mi číslo na Frontze" + "dej mi číslo na pana Frontze" = "dej mi číslo na (pana) Frontze" (2x))
+        - **POVINNÉ CIZÍ JAZYKY:** Pokud existují dotazy v jiných jazycích než češtině, MUSÍŠ je identifikovat a uvést top 3 pro každý jazyk (BEZ ČÍSEL VÝSKYTŮ - POUZE PROCENTA)
+        - **POUZE RELEVANTNÍ DOTAZY:** Zaměř se výhradně na relevantní dotazy, které vyžadovaly relevantní informace k zodpovězení
         - Nepoužívej žádné poznámky o pokračování nebo rozdělování odpovědi
         - Drž se striktně daného formátu pro každé téma
         - Vynechej na začátku tvého výstupu jakékoliv poznámky, či sebe vysvětlování => ihned začni s generováním jednotlivých dotazů a odpovědí
         - Pro každé téma MUSÍŠ analyzovat zpětnou vazbu uživatelů
         - Na konci MUSÍŠ uvést souhrnnou statistiku s průměrnou mírou přesnosti a celkovou zpětnou vazbou
+        - **POVINNÉ NOVÉ SEKCE:** MUSÍŠ přidat analýzu nejvytěžovanějších hodin a odhadovanou ušetřenou práci a finance
 
         # "TRANSKRIPCE KONVERZACE": 
         {qa_text}
@@ -665,19 +774,10 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
         """
 
         try:
-            logging.info("Making Claude API call...")
+            logging.info(f"Making {provider} API call...")
             start_time = datetime.now()
             
-            message = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=8000,
-                temperature=0,
-                messages=[
-                    {"role": "user", "content": batch_prompt}
-                ]
-            )
-            
-            batch_analysis = message.content[0].text.strip()
+            batch_analysis = make_llm_api_call(client, provider, models, batch_prompt)
             
             end_time = datetime.now()
             processing_time = (end_time - start_time).total_seconds()
@@ -717,17 +817,20 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
 
     # TVŮJ ULTIMÁTNÍ ÚKOL:
     1. Analyzuj všechny dílčí analýzy v "ZDROJOVÉ ANALÝZY" a identifikuj skutečně NEJČASTĚJŠÍ a NEJDŮLEŽITĚJŠÍ témata dotazů a jejich variace
-    2. Vyber a seřaď PŘESNĚ 15 NEJRELEVANTNĚJŠÍCH témat podle četnosti jejich výskytů
-    3. DŮLEŽITÉ: Poskytni KOMPLETNÍ analýzu všech 15 témat najednou, bez rozdělování do částí
-    4. Na konci poskytni souhrnnou statistiku
+    2. **SLEDUJ ČETNOSTI A SESKUPUJ INTELIGENTNĚ:** Pro každé téma agreguj celkové počty výskytů ze všech dílčích analýz a seskupuj významově totožné dotazy s drobnými variacemi (např. "dej mi číslo na Frontze" + "dej mi číslo na pana Frontze" = celkem 2x)
+    3. Vyber a seřaď PŘESNĚ 15 NEJRELEVANTNĚJŠÍCH témat podle četnosti jejich výskytů
+    4. **IDENTIFIKUJ CIZÍ JAZYKY:** Rozpoznej všechny dotazy v jiných jazycích než češtině a pro každý jazyk identifikuj 3 nejčastější dotazy
+    5. DŮLEŽITÉ: Poskytni KOMPLETNÍ analýzu všech 15 témat najednou, bez rozdělování do částí
+    6. Na konci poskytni souhrnnou statistiku
+    7. **DŮLEŽITÉ - POUZE RELEVANTNÍ DOTAZY:** Zaměř se výhradně na relevantní dotazy, které vyžadovaly informace k zodpovězení
 
     -----------------------
 
     # VYŽADOVANÝ FORMÁT VÝSTUPU: Pro každé z 15 témat použij tento formát:
 
-    ## **[SEM VLOŽIT POŘADOVÉ ČÍSLO OTÁZKY]** | [SOUHRNNÝ NÁZEV TÉMATU DOTAZU] 
-    ### ([SEZNAM NEJČASTĚJŠÍCH VARIANT DOTAZU PŘÍMO EXTRAHOVANÝCH Z "ZDROJOVÉ ANALÝZY"])
-    * **SUMARIZACE ODPOVĚĎÍ CHATBOTA:** [ZDE VLOŽ SOUHRNNÉ SUMARIZACE JAKÝM ZPŮSOBEM CHATBOT DOKÁZAL ODPOVĚDĚT NA DANÉ TÉMA A VARIANTY DOTAZŮ. VYSVĚTLI JAK DOBŘE A KOMPLEXNĚ BYLY ODPOVĚDI STRUKTUROVANÉ (ZDA OBSAHOVALY: URL, ČÍSLA, DATA, FAKTICKÉ INFORMACE)]
+    ## **[POŘADOVÉ ČÍSLO]** | [SOUHRNNÝ NÁZEV TÉMATU] ([CELKOVÝ POČET VÝSKYTŮ]x)
+    ### ([SEZNAM NEJČASTĚJŠÍCH VARIANT s agregovanými četnostmi - např. "kdy byla uzavřena Duchcovská?" (3x), "uzavírka Duchcovské ulice" (2x)])
+    * **SUMARIZACE ODPOVĚĎÍ CHATBOTA:** [SOUHRNNÉ SUMARIZACE JAKÝM ZPŮSOBEM CHATBOT DOKÁZAL ODPOVĚDĚT - včetně kvality strukturování (URL, čísla, data, faktické informace)]
 
     [VLOŽIT 1 PRÁZDNÝ ŘÁDEK A POKRAČOVAT AŽ DO TÉMATU 15.]
 
@@ -741,17 +844,35 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
     * **CELKOVÁ SPOKOJENOST UŽIVATELŮ:** [PRŮMĚR VŠECH POZITIVNÍCH ZPĚTNÝCH VAZEB]%
     * **ANALÝZA TRENDU:** [IDENTIFIKACE HLAVNÍCH DŮVODŮ SPOKOJENOSTI/NESPOKOJENOSTI]
 
-    ## JAZYKOVÁ DISTRIBUCE: [ZDE VLOŽ JAZYKOVOU DISTRIBUCI VŠECH DOTAZŮ A ODPOVĚDÍ V "ZDROJOVÉ ANALÝZY" - TZN. PROCENTA VYPOČÍTEJ PRO KAŽDÝ JAZYK JEHO PROCENTUÁLNÍ ZASTOUPENÍ]
+    ## JAZYKOVÁ DISTRIBUCE: 
+    * **ČEŠTINA:** [PROCENTO]%
+    * **OSTATNÍ JAZYKY:** Pokud byly identifikovány dotazy v jiných jazycích, pro každý jazyk uveď:
+      - **[NÁZEV JAZYKA]:** [PROCENTO]%
+      - **TOP 3 NEJČASTĚJŠÍ DOTAZY:** 1) "[dotaz 1]", 2) "[dotaz 2]", 3) "[dotaz 3]"
+
+    ## ANALÝZA NEJVYTĚŽOVANĚJŠÍCH HODIN
+    * **NEJAKTIVNĚJŠÍ HODINY:** [IDENTIFIKUJ 3-5 KONKRÉTNÍCH HODIN V PRŮBĚHU DNE, KDY BYLO NEJVÍCE DOTAZŮ]
+    * **ANALÝZA TRENDŮ:** [VYSVĚTLENÍ PROČ JSOU TYTO HODINY NEJVYTĚŽOVANĚJŠÍ]
+
+    ## ODHADOVANÁ UŠETŘENÁ PRÁCA A FINANCE
+    * **CELKOVÝ POČET DOTAZŮ:** {total_human_count} dotazů (ze statistik v Excel reportu)
+    * **ODHADOVANÉ UŠETŘENÉ HODINY:** {total_human_count * 0.25} hodin (předpoklad 15 minut na dotaz)
+    * **ODHADOVANÉ UŠETŘENÉ FINANCE:** {total_human_count * 0.25 * 200} Kč (při sazbě 200 Kč/hodina pro úředníka)
+    * **ROČNÍ PROJEKCE:** [EXTRAPOLACE NA CELÝ ROK PODLE SOUČASNÉHO TRENDU]
     -----------------------
         
     # CELKOVÁ OMEZENÍ A POŽADAVKY:
     - Musíš analyzovat a vrátit VŠECH 15 témat najednou
-    - Pro každé téma uveď 3-5 nejčastějších variant dotazu v závorce
+    - **POVINNÉ ČETNOSTI:** Pro každé téma a variantu MUSÍŠ uvést agregované počty výskytů ze všech dílčích analýz ve formátu "(Xx)"
+    - **INTELIGENTNÍ SESKUPOVÁNÍ:** Seskupuj významově totožné dotazy i s drobnými variacemi (např. "dej mi číslo na Frontze" + "dej mi číslo na pana Frontze" = "dej mi číslo na (pana) Frontze" (2x))
+    - **POVINNÉ CIZÍ JAZYKY:** Pokud existují dotazy v jiných jazycích než češtině, MUSÍŠ je identifikovat a uvést top 3 pro každý jazyk (BEZ ČÍSEL VÝSKYTŮ - POUZE PROCENTA)
+    - **POUZE RELEVANTNÍ DOTAZY:** Zaměř se výhradně na relevantní dotazy, které vyžadovaly relevantní informace k zodpovězení
     - Nepoužívej žádné poznámky o pokračování nebo rozdělování odpovědi
     - Drž se striktně daného formátu pro každé téma
     - Vynechej na začátku tvého výstupu jakékoliv poznámky, či sebe vysvětlování => ihned začni s generováním jednotlivých dotazů a odpovědí
     - Pro každé téma MUSÍŠ analyzovat zpětnou vazbu uživatelů
     - Na konci MUSÍŠ uvést souhrnnou statistiku s průměrnou mírou přesnosti a celkovou zpětnou vazbou
+    - **POVINNÉ NOVÉ SEKCE:** MUSÍŠ přidat analýzu nejvytěžovanějších hodin a odhadovanou ušetřenou práci a finance
 
     # "ZDROJOVÉ ANALÝZY":
     {chr(10).join([f"=== BATCH {i+1} ===\n{analysis}\n" for i, analysis in enumerate(batch_analyses)])}
@@ -761,16 +882,7 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
         logging.info("Making final synthesis API call...")
         start_time = datetime.now()
         
-        final_message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=8000,
-            temperature=0,
-            messages=[
-                {"role": "user", "content": synthesis_prompt}
-            ]
-        )
-        
-        final_analysis = final_message.content[0].text.strip()
+        final_analysis = make_llm_api_call(client, provider, models, synthesis_prompt)
         
         end_time = datetime.now()
         total_processing_time = (end_time - start_time).total_seconds()
@@ -785,7 +897,8 @@ def analyze_conversations_in_batches(client, qa_pairs, batch_size=100):
             f.write(f"Final Synthesis Report\n")
             f.write(f"Generated: {datetime.now()}\n")
             f.write(f"Total batches analyzed: {total_batches}\n")
-            f.write(f"Total Q&A pairs: {len(qa_pairs)}\n")
+            f.write(f"Total Q&A pairs extracted: {len(qa_pairs)}\n")
+            f.write(f"Total human messages (Excel): {total_human_count}\n")
             f.write("="*50 + "\n\n")
             f.write(final_analysis)
         
