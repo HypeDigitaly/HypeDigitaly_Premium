@@ -114,22 +114,25 @@ def transform_data_for_voiceflow(records):
         else:
             # Fallback to other potential URL fields
             source_url = record.get('www', record.get('url', record.get('web', record.get('website', ''))))
-        
-        # --- Searchable Content ---
-        # All relevant text is combined into a single 'content' field for effective semantic search.
-        searchable_content = [
-            f"Název organizace: {record.get('org_nazev', '')}",
-            f"Popis služby: {clean_popis}" if clean_popis else "",
-            f"Klíčová slova: {', '.join(record.get('klicova_slova', []))}"
-        ]
-        
-        # Filter out empty content parts
-        searchable_content = [part for part in searchable_content if part.strip()]
 
         # Extract unique municipalities and districts
         mista_pusobnosti = record.get('misto_pusobnosti', [])
         obce = sorted(list(set(m.get('obec', '') for m in mista_pusobnosti if m.get('obec'))))
         okresy = sorted(list(set(m.get('okres', '') for m in mista_pusobnosti if m.get('okres'))))
+
+        # --- Searchable Content ---
+        # All relevant text is combined into a single 'content' field for effective semantic search.
+        searchable_content = [
+            f"Název organizace: {record.get('org_nazev', '')}",
+            f"Popis služby: {clean_popis}" if clean_popis else "",
+            f"Druh služby: {record.get('druh_sluzby_nazev', '')}",
+            f"Cílová skupina: {', '.join(record.get('cilova_skupina', []))}" if record.get('cilova_skupina') else "",
+            f"Životní situace: {', '.join(record.get('zivotni_situace', []))}" if record.get('zivotni_situace') else "",
+            f"Klíčová slova: {', '.join(record.get('klicova_slova', []))}" if record.get('klicova_slova') else ""
+        ]
+
+        # Filter out empty content parts
+        searchable_content = [part for part in searchable_content if part.strip()]
 
         # Create flat item structure (not nested)
         item = {
@@ -141,6 +144,7 @@ def transform_data_for_voiceflow(records):
             "druh_sluzby": record.get('druh_sluzby_nazev'),
             "cilova_skupina": record.get('cilova_skupina', []),
             "zivotni_situace": record.get('zivotni_situace', []),
+            "klicova_slova": record.get('klicova_slova', []),
             "obce_pusobnosti": obce,
             "okresy_pusobnosti": okresy,
             "typ_pece_pobytova": record.get('pobytova') == '1',
@@ -161,7 +165,7 @@ def create_voiceflow_payload(items):
                 "searchableFields": ["content"],
                 "metadataFields": [
                     "ID_organizace", "nazev_organizace", "druh_sluzby",
-                    "cilova_skupina", "zivotni_situace",
+                    "cilova_skupina", "zivotni_situace", "klicova_slova",
                     "obce_pusobnosti", "okresy_pusobnosti",
                     "typ_pece_pobytova", "typ_pece_ambulantni", "typ_pece_terenni",
                     "source_url"
@@ -180,6 +184,44 @@ def save_payload_to_file(payload, filename):
         logger.info(f"Payload containing {len(payload['data']['items'])} items saved to: {filename}")
     except IOError as e:
         logger.error(f"Failed to save payload to {filename}: {e}")
+
+def create_unique_value_files(transformed_items, output_dir):
+    """Creates separate .txt files for each metadataField with all unique values.
+    Uses sets to automatically ensure NO DUPLICATES - each value appears only once
+    to serve as lookup combobox values from the original data source."""
+    metadata_fields = [
+        "ID_organizace", "nazev_organizace", "druh_sluzby",
+        "cilova_skupina", "zivotni_situace", "klicova_slova",
+        "obce_pusobnosti", "okresy_pusobnosti",
+        "typ_pece_pobytova", "typ_pece_ambulantni", "typ_pece_terenni",
+        "source_url"
+    ]
+    # Using sets ensures absolute uniqueness - no duplicate values will be stored
+    unique_values = {field: set() for field in metadata_fields}
+    for item in transformed_items:
+        for field in metadata_fields:
+            value = item.get(field)
+            if value is not None:
+                if isinstance(value, list):
+                    # For list fields, collect unique values from all list items across all records
+                    for sub_value in value:
+                        if sub_value:  # Skip empty values
+                            unique_values[field].add(sub_value)
+                elif isinstance(value, bool):
+                    # Convert boolean to string for consistent storage
+                    unique_values[field].add(str(value))
+                else:
+                    # For single values, add if not empty
+                    if value:
+                        unique_values[field].add(value)
+    # Write each unique set of values to separate file
+    for field, values in unique_values.items():
+        filename = f"vysocinaPecuje_{field}.txt"
+        filepath = os.path.join(output_dir, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            for value in sorted(values):  # Sort for consistent ordering
+                f.write(f"{value}\n")
+        logger.info(f"Created unique values file: {filepath} (contains {len(values)} unique values)")
 
 def upload_to_voiceflow(filename):
     """Uploads the JSON file to Voiceflow's knowledge base."""
@@ -229,6 +271,9 @@ def main():
         if not transformed_items:
             logger.warning("Data was fetched, but no items were transformed. Check the source data format.")
             return
+
+        # Create unique value files
+        create_unique_value_files(transformed_items, OUTPUT_DIR)
 
         # 3. Create Payload
         voiceflow_payload = create_voiceflow_payload(transformed_items)
