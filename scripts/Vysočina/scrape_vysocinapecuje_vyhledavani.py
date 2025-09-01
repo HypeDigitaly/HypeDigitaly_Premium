@@ -88,6 +88,11 @@ def fetch_json_data(url):
             'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Referer': 'https://portalno.kr-vysocina.cz/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Cache-Control': 'no-cache',
         }
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
