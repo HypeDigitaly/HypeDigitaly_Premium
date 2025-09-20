@@ -149,6 +149,63 @@ def validate_config(config):
 CONFIG = None
 
 # ============================================================================
+# GLOBAL TOKEN USAGE TRACKING
+# ============================================================================
+
+# Global token usage accumulator for all OpenRouter API calls
+global_token_usage = {
+    'total_prompt_tokens': 0,
+    'total_completion_tokens': 0,
+    'total_tokens': 0,
+    'api_calls_count': 0
+}
+
+def log_openrouter_token_usage(response_data, api_call_name, url=""):
+    """
+    Extract and log token usage from OpenRouter API response.
+    Updates global token usage accumulator.
+
+    Args:
+        response_data (dict): The JSON response from OpenRouter API
+        api_call_name (str): Descriptive name of the API call for logging
+        url (str, optional): Associated URL for context
+    """
+    global global_token_usage
+
+    try:
+        usage = response_data.get('usage', {})
+        if usage:
+            prompt_tokens = usage.get('prompt_tokens', 0)
+            completion_tokens = usage.get('completion_tokens', 0)
+            total_tokens = usage.get('total_tokens', 0)
+
+            # Update global accumulator
+            global_token_usage['total_prompt_tokens'] += prompt_tokens
+            global_token_usage['total_completion_tokens'] += completion_tokens
+            global_token_usage['total_tokens'] += total_tokens
+            global_token_usage['api_calls_count'] += 1
+
+            # Log individual call usage
+            logger.info(f"🔢 OPENROUTER TOKEN USAGE - {api_call_name}:")
+            logger.info(f"   📥 Input tokens (prompt): {prompt_tokens:,}")
+            logger.info(f"   📤 Output tokens (completion): {completion_tokens:,}")
+            logger.info(f"   🔄 Total tokens: {total_tokens:,}")
+            if url:
+                logger.info(f"   🌐 URL: {url}")
+
+            # Log running totals
+            logger.info(f"📊 RUNNING TOTALS - Total API calls: {global_token_usage['api_calls_count']}")
+            logger.info(f"   📥 Total input tokens: {global_token_usage['total_prompt_tokens']:,}")
+            logger.info(f"   📤 Total output tokens: {global_token_usage['total_completion_tokens']:,}")
+            logger.info(f"   🔄 Total tokens: {global_token_usage['total_tokens']:,}")
+
+        else:
+            logger.warning(f"⚠️ No usage data found in OpenRouter response for {api_call_name}")
+
+    except Exception as e:
+        logger.error(f"❌ Error logging token usage for {api_call_name}: {str(e)}")
+
+# ============================================================================
 # SCRIPT IDENTIFICATION
 # ============================================================================
 
@@ -233,7 +290,7 @@ def load_configuration(config_file="config.json"):
     # Set OpenRouter configuration with backwards compatibility
     # Support both new "openrouter" section and legacy "llm_config.openrouter" section
     openrouter_config = {}
-    
+
     # Check for new structure first
     if "openrouter" in CONFIG:
         openrouter_config = CONFIG["openrouter"]
@@ -249,13 +306,20 @@ def load_configuration(config_file="config.json"):
                 openrouter_config["target_language"] = "Czech"
             elif first_lang == "en":
                 openrouter_config["target_language"] = "English"
-    
+
     # Set OpenRouter parameters with defaults
     OPENROUTER_MAX_TOKENS = openrouter_config.get("max_tokens", 4000)
     OPENROUTER_MODELS = openrouter_config.get("models", ["anthropic/claude-3.5-sonnet"])
     OPENROUTER_TEMPERATURE = openrouter_config.get("temperature", 0.1)
     OPENROUTER_TOP_P = openrouter_config.get("top_p", 0.9)
     OPENROUTER_TARGET_LANGUAGE = openrouter_config.get("target_language", "Czech")
+
+    # Set OpenRouter provider routing configuration
+    OPENROUTER_PROVIDER_CONFIG = openrouter_config.get("provider", {})
+
+    # Set prompt caching configuration
+    OPENROUTER_CACHE_ENABLED = openrouter_config.get("enable_caching", False)
+    OPENROUTER_CACHE_TYPE = openrouter_config.get("cache_type", "ephemeral")  # ephemeral or persistent
     
     # Set vector store configuration
     OPENAI_VECTOR_STORE_ID = CONFIG["vector_store"]["id"]
@@ -594,16 +658,32 @@ Hejtman | Hejtman Královéhradeckého kraje | Kontakt hejtman | Kdo je hejtman?
             timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
-        
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR QUESTION GENERATION ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
         data = response.json()
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, "QUESTION_SECTION_GENERATION", url)
+
         if "choices" in data and len(data["choices"]) > 0:
-            question_text = data["choices"][0]["message"]["content"].strip()
-            # Clean up: Ensure it's pipe-separated
-            if "|" in question_text:
+            message = data["choices"][0]["message"]
+            question_text = message.get("content", "").strip()
+            
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not question_text and message.get("reasoning"):
+                question_text = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted content from reasoning field")
+            
+            # Use AI response directly - remove strict pipe format validation
+            if question_text and len(question_text) > 10:
                 logger.info(f"✅ Generated QUESTION section: {question_text[:100]}...")
                 return question_text
             else:
-                logger.warning("Invalid format from API, using fallback")
+                logger.warning("API response too short or empty, using fallback")
                 return f"{title} | {urlparse(url).path} | key info | What is {title}? | Details on {title} | Contact for {title}"
         else:
             logger.warning("No choices from API, using fallback")
@@ -690,14 +770,28 @@ def generate_page_summary_via_openrouter(markdown_content, title="", url="", tar
             timeout=REQUEST_TIMEOUT * 2
         )
         response.raise_for_status()
-        
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR PAGE SUMMARY ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
         data = response.json()
-        
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, "PAGE_SUMMARY_GENERATION", url)
+
         if "choices" in data and len(data["choices"]) > 0:
-            page_summary = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+            page_summary = message.get("content", "").strip()
             
-            # STRICT validation with automatic truncation for Vector Store compliance
-            if page_summary and len(page_summary) > 50:
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not page_summary and message.get("reasoning"):
+                page_summary = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted page summary from reasoning field")
+            
+            # Accept any valid response from AI - remove strict length validation
+            if page_summary and page_summary.strip():
                 result_tokens = count_tokens_approximate(page_summary)
                 
                 # 🚨 CRITICAL: Enforce strict 190 token limit for Vector Store compliance with safety margin
@@ -713,7 +807,7 @@ def generate_page_summary_via_openrouter(markdown_content, title="", url="", tar
                 logger.info(f"✅ Generated page summary: {result_tokens} tokens (limit: {MAX_PAGE_SUMMARY_TOKENS})")
                 return page_summary
             else:
-                logger.error("❌ Generated page summary is too short or empty")
+                logger.error("❌ Generated page summary is empty after API call")
                 return None
         else:
             logger.error("❌ No choices returned from OpenRouter API for page summary")
@@ -858,14 +952,28 @@ def generate_current_file_summary_via_openrouter(file_content, file_order, total
             timeout=REQUEST_TIMEOUT * 2
         )
         response.raise_for_status()
-        
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR CURRENT FILE SUMMARY ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
         data = response.json()
-        
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, f"CURRENT_FILE_SUMMARY_GENERATION_{file_order}_{total_files}", url)
+
         if "choices" in data and len(data["choices"]) > 0:
-            current_file_summary = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+            current_file_summary = message.get("content", "").strip()
             
-            # STRICT validation with automatic truncation for Vector Store compliance
-            if current_file_summary and len(current_file_summary) > 50:
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not current_file_summary and message.get("reasoning"):
+                current_file_summary = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted current file summary from reasoning field")
+            
+            # Accept any valid response from AI - remove strict length validation
+            if current_file_summary and current_file_summary.strip():
                 result_tokens = count_tokens_approximate(current_file_summary)
                 
                 # 🚨 CRITICAL: Enforce strict 240 token limit for Vector Store compliance
@@ -881,7 +989,7 @@ def generate_current_file_summary_via_openrouter(file_content, file_order, total
                 logger.info(f"✅ Generated current file summary ({file_order}/{total_files}): {result_tokens} tokens (limit: {MAX_CURRENT_FILE_SUMMARY_TOKENS})")
                 return current_file_summary
             else:
-                logger.error("❌ Generated current file summary is too short or empty")
+                logger.error("❌ Generated current file summary is empty after API call")
                 return None
         else:
             logger.error("❌ No choices returned from OpenRouter API for current file summary")
@@ -1055,14 +1163,28 @@ def generate_overlap_summary_via_openrouter(original_page_summary, previous_file
             timeout=REQUEST_TIMEOUT * 2
         )
         response.raise_for_status()
-        
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR OVERLAP SUMMARY ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
         data = response.json()
-        
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, f"OVERLAP_SUMMARY_GENERATION_{previous_file_order}_TO_{current_file_order}", url)
+
         if "choices" in data and len(data["choices"]) > 0:
-            overlap_summary = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+            overlap_summary = message.get("content", "").strip()
             
-            # STRICT validation with automatic truncation for Vector Store compliance
-            if overlap_summary and len(overlap_summary) > 50:
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not overlap_summary and message.get("reasoning"):
+                overlap_summary = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted overlap summary from reasoning field")
+            
+            # Accept any valid response from AI - remove strict length validation
+            if overlap_summary and overlap_summary.strip():
                 result_tokens = count_tokens_approximate(overlap_summary)
                 
                 # 🚨 CRITICAL: Enforce strict 190 token limit for Vector Store compliance
@@ -1078,7 +1200,7 @@ def generate_overlap_summary_via_openrouter(original_page_summary, previous_file
                 logger.info(f"✅ Generated overlap summary (prev:{previous_file_order}->curr:{current_file_order}/{total_files}): {result_tokens} tokens (limit: {MAX_OVERLAP_SUMMARY_TOKENS})")
                 return overlap_summary
             else:
-                logger.error("❌ Generated overlap summary is too short or empty")
+                logger.error("❌ Generated overlap summary is empty after API call")
                 return None
         else:
             logger.error("❌ No choices returned from OpenRouter API for overlap summary")
@@ -2179,13 +2301,11 @@ def get_html_content_for_pagination_via_jina(url, remove_selectors=None):
 
 def detect_pagination_in_html(html_content, url=""):
     """
-    Detect pagination indicators in HTML content from various webpage structures.
+    AI-POWERED PAGINATION DETECTION: Use OpenRouter API with Structured Outputs to intelligently
+    analyze HTML content and return validated JSON with pagination patterns.
     
-    This function analyzes HTML content to identify pagination patterns such as:
-    - Numbered page links (1, 2, 3, ...)
-    - "Next" and "Previous" buttons
-    - Page count indicators ("Page X of Y", "Showing X-Y of Z")
-    - Pagination navigation elements
+    Uses OpenRouter's JSON Schema validation to ensure consistent, type-safe responses
+    compatible with existing script functionality (urljoin with relative URLs).
     
     Args:
         html_content (str): HTML content to analyze for pagination
@@ -2194,7 +2314,7 @@ def detect_pagination_in_html(html_content, url=""):
     Returns:
         dict: Pagination detection results with indicators and metadata
     """
-    logger.info(f"🔍 PAGINATION DETECTION: Analyzing HTML content for pagination indicators")
+    logger.info(f"🤖 AI-POWERED PAGINATION DETECTION: Analyzing HTML content via OpenRouter Structured Outputs")
     
     if not html_content or not html_content.strip():
         logger.warning(f"⚠️ No HTML content provided for pagination detection")
@@ -2205,182 +2325,424 @@ def detect_pagination_in_html(html_content, url=""):
             'reason': 'No HTML content provided'
         }
     
+    # Check if OpenRouter is configured
+    if not OPENROUTER_API_KEY:
+        logger.warning(f"🤖 OpenRouter API key not configured, falling back to legacy pagination detection")
+        return _detect_pagination_legacy_fallback(html_content, url)
+    
+    try:
+        # Define JSON Schema for structured output validation
+        pagination_schema = {
+            "name": "pagination_detection",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "has_pagination": {
+                        "type": "boolean",
+                        "description": "True if legitimate content pagination is detected (for MORE of the SAME content type)"
+                    },
+                    "confidence_score": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Confidence level of pagination detection (0-100)"
+                    },
+                    "content_type_detected": {
+                        "type": "string",
+                        "description": "Type of content being paginated (e.g., 'news articles', 'contact list', 'documents', 'events')"
+                    },
+                    "pagination_urls": {
+                        "type": "array",
+                        "description": "Array of pagination URLs found that are relevant to the current page content",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "relative_url": {
+                                    "type": "string",
+                                    "description": "RELATIVE URL compatible with urljoin() - examples: '?page=1', '?page=2', '/path?stranka=3'"
+                                },
+                                "page_number": {
+                                    "type": ["integer", "null"],
+                                    "description": "Page number if determinable from link, null for navigation links"
+                                },
+                                "link_text": {
+                                    "type": "string",
+                                    "description": "Visible text content of the pagination link"
+                                },
+                                "link_type": {
+                                    "type": "string",
+                                    "enum": ["numbered", "navigation", "first", "last", "next", "previous"],
+                                    "description": "Type of pagination link identified"
+                                }
+                            },
+                            "required": ["relative_url", "page_number", "link_text", "link_type"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "pagination_indicators": {
+                        "type": "array",
+                        "description": "List of pagination indicators found during analysis",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "pagination_indicators"],
+                "additionalProperties": False
+            }
+        }
+        
+        # SYSTEM PROMPT: Instructions, methodology, and examples
+        system_prompt = """🤖 EXPERT CONTENT-AWARE PAGINATION ANALYST: You are a specialist who analyzes HTML content to detect pagination patterns with CONTENT RELEVANCE VALIDATION using STRUCTURED OUTPUTS.
+
+## 🎯 TASK: Analyze HTML content and return VALIDATED JSON identifying pagination elements ONLY when they paginate the SAME content type as the current page
+
+## 🚨 CRITICAL CONTENT RELEVANCE RULES:
+
+**✅ DETECT PAGINATION ONLY FOR:**
+- Lists/collections that match the current page content type
+- MORE of the SAME content (more news articles, more contacts, more documents, more events, etc.)
+- Pagination within the SAME section/category as the current page
+
+**❌ DO NOT DETECT PAGINATION FOR:**
+- General site navigation (different website sections)
+- Unrelated content pagination (e.g., if on news page but find pagination for products)
+- Base domain navigation/menu
+- Cross-section pagination (different content types)
+
+## 🧠 CONTENT-AWARE ANALYSIS METHODOLOGY:
+
+**STEP 1: IDENTIFY CURRENT PAGE CONTENT TYPE**
+First determine what type of content this page contains:
+- News/Articles (aktuality, novinky, články, news)
+- Contacts/Directory (kontakty, telefonní seznam, seznam, directory)
+- Documents/Files (dokumenty, soubory, files, downloads)
+- Events/Calendar (události, kalendář, events, calendar)
+- Products/Services (produkty, služby, products, services)
+- Grants/Funding (dotace, granty, funding, grants)
+- Other list-based content
+
+**STEP 2: VALIDATE PAGINATION RELEVANCE**
+Only detect pagination if it's for MORE of the SAME content type:
+- If page shows news articles → pagination should be for more news articles
+- If page shows contact list → pagination should be for more contacts
+- If page shows documents → pagination should be for more documents
+- If page shows grants/funding → pagination should be for more grants
+
+**STEP 3: EXTRACT RELEVANT PAGINATION URLS**
+For each validated pagination element:
+- Extract href attribute AS-IS (relative format like "?page=1")
+- Determine page number from link text or URL parameter
+- Classify link type (numbered, navigation, etc.)
+- Ensure URLs lead to MORE of the SAME content
+
+## 🚨 URL FORMAT REQUIREMENTS:
+- **ALWAYS return RELATIVE URLs** compatible with urljoin()
+- Examples: "?page=1", "?stranka=2", "/aktuality?page=3"
+- **NEVER** include domain/protocol
+
+## 🔍 EXAMPLE ANALYSIS:
+
+**SCENARIO 1: News/Articles Page**
+```html
+<h1>Aktuality</h1>
+<div class="news-list">
+    <article>First news article...</article>
+    <article>Second news article...</article>
+</div>
+<div class="gov-pagination">
+    <a href="?page=0" class="gov-pagination__item--active">1</a>
+    <a href="?page=1" class="gov-pagination__item">2</a>
+    <a href="?page=2" class="gov-pagination__item">3</a>
+</div>
+```
+**RESULT: ✅ DETECT** - Pagination is for more news articles (same content type)
+
+**SCENARIO 2: Mixed Navigation**
+```html
+<h1>Homepage</h1>
+<nav class="main-menu">
+    <a href="/news">News</a>
+    <a href="/contacts">Contacts</a>
+    <a href="/documents">Documents</a>
+</nav>
+<div class="pagination">
+    <a href="/products?page=1">1</a>
+    <a href="/products?page=2">2</a>
+</div>
+```
+**RESULT: ❌ DO NOT DETECT** - Pagination is for products but current page is homepage (different content types)
+
+## 📋 CONFIDENCE SCORING:
+- High (80-100): Clear content match + strong pagination indicators
+- Medium (60-79): Probable content match + pagination indicators
+- Low (40-59): Weak content match or unclear pagination
+- None (0-39): No content match or no legitimate pagination"""
+
+        # USER PROMPT: Current context and HTML content to analyze
+        user_prompt = f"""Analyze this HTML content for CONTENT-RELEVANT pagination patterns.
+
+Current URL: {url}
+
+Instructions:
+1. First identify what type of content this page displays
+2. Then look for pagination that provides MORE of that SAME content type
+3. Ignore general navigation or unrelated pagination
+4. Return RELATIVE URLs only (compatible with urljoin)
+
+HTML content to analyze:
+{html_content}"""
+
+        # Prepare the OpenRouter API request with structured outputs
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": url if url else "https://api.openrouter.ai",
+            "X-Title": "HypeDigitaly AI Content-Aware Pagination Detector"
+        }
+        
+        # Use primary model for pagination detection
+        primary_model = OPENROUTER_MODELS[0] if isinstance(OPENROUTER_MODELS, list) else OPENROUTER_MODELS
+        payload = {
+            "model": primary_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": 1000,  # Enough for structured JSON response
+            "temperature": 0.1,  # Low temperature for consistent analysis
+            "top_p": 0.9,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": pagination_schema
+            }
+        }
+        
+        logger.info(f"🤖 Sending HTML content to OpenRouter for content-aware pagination analysis...")
+        response = requests_retry_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT * 2
+        )
+        response.raise_for_status()
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR AI PAGINATION DETECTION ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
+        data = response.json()
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, "AI_PAGINATION_DETECTION", url)
+
+        if "choices" in data and len(data["choices"]) > 0:
+            message = data["choices"][0]["message"]
+            ai_response = message.get("content", "").strip()
+            
+            # Handle reasoning mode responses
+            if not ai_response and message.get("reasoning"):
+                ai_response = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted AI pagination analysis from reasoning field")
+            
+            if ai_response:
+                try:
+                    # Parse structured JSON response (guaranteed valid by OpenRouter schema validation)
+                    import json
+                    pagination_data = json.loads(ai_response)
+                    
+                    has_pagination = pagination_data.get('has_pagination', False)
+                    confidence = pagination_data.get('confidence_score', 0)
+                    content_type = pagination_data.get('content_type_detected', 'unknown')
+                    pagination_urls = pagination_data.get('pagination_urls', [])
+                    indicators = pagination_data.get('pagination_indicators', [])
+                    
+                    logger.info(f"🤖 AI PAGINATION ANALYSIS COMPLETE:")
+                    logger.info(f"   📊 Has pagination: {has_pagination}")
+                    logger.info(f"   📈 Confidence: {confidence}%")
+                    logger.info(f"   📄 Content type: {content_type}")
+                    logger.info(f"   🔗 Found {len(pagination_urls)} pagination URLs")
+                    logger.info(f"   📋 Indicators: {indicators}")
+                    
+                    if has_pagination:
+                        logger.info(f"✅ AI DETECTED CONTENT-RELEVANT PAGINATION with {confidence}% confidence")
+                        logger.info(f"📄 Content type being paginated: {content_type}")
+                        for i, pag_url in enumerate(pagination_urls, 1):
+                            logger.info(f"   {i}. {pag_url.get('link_type', 'unknown')} link: '{pag_url.get('link_text', '')}' -> {pag_url.get('relative_url', '')}")
+                    else:
+                        logger.info(f"❌ AI: NO CONTENT-RELEVANT PAGINATION DETECTED (confidence: {confidence}%)")
+                        logger.info(f"📄 Content type analyzed: {content_type}")
+                    
+                    return {
+                        'has_pagination': has_pagination,
+                        'indicators': indicators,
+                        'confidence': confidence,
+                        'content_type_detected': content_type,
+                        'pagination_urls': pagination_urls,
+                        'ai_analysis': True
+                    }
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Failed to parse structured AI response as JSON: {str(e)}")
+                    logger.error(f"AI structured response was: {ai_response[:500]}...")
+                    # This should rarely happen with structured outputs, but fallback just in case
+                    logger.info("🔄 Falling back to legacy pagination detection...")
+                    return _detect_pagination_legacy_fallback(html_content, url)
+            else:
+                logger.error("❌ Empty AI response for pagination detection")
+                return _detect_pagination_legacy_fallback(html_content, url)
+        else:
+            logger.error("❌ No choices returned from OpenRouter for pagination detection")
+            return _detect_pagination_legacy_fallback(html_content, url)
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Request error with OpenRouter API for pagination detection: {str(e)}")
+        return _detect_pagination_legacy_fallback(html_content, url)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in AI pagination detection: {str(e)}")
+        return _detect_pagination_legacy_fallback(html_content, url)
+
+def _detect_pagination_legacy_fallback(html_content, url=""):
+    """
+    Legacy fallback pagination detection using pattern matching.
+    Used when OpenRouter API is not available or fails.
+    """
+    logger.info(f"🔍 LEGACY PAGINATION DETECTION: Using pattern matching fallback")
+    
     try:
         # Parse HTML content
         soup = BeautifulSoup(html_content, 'html.parser')
         pagination_indicators = []
         confidence_score = 0
         
-        # ENHANCED PATTERN 1: Look for numbered pagination links (INCLUDING LINKS WITHOUT HREF)
-        # Example: <a href="...?stranka=2">2</a>, <a class="gov-pagination__item">2</a>
+        # ENHANCED PATTERN 1: Look for numbered pagination links with cleaned href attributes
         all_links = soup.find_all('a')  # Get ALL <a> tags, with or without href
         page_number_count = 0
         href_page_count = 0
         no_href_page_count = 0
+        
+        logger.info(f"🔍 ANALYZING {len(all_links)} <a> tags for numbered pages")
         
         for link in all_links:
             href = link.get('href', '')
             text = link.get_text(strip=True)
             class_names = ' '.join(link.get('class', []))
             
-            # Check if text is a number (potential page number)
+            # CRITICAL FIX: Clean malformed href attributes
+            original_href = href
+            if href:
+                href = href.strip('\'"').replace('\\"', '').replace("\\'", '').replace('\\', '')
+                href = href.replace('"', '').replace("'", '').strip()
+                logger.debug(f"🧹 Cleaned href in legacy detection: {original_href} -> {href}")
+            
+            # Enhanced debugging - log potential pagination links
+            if (any(css_class in class_names.lower() for css_class in ['pagination', 'pager', 'gov-pagination']) or
+                any(param in href.lower() for param in ['page=', 'stranka=']) or
+                text.isdigit() or
+                'page' in text.lower()):
+                logger.info(f"🔍 POTENTIAL PAGINATION LINK: text='{text}' href='{href}' classes='{class_names}'")
+            
+            # Check if text contains a number (potential page number)
+            page_num = None
+            clean_text = text
+            
             if text.isdigit():
                 page_num = int(text)
+                clean_text = text
+                logger.info(f"🔍 Pure number detected: {page_num}")
+            elif 'page' in text.lower():
+                page_match = re.search(r'page\s*(\d+)', text.lower())
+                if page_match:
+                    page_num = int(page_match.group(1))
+                    clean_text = page_match.group(1)
+                    logger.info(f"🔍 Extracted page number {page_num} from text '{text}'")
+            elif re.search(r'\d+$', text):
+                number_match = re.search(r'(\d+)$', text)
+                if number_match:
+                    page_num = int(number_match.group(1))
+                    clean_text = number_match.group(1)
+                    logger.info(f"🔍 Extracted page number {page_num} from text '{text}'")
+            
+            # If we found a page number, check pagination context
+            if page_num is not None:
+                logger.info(f"🎯 FOUND PAGE NUMBER {page_num} - checking context...")
                 
                 # Case 1: Link with href and pagination parameters
                 if href and any(param in href.lower() for param in ['page=', 'stranka=', 'p=', 'pg=', 'pagenum=']):
                     page_number_count += 1
                     href_page_count += 1
-                    logger.debug(f"📄 Found numbered page link with href: {text} -> {href}")
+                    logger.info(f"📄 COUNTED: numbered page link with href: {clean_text} -> {href}")
                 
-                # Case 2: Link without href but with pagination CSS classes (like Středočeský)
+                # Case 2: Link without href but with pagination CSS classes
                 elif not href and any(css_class in class_names.lower()
                                      for css_class in ['pagination', 'pager', 'gov-pagination', 'strlistovani']):
                     page_number_count += 1
                     no_href_page_count += 1
-                    logger.debug(f"📄 Found numbered page element without href: {text} (class: {class_names})")
+                    logger.info(f"📄 COUNTED: numbered page element without href: {clean_text} (class: {class_names})")
                 
-                # Case 3: Numbered text near pagination indicators
-                elif not href:
-                    # Check if this numbered element is near other pagination indicators
-                    parent = link.parent
-                    if parent:
-                        parent_classes = ' '.join(parent.get('class', []))
-                        parent_text = parent.get_text().lower()
-                        
-                        if (any(css_class in parent_classes.lower()
-                               for css_class in ['pagination', 'pager', 'gov-pagination', 'strlistovani']) or
-                            any(keyword in parent_text
-                               for keyword in ['stránka', 'page', 'zobrazeno', 'celkem'])):
-                            page_number_count += 1
-                            no_href_page_count += 1
-                            logger.debug(f"📄 Found numbered page element by context: {text} (parent context)")
+                # Case 3: Check if element has pagination-related CSS classes even with href
+                elif any(css_class in class_names.lower()
+                        for css_class in ['pagination', 'pager', 'gov-pagination', 'strlistovani']):
+                    page_number_count += 1
+                    if href:
+                        href_page_count += 1
+                    else:
+                        no_href_page_count += 1
+                    logger.info(f"📄 COUNTED: pagination CSS element: {clean_text} (class: {class_names}) href: {bool(href)}")
         
-        if page_number_count >= 2:  # Need at least 2 numbered pages to indicate pagination
-            pagination_indicators.append(f"numbered_page_elements: {page_number_count} total ({href_page_count} with href, {no_href_page_count} without href)")
-            confidence_score += 40
-            logger.info(f"✅ STRONG INDICATOR: Found {page_number_count} numbered page elements")
-            logger.info(f"📊 Breakdown: {href_page_count} with href, {no_href_page_count} without href")
+        logger.info(f"🔍 NUMBERED PAGE DETECTION COMPLETE: Found {page_number_count} numbered page elements")
+        logger.info(f"📊 Breakdown: {href_page_count} with href, {no_href_page_count} without href")
         
-        # PATTERN 2: Look for "Next" / "Previous" / "Další" / "Předchozí" navigation
-        next_prev_keywords = [
-            'next', 'previous', 'prev', 'další', 'předchozí', 'následující',
-            'next page', 'previous page', 'další stránka', 'předchozí stránka',
-            'vpred', 'zpet', 'vpřed', 'zpět'
-        ]
-        
+        # Look for next/previous navigation
+        next_prev_keywords = ['next', 'previous', 'prev', 'last', 'first', 'další', 'předchozí', 'následující', 'poslední', 'první']
         next_prev_count = 0
-        # ENHANCED: Check ALL <a> and <button> elements, not just those with href
+        
         for element in soup.find_all(['a', 'button']):
             text = element.get_text(strip=True).lower()
             title = element.get('title', '').lower()
-            class_names = ' '.join(element.get('class', [])).lower()
             
-            if any(keyword in text or keyword in title or keyword in class_names
-                   for keyword in next_prev_keywords):
+            if any(keyword in text or keyword in title for keyword in next_prev_keywords):
                 next_prev_count += 1
-                logger.debug(f"🔄 Found next/prev navigation: {text} (title: {title}) (element: {element.name})")
         
+        # Calculate confidence
+        if page_number_count >= 3:
+            pagination_indicators.append(f"numbered_page_elements: {page_number_count}")
+            confidence_score += 40
+        elif page_number_count >= 1:
+            pagination_indicators.append(f"partial_numbered_page_elements: {page_number_count}")
+            confidence_score += 20
+            
         if next_prev_count >= 1:
             pagination_indicators.append(f"next_prev_navigation: {next_prev_count} elements")
             confidence_score += 25
-            logger.info(f"✅ NAVIGATION INDICATOR: Found {next_prev_count} next/previous navigation elements")
         
-        # PATTERN 3: Look for page count indicators
-        # Examples: "Zobrazeno je 25 z celkem 215", "Page 1 of 9", "Showing 1-10 of 50"
-        page_count_patterns = [
-            r'zobrazeno.*?(\d+).*?celkem.*?(\d+)',  # Czech: "Zobrazeno je X z celkem Y"
-            r'page.*?(\d+).*?of.*?(\d+)',  # English: "Page X of Y"
-            r'showing.*?(\d+).*?of.*?(\d+)',  # English: "Showing X of Y"
-            r'(\d+)\s*-\s*(\d+).*?of.*?(\d+)',  # English: "1-10 of 50"
-            r'stránce.*?(\d+)',  # Czech: "na stránce"
-            r'(\d+)\s*/\s*(\d+)',  # Format: "1/5"
-        ]
-        
-        page_count_matches = 0
-        full_text = soup.get_text().lower()
-        
-        for pattern in page_count_patterns:
-            matches = re.findall(pattern, full_text, re.IGNORECASE)
-            if matches:
-                page_count_matches += len(matches)
-                logger.debug(f"📊 Found page count pattern: {pattern} -> {matches}")
-        
-        if page_count_matches >= 1:
-            pagination_indicators.append(f"page_count_indicators: {page_count_matches} matches")
-            confidence_score += 20
-            logger.info(f"✅ COUNT INDICATOR: Found {page_count_matches} page count indicators")
-        
-        # PATTERN 4: Look for pagination CSS classes and HTML structures
-        pagination_classes = [
-            'pagination', 'pager', 'page-nav', 'page-navigation', 'paginate',
-            'strlistovani', 'stranka', 'stránkování', 'stránkovač'
-        ]
-        
-        pagination_elements = 0
-        for class_name in pagination_classes:
-            elements = soup.find_all(class_=lambda x: x and class_name in ' '.join(x).lower())
-            if elements:
-                pagination_elements += len(elements)
-                logger.debug(f"🎯 Found pagination class '{class_name}': {len(elements)} elements")
-        
-        if pagination_elements >= 1:
-            pagination_indicators.append(f"pagination_css_classes: {pagination_elements} elements")
-            confidence_score += 15
-            logger.info(f"✅ CSS INDICATOR: Found {pagination_elements} pagination CSS elements")
-        
-        # PATTERN 5: Look for ellipsis indicators (..., …) often used in pagination
-        ellipsis_count = 0
-        ellipsis_indicators = ['...', '…', '&hellip;']
-        
-        for indicator in ellipsis_indicators:
-            if indicator in html_content:
-                ellipsis_count += html_content.count(indicator)
-        
-        if ellipsis_count >= 1:
-            pagination_indicators.append(f"ellipsis_indicators: {ellipsis_count} found")
-            confidence_score += 10
-            logger.debug(f"📋 Found {ellipsis_count} ellipsis indicators")
-        
-        # PATTERN 6: Look for URL parameters indicating pagination in the current page
-        current_url_has_pagination_params = False
-        if url:
-            if any(param in url.lower() for param in ['page=', 'stranka=', 'p=', 'pg=', 'pagenum=']):
-                current_url_has_pagination_params = True
-                pagination_indicators.append("current_url_has_pagination_params")
-                confidence_score += 15
-                logger.info(f"✅ URL INDICATOR: Current URL contains pagination parameters")
-        
-        # Determine if pagination is detected based on confidence score
-        has_pagination = confidence_score >= 30  # Threshold for considering pagination present
+        # Determine if pagination is detected
+        has_pagination = confidence_score >= 60  # Threshold for legacy detection
         
         result = {
             'has_pagination': has_pagination,
             'indicators': pagination_indicators,
             'confidence': confidence_score,
-            'page_number_count': page_number_count,
-            'next_prev_count': next_prev_count,
-            'page_count_matches': page_count_matches,
-            'pagination_elements': pagination_elements,
-            'ellipsis_count': ellipsis_count,
-            'url_has_pagination_params': current_url_has_pagination_params
+            'ai_analysis': False,  # Mark as legacy analysis
+            'legacy_fallback': True
         }
         
         if has_pagination:
-            logger.info(f"🎯 PAGINATION DETECTED: Confidence {confidence_score}% with indicators: {pagination_indicators}")
-            logger.info(f"📊 Detection details: {page_number_count} numbered links, {next_prev_count} nav elements, {page_count_matches} count indicators")
+            logger.info(f"🎯 LEGACY PAGINATION DETECTED: Confidence {confidence_score}%")
         else:
-            logger.info(f"❌ NO PAGINATION: Confidence {confidence_score}% (threshold: 30%) - indicators: {pagination_indicators}")
+            logger.info(f"❌ LEGACY: NO PAGINATION (confidence: {confidence_score}%)")
         
         return result
         
     except Exception as e:
-        logger.error(f"❌ Error detecting pagination in HTML: {str(e)}")
+        logger.error(f"❌ Error in legacy pagination detection: {str(e)}")
         return {
             'has_pagination': False,
             'indicators': [],
             'confidence': 0,
-            'reason': f'Error: {str(e)}'
+            'reason': f'Legacy detection error: {str(e)}'
         }
 
 def _construct_pagination_url(current_url, page_number):
@@ -2440,24 +2802,95 @@ def _construct_pagination_url(current_url, page_number):
         logger.error(f"❌ Error constructing pagination URL: {str(e)}")
         return None
 
-def extract_pagination_urls(html_content, base_url, url=""):
+def extract_pagination_urls(html_content, base_url, url="", ai_pagination_data=None):
     """
-    Extract all pagination URLs from HTML content with ENHANCED detection for various pagination patterns.
+    Extract all pagination URLs from HTML content with AI-POWERED or legacy detection.
     
-    This function finds all pagination links and constructs absolute URLs for each page.
-    It handles various pagination patterns including links with and without href attributes.
+    This function can work with AI-detected pagination data (preferred) or fall back to
+    manual HTML parsing for various pagination patterns.
     
     Args:
         html_content (str): HTML content containing pagination elements
         base_url (str): Base URL for constructing absolute URLs
         url (str): Current URL for context and logging
+        ai_pagination_data (dict, optional): AI-detected pagination data with relative URLs
     
     Returns:
         list: List of dictionaries containing pagination URLs and metadata
     """
-    logger.info(f"🔗 PAGINATION EXTRACTION: Extracting pagination URLs from HTML content")
+    logger.info(f"🔗 PAGINATION EXTRACTION: Processing pagination URLs")
     
     pagination_urls = []
+    
+    # PREFERRED METHOD: Use AI-detected pagination data if available
+    if ai_pagination_data and ai_pagination_data.get('ai_analysis') and ai_pagination_data.get('pagination_urls'):
+        logger.info(f"🤖 Using AI-detected pagination data with {len(ai_pagination_data['pagination_urls'])} URLs")
+        
+        seen_urls = set()
+        for ai_pag_url in ai_pagination_data['pagination_urls']:
+            try:
+                relative_url = ai_pag_url.get('relative_url', '')
+                page_number = ai_pag_url.get('page_number')
+                link_text = ai_pag_url.get('link_text', '')
+                link_type = ai_pag_url.get('link_type', 'unknown')
+                
+                if not relative_url:
+                    logger.warning(f"⚠️ Skipping AI pagination URL with empty relative_url")
+                    continue
+                
+                # Convert AI-provided relative URL to absolute URL using urljoin
+                try:
+                    absolute_url = urljoin(base_url, relative_url)
+                    logger.debug(f"🔧 AI URL construction: base='{base_url}' + relative='{relative_url}' = '{absolute_url}'")
+                    
+                    # Validate the resulting URL
+                    parsed_result = urlparse(absolute_url)
+                    if not parsed_result.scheme or not parsed_result.netloc:
+                        logger.warning(f"⚠️ Invalid absolute URL generated from AI data: {absolute_url}, skipping")
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error constructing absolute URL from AI data: base='{base_url}' + relative='{relative_url}': {str(e)}")
+                    continue
+                
+                # Skip duplicates
+                if absolute_url in seen_urls:
+                    logger.debug(f"⏭️ Skipping duplicate AI URL: {absolute_url}")
+                    continue
+                seen_urls.add(absolute_url)
+                
+                # Skip if it's the same as current URL (self-reference)
+                if absolute_url == url:
+                    logger.debug(f"⏭️ Skipping self-reference AI URL: {absolute_url}")
+                    continue
+                
+                # Create pagination URL info from AI data
+                url_info = {
+                    'url': absolute_url,
+                    'page_number': page_number,
+                    'link_text': link_text,
+                    'link_title': '',  # Not provided by AI
+                    'link_classes': '',  # Not provided by AI
+                    'original_href': relative_url,  # Store original AI relative URL
+                    'cleaned_href': relative_url,  # AI URLs are already clean
+                    'constructed_url': relative_url,
+                    'link_type': link_type,
+                    'element_type': 'ai_detected',
+                    'ai_source': True  # Mark as AI-detected
+                }
+                
+                pagination_urls.append(url_info)
+                logger.info(f"✅ Added AI-detected pagination URL: {absolute_url} (page: {page_number}, text: '{link_text}', type: {link_type})")
+                
+            except Exception as e:
+                logger.error(f"❌ Error processing AI pagination URL: {str(e)}")
+                continue
+        
+        logger.info(f"🤖 AI PAGINATION EXTRACTION COMPLETE: Found {len(pagination_urls)} content-relevant pagination URLs")
+        return pagination_urls
+    
+    # FALLBACK METHOD: Legacy HTML parsing when AI data is not available
+    logger.info(f"🔗 Using legacy HTML parsing for pagination URL extraction")
     
     if not html_content or not html_content.strip():
         logger.warning(f"⚠️ No HTML content provided for pagination URL extraction")
@@ -2634,7 +3067,7 @@ def extract_pagination_urls(html_content, base_url, url=""):
         # Combine: numbered pages first, then navigation pages
         sorted_pagination_urls = numbered_pages + navigation_pages
         
-        logger.info(f"🔗 PAGINATION EXTRACTION COMPLETE: Found {len(sorted_pagination_urls)} pagination URLs")
+        logger.info(f"🔗 LEGACY PAGINATION EXTRACTION COMPLETE: Found {len(sorted_pagination_urls)} pagination URLs")
         logger.info(f"📊 Breakdown: {len(numbered_pages)} numbered pages, {len(navigation_pages)} navigation links")
         
         if numbered_pages:
@@ -2714,7 +3147,8 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
         logger.info(f"🔗 PAGINATION URL CONSTRUCTION: Always using current URL as base")
         logger.info(f"🏗️ Base URL for pagination: {url}")
         
-        pagination_urls = extract_pagination_urls(html_content, url, url)
+        # Pass AI pagination data to extract_pagination_urls for intelligent processing
+        pagination_urls = extract_pagination_urls(html_content, url, url, ai_pagination_data=pagination_result)
         
         if not pagination_urls:
             logger.warning(f"⚠️ Pagination detected but no pagination URLs extracted, processing normally")
@@ -3828,11 +4262,25 @@ def _process_single_chunk_through_openrouter(chunk_content, target_tokens):
             timeout=REQUEST_TIMEOUT * 2  # Allow more time for processing
         )
         response.raise_for_status()
-        
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR CHUNK PROCESSING ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
         data = response.json()
-        
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, "SINGLE_CHUNK_PROCESSING")
+
         if "choices" in data and len(data["choices"]) > 0:
-            processed_content = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+            processed_content = message.get("content", "").strip()
+            
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not processed_content and message.get("reasoning"):
+                processed_content = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted processed content from reasoning field")
             
             # Basic validation
             if processed_content and len(processed_content) > 10:
@@ -3975,12 +4423,26 @@ def summarize_content_via_openrouter(markdown_content, title="", url="", target_
             timeout=REQUEST_TIMEOUT * 2  # Allow more time for summarization
         )
         response.raise_for_status()
-        
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR CONTENT SUMMARIZATION ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
         data = response.json()
-        
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, "CONTENT_SUMMARIZATION", url)
+
         if "choices" in data and len(data["choices"]) > 0:
-            summarized_content = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+            summarized_content = message.get("content", "").strip()
             
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not summarized_content and message.get("reasoning"):
+                summarized_content = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted summarized content from reasoning field")
+
             # Use OpenRouter response as-is (removed strict format validation)
             result_tokens = count_tokens_approximate(summarized_content)
             logger.info(f"OpenRouter response token count: {result_tokens}")
@@ -6014,6 +6476,16 @@ def main(args=None):
         logger.info(f"RSS feeds processed: {len(RSS_FEEDS) if not sitemap_only and not xml_only else 0}")
         if vector_store_id:
             logger.info(f"Vector Store uploads enabled: {vector_store_id}")
+
+        # Log final OpenRouter token usage summary
+        if global_token_usage['api_calls_count'] > 0:
+            logger.info(f"=== OPENROUTER TOKEN USAGE SUMMARY ===")
+            logger.info(f"Total API calls made: {global_token_usage['api_calls_count']}")
+            logger.info(f"Total input tokens (prompts): {global_token_usage['total_prompt_tokens']:,}")
+            logger.info(f"Total output tokens (completions): {global_token_usage['total_completion_tokens']:,}")
+            logger.info(f"Total tokens used: {global_token_usage['total_tokens']:,}")
+            logger.info(f"Average tokens per call: {global_token_usage['total_tokens'] / global_token_usage['api_calls_count']:.1f}")
+            logger.info("=====================================")
         
         print(f"\n🎉 Processing complete!")
         print(f"📁 Files saved to: {os.path.abspath(OUTPUT_DIR)}")
@@ -6045,6 +6517,15 @@ def main(args=None):
             print(f"🔄 Vector Store uploads: {vector_store_id}")
         if enable_resume:
             print(f"🔄 Resume mode: ENABLED - Skipped {len(local_files_cache) if local_files_cache else 0} already processed URLs")
+
+        # Print OpenRouter token usage summary to console
+        if global_token_usage['api_calls_count'] > 0:
+            print(f"\n🤖 OpenRouter API Usage:")
+            print(f"   📞 API calls: {global_token_usage['api_calls_count']}")
+            print(f"   📥 Input tokens: {global_token_usage['total_prompt_tokens']:,}")
+            print(f"   📤 Output tokens: {global_token_usage['total_completion_tokens']:,}")
+            print(f"   🔄 Total tokens: {global_token_usage['total_tokens']:,}")
+            print(f"   📊 Avg per call: {global_token_usage['total_tokens'] / global_token_usage['api_calls_count']:.1f} tokens")
         
     except Exception as e:
         logger.error(f"Critical error in main function: {str(e)}", exc_info=True)
