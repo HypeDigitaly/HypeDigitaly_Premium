@@ -215,6 +215,9 @@ LOG_DIR = None
 LOG_FILE = None
 OUTPUT_DIR = None
 
+# Global variables that will be set by load_configuration()
+RECURSIVE_URLS = []
+
 # USAGE EXAMPLES:
 # Basic usage: python scrape_sitemap_GPT.py
 # With debug mode: python scrape_sitemap_GPT.py --debug
@@ -256,7 +259,7 @@ def load_configuration(config_file="config.json"):
     global OPENROUTER_MAX_TOKENS, OPENROUTER_MODELS, OPENROUTER_TEMPERATURE, OPENROUTER_TOP_P, OPENROUTER_TARGET_LANGUAGE
     global BASE_URL, PARSED_BASE_URL, BASE_NETLOC, NON_WWW_BASE_NETLOC, BASE_SCHEME
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
-    global BLACKLISTED_URLS, RSS_FEEDS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
+    global BLACKLISTED_URLS, RSS_FEEDS, RECURSIVE_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
     global VERBOSE_URL_MATCHING, TEST_URLS
     
@@ -344,6 +347,31 @@ def load_configuration(config_file="config.json"):
     # Set RSS feeds
     RSS_FEEDS = CONFIG["website"].get("rss_feeds", [])
     
+    # Set recursive URLs for suburls processing (optional) - support both old and new format
+    recursive_urls_config = CONFIG["website"].get("recursive_urls", [])
+    RECURSIVE_URLS = []
+    
+    # Parse recursive URLs configuration - support both string format and object format with recursive_level
+    for item in recursive_urls_config:
+        if isinstance(item, str):
+            # Old format: simple string URL (default to level 1 for backward compatibility)
+            RECURSIVE_URLS.append({
+                'url': item,
+                'recursive_level': 1
+            })
+        elif isinstance(item, dict) and 'url' in item:
+            # New format: object with url and recursive_level
+            recursive_level = item.get('recursive_level', 1)
+            if not isinstance(recursive_level, int) or recursive_level < 1:
+                logger.warning(f"Invalid recursive_level {recursive_level} for URL {item['url']}, defaulting to 1")
+                recursive_level = 1
+            RECURSIVE_URLS.append({
+                'url': item['url'],
+                'recursive_level': recursive_level
+            })
+        else:
+            logger.warning(f"Invalid recursive_urls configuration item: {item}, skipping")
+    
     # Set test URLs for testing purposes (optional)
     TEST_URLS = CONFIG["website"].get("test_urls", [])
     
@@ -393,9 +421,16 @@ def load_configuration(config_file="config.json"):
     print(f"📡 RSS last run file: {RSS_LAST_RUN_FILE}")
     print(f"🗺️  Sitemap last run file: {SITEMAP_LAST_RUN_FILE}")
     print(f"📡 RSS feeds: {len(RSS_FEEDS)} configured")
+    print(f"🔄 Recursive URLs: {len(RECURSIVE_URLS)} configured")
     print(f"🧪 Test URLs: {len(TEST_URLS)} configured")
     if TEST_URLS:
         print(f"⚠️  TEST MODE: Test URLs will override HTML sitemap processing")
+    if RECURSIVE_URLS:
+        print(f"🔄 SUBURLS MODE: Suburls detection enabled for {len(RECURSIVE_URLS)} URLs")
+        for recursive_config in RECURSIVE_URLS:
+            url = recursive_config.get('url', 'N/A')
+            level = recursive_config.get('recursive_level', 1)
+            print(f"   📊 {url} → max depth: {level}")
 
 # ============================================================================
 # CONSTANTS (will be set by load_configuration)
@@ -2333,7 +2368,7 @@ def detect_pagination_in_html(html_content, url=""):
     try:
         # Define JSON Schema for structured output validation
         pagination_schema = {
-            "name": "pagination_detection",
+            "name": "pagination_and_suburls_detection",
             "strict": True,
             "schema": {
                 "type": "object",
@@ -2380,6 +2415,34 @@ def detect_pagination_in_html(html_content, url=""):
                             "additionalProperties": False
                         }
                     },
+                    "suburls": {
+                        "type": "array",
+                        "description": "Array of direct descendant/suburl URLs found that extend the current URL path (e.g., current_url/something)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "relative_url": {
+                                    "type": "string",
+                                    "description": "RELATIVE URL compatible with urljoin() - examples: '/additional-path', '/subdirectory', '/document.pdf'"
+                                },
+                                "link_text": {
+                                    "type": "string",
+                                    "description": "Visible text content of the suburl link"
+                                },
+                                "url_type": {
+                                    "type": "string",
+                                    "enum": ["subdirectory", "document", "detail_page", "file", "other"],
+                                    "description": "Type of suburl identified based on content"
+                                },
+                                "is_direct_descendant": {
+                                    "type": "boolean",
+                                    "description": "True if this URL is a direct descendant of current URL (current_url/something pattern)"
+                                }
+                            },
+                            "required": ["relative_url", "link_text", "url_type", "is_direct_descendant"],
+                            "additionalProperties": False
+                        }
+                    },
                     "pagination_indicators": {
                         "type": "array",
                         "description": "List of pagination indicators found during analysis",
@@ -2388,15 +2451,17 @@ def detect_pagination_in_html(html_content, url=""):
                         }
                     }
                 },
-                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "pagination_indicators"],
+                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "suburls", "pagination_indicators"],
                 "additionalProperties": False
             }
         }
         
         # SYSTEM PROMPT: Instructions, methodology, and examples
-        system_prompt = """🤖 EXPERT CONTENT-AWARE PAGINATION ANALYST: You are a specialist who analyzes HTML content to detect pagination patterns with CONTENT RELEVANCE VALIDATION using STRUCTURED OUTPUTS.
+        system_prompt = """🤖 EXPERT CONTENT-AWARE PAGINATION & SUBURLS ANALYST: You are a specialist who analyzes HTML content to detect both pagination patterns and direct descendant suburls with CONTENT RELEVANCE VALIDATION using STRUCTURED OUTPUTS.
 
-## 🎯 TASK: Analyze HTML content and return VALIDATED JSON identifying pagination elements ONLY when they paginate the SAME content type as the current page
+## 🎯 DUAL TASK:
+1. Analyze HTML content and return VALIDATED JSON identifying pagination elements ONLY when they paginate the SAME content type as the current page
+2. Extract direct descendant suburls that follow the pattern [CURRENT_URL]/[SOMETHING] for related content exploration
 
 ## 🚨 CRITICAL CONTENT RELEVANCE RULES:
 
@@ -2411,7 +2476,19 @@ def detect_pagination_in_html(html_content, url=""):
 - Base domain navigation/menu
 - Cross-section pagination (different content types)
 
-## 🧠 CONTENT-AWARE ANALYSIS METHODOLOGY:
+**✅ DETECT SUBURLS FOR:**
+- Links that extend the current URL path as direct descendants
+- Related content within the same section/category
+- Subsections, documents, or detail pages under current URL
+- Content that follows [CURRENT_URL]/[ADDITIONAL_PATH] pattern
+
+**❌ DO NOT DETECT SUBURLS FOR:**
+- Links to completely different sections
+- External domains
+- Parent or sibling paths (not descendants)
+- Unrelated navigation links
+
+## 🧠 ENHANCED ANALYSIS METHODOLOGY:
 
 **STEP 1: IDENTIFY CURRENT PAGE CONTENT TYPE**
 First determine what type of content this page contains:
@@ -2421,6 +2498,7 @@ First determine what type of content this page contains:
 - Events/Calendar (události, kalendář, events, calendar)
 - Products/Services (produkty, služby, products, services)
 - Grants/Funding (dotace, granty, funding, grants)
+- Meeting/Council pages (zastupitelstvo, usnesení, rada)
 - Other list-based content
 
 **STEP 2: VALIDATE PAGINATION RELEVANCE**
@@ -2437,42 +2515,51 @@ For each validated pagination element:
 - Classify link type (numbered, navigation, etc.)
 - Ensure URLs lead to MORE of the SAME content
 
+**STEP 4: EXTRACT DIRECT DESCENDANT SUBURLS**
+Identify links that are direct descendants of the current URL:
+- Look for links where href starts with current URL path + additional segments
+- Examples: if current URL is "/kraj/zastupitelstvo/usneseni-zastupitelstva", find links like "/kraj/zastupitelstvo/usneseni-zastupitelstva/2024", "/kraj/zastupitelstvo/usneseni-zastupitelstva/archiv"
+- Classify URL type (subdirectory, document, detail_page, file, other)
+- Extract relative path that can be joined with current URL
+
 ## 🚨 URL FORMAT REQUIREMENTS:
 - **ALWAYS return RELATIVE URLs** compatible with urljoin()
-- Examples: "?page=1", "?stranka=2", "/aktuality?page=3"
+- Examples for pagination: "?page=1", "?stranka=2", "/aktuality?page=3"
+- Examples for suburls: "/additional-path", "/subdirectory", "/document.pdf", "/detail-page"
 - **NEVER** include domain/protocol
 
 ## 🔍 EXAMPLE ANALYSIS:
 
-**SCENARIO 1: News/Articles Page**
+**SCENARIO 1: Council Resolutions Page with Pagination and Suburls**
 ```html
-<h1>Aktuality</h1>
-<div class="news-list">
-    <article>First news article...</article>
-    <article>Second news article...</article>
+<h1>Usnesení zastupitelstva</h1>
+<div class="resolutions-list">
+    <article>Resolution 1...</article>
+    <article>Resolution 2...</article>
+</div>
+<div class="links">
+    <a href="/kraj/zastupitelstvo/usneseni-zastupitelstva/2024">Usnesení 2024</a>
+    <a href="/kraj/zastupitelstvo/usneseni-zastupitelstva/archiv">Archiv usnesení</a>
 </div>
 <div class="gov-pagination">
     <a href="?page=0" class="gov-pagination__item--active">1</a>
     <a href="?page=1" class="gov-pagination__item">2</a>
-    <a href="?page=2" class="gov-pagination__item">3</a>
 </div>
 ```
-**RESULT: ✅ DETECT** - Pagination is for more news articles (same content type)
+**RESULT: ✅ DETECT BOTH** - Pagination for more resolutions + suburls for related resolution content
 
-**SCENARIO 2: Mixed Navigation**
+**SCENARIO 2: News Page with Only Suburls**
 ```html
-<h1>Homepage</h1>
-<nav class="main-menu">
-    <a href="/news">News</a>
-    <a href="/contacts">Contacts</a>
-    <a href="/documents">Documents</a>
-</nav>
-<div class="pagination">
-    <a href="/products?page=1">1</a>
-    <a href="/products?page=2">2</a>
+<h1>Aktuality</h1>
+<div class="news-content">
+    <article>Latest news...</article>
+</div>
+<div class="related-links">
+    <a href="/aktuality/tiskove-zpravy">Tiskové zprávy</a>
+    <a href="/aktuality/archiv">Archiv aktualit</a>
 </div>
 ```
-**RESULT: ❌ DO NOT DETECT** - Pagination is for products but current page is homepage (different content types)
+**RESULT: ✅ DETECT SUBURLS** - Direct descendants for related news content, no pagination
 
 ## 📋 CONFIDENCE SCORING:
 - High (80-100): Clear content match + strong pagination indicators
@@ -2481,15 +2568,20 @@ For each validated pagination element:
 - None (0-39): No content match or no legitimate pagination"""
 
         # USER PROMPT: Current context and HTML content to analyze
-        user_prompt = f"""Analyze this HTML content for CONTENT-RELEVANT pagination patterns.
+        user_prompt = f"""Analyze this HTML content for CONTENT-RELEVANT pagination patterns AND direct descendant suburls.
 
 Current URL: {url}
 
 Instructions:
 1. First identify what type of content this page displays
 2. Then look for pagination that provides MORE of that SAME content type
-3. Ignore general navigation or unrelated pagination
-4. Return RELATIVE URLs only (compatible with urljoin)
+3. Also extract direct descendant suburls that extend the current URL path
+4. Ignore general navigation or unrelated pagination
+5. Return RELATIVE URLs only (compatible with urljoin)
+
+DUAL ANALYSIS REQUIRED:
+- **PAGINATION**: Look for links that provide more of the same content (page 2, page 3, etc.)
+- **SUBURLS**: Look for links that are direct descendants of current URL path (e.g., if current URL is "/kraj/zastupitelstvo/usneseni-zastupitelstva", find links like "/kraj/zastupitelstvo/usneseni-zastupitelstva/2024")
 
 HTML content to analyze:
 {html_content}"""
@@ -2510,7 +2602,7 @@ HTML content to analyze:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 1000,  # Enough for structured JSON response
+            "max_tokens": 2000,  # Increased for suburls responses which can be large
             "temperature": 0.1,  # Low temperature for consistent analysis
             "top_p": 0.9,
             "response_format": {
@@ -2557,13 +2649,15 @@ HTML content to analyze:
                     confidence = pagination_data.get('confidence_score', 0)
                     content_type = pagination_data.get('content_type_detected', 'unknown')
                     pagination_urls = pagination_data.get('pagination_urls', [])
+                    suburls = pagination_data.get('suburls', [])
                     indicators = pagination_data.get('pagination_indicators', [])
                     
-                    logger.info(f"🤖 AI PAGINATION ANALYSIS COMPLETE:")
+                    logger.info(f"🤖 AI PAGINATION & SUBURLS ANALYSIS COMPLETE:")
                     logger.info(f"   📊 Has pagination: {has_pagination}")
                     logger.info(f"   📈 Confidence: {confidence}%")
                     logger.info(f"   📄 Content type: {content_type}")
                     logger.info(f"   🔗 Found {len(pagination_urls)} pagination URLs")
+                    logger.info(f"   🔄 Found {len(suburls)} suburls")
                     logger.info(f"   📋 Indicators: {indicators}")
                     
                     if has_pagination:
@@ -2575,12 +2669,20 @@ HTML content to analyze:
                         logger.info(f"❌ AI: NO CONTENT-RELEVANT PAGINATION DETECTED (confidence: {confidence}%)")
                         logger.info(f"📄 Content type analyzed: {content_type}")
                     
+                    if suburls:
+                        logger.info(f"✅ AI DETECTED {len(suburls)} SUBURLS:")
+                        for i, suburl in enumerate(suburls, 1):
+                            logger.info(f"   {i}. {suburl.get('url_type', 'unknown')} suburl: '{suburl.get('link_text', '')}' -> {suburl.get('relative_url', '')}")
+                    else:
+                        logger.info(f"❌ AI: NO SUBURLS DETECTED")
+                    
                     return {
                         'has_pagination': has_pagination,
                         'indicators': indicators,
                         'confidence': confidence,
                         'content_type_detected': content_type,
                         'pagination_urls': pagination_urls,
+                        'suburls': suburls,
                         'ai_analysis': True
                     }
                     
@@ -2744,6 +2846,117 @@ def _detect_pagination_legacy_fallback(html_content, url=""):
             'confidence': 0,
             'reason': f'Legacy detection error: {str(e)}'
         }
+
+def is_url_recursive_enabled(url):
+    """
+    Check if a URL is configured for recursive suburls processing and return recursion level.
+    
+    Args:
+        url (str): URL to check against the recursive_urls configuration
+    
+    Returns:
+        tuple: (is_enabled, max_recursive_level) - (bool, int)
+               - (False, 0) if URL is not configured for recursive processing
+               - (True, level) if URL is enabled, where level is the max recursion depth
+    """
+    if not RECURSIVE_URLS:
+        return False, 0
+    
+    # Normalize URL for comparison
+    normalized_url = url.rstrip('/')
+    
+    for recursive_config in RECURSIVE_URLS:
+        # Handle both old format (string) and new format (dict)
+        if isinstance(recursive_config, str):
+            recursive_url = recursive_config
+            recursive_level = 1  # Default for backward compatibility
+        else:
+            recursive_url = recursive_config.get('url', '')
+            recursive_level = recursive_config.get('recursive_level', 1)
+        
+        recursive_url_normalized = recursive_url.rstrip('/')
+        
+        # Check if the URL matches exactly or is a descendant of the recursive URL
+        if normalized_url == recursive_url_normalized or normalized_url.startswith(recursive_url_normalized + '/'):
+            logger.info(f"🔄 URL {url} is enabled for recursive suburls processing (matches: {recursive_url}, max level: {recursive_level})")
+            return True, recursive_level
+    
+    logger.debug(f"URL {url} is not configured for recursive suburls processing")
+    return False, 0
+
+def extract_suburls_from_ai_data(suburls_data, base_url, current_url=""):
+    """
+    Extract and process suburls from AI-detected data.
+    
+    Args:
+        suburls_data (list): List of suburl dictionaries from AI response
+        base_url (str): Base URL for constructing absolute URLs
+        current_url (str): Current URL for context and logging
+    
+    Returns:
+        list: List of dictionaries containing suburl URLs and metadata
+    """
+    logger.info(f"🔄 SUBURLS EXTRACTION: Processing {len(suburls_data)} AI-detected suburls")
+    
+    suburl_list = []
+    seen_urls = set()
+    
+    for i, suburl_info in enumerate(suburls_data, 1):
+        try:
+            relative_url = suburl_info.get('relative_url', '')
+            link_text = suburl_info.get('link_text', '')
+            url_type = suburl_info.get('url_type', 'other')
+            is_direct_descendant = suburl_info.get('is_direct_descendant', False)
+            
+            if not relative_url:
+                logger.warning(f"⚠️ Skipping AI suburl with empty relative_url")
+                continue
+            
+            # Convert AI-provided relative URL to absolute URL using urljoin
+            try:
+                absolute_url = urljoin(base_url, relative_url)
+                logger.debug(f"🔧 AI suburl construction: base='{base_url}' + relative='{relative_url}' = '{absolute_url}'")
+                
+                # Validate the resulting URL
+                parsed_result = urlparse(absolute_url)
+                if not parsed_result.scheme or not parsed_result.netloc:
+                    logger.warning(f"⚠️ Invalid absolute URL generated from AI suburl data: {absolute_url}, skipping")
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"❌ Error constructing absolute URL from AI suburl data: base='{base_url}' + relative='{relative_url}': {str(e)}")
+                continue
+            
+            # Skip duplicates
+            if absolute_url in seen_urls:
+                logger.debug(f"⏭️ Skipping duplicate AI suburl: {absolute_url}")
+                continue
+            seen_urls.add(absolute_url)
+            
+            # Skip if it's the same as current URL (self-reference)
+            if absolute_url == current_url:
+                logger.debug(f"⏭️ Skipping self-reference AI suburl: {absolute_url}")
+                continue
+            
+            # Create suburl info
+            url_info = {
+                'url': absolute_url,
+                'link_text': link_text,
+                'url_type': url_type,
+                'is_direct_descendant': is_direct_descendant,
+                'original_relative_url': relative_url,
+                'ai_source': True
+            }
+            
+            suburl_list.append(url_info)
+            logger.info(f"✅ Added AI-detected suburl: {absolute_url} (type: {url_type}, text: '{link_text}')")
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing AI suburl {i}: {str(e)}")
+            continue
+    
+    logger.info(f"🔄 AI SUBURLS EXTRACTION COMPLETE: Found {len(suburl_list)} valid suburls")
+    return suburl_list
 
 def _construct_pagination_url(current_url, page_number):
     """
@@ -3082,7 +3295,7 @@ def extract_pagination_urls(html_content, base_url, url="", ai_pagination_data=N
 
 def process_paginated_url(url, title, path, url_last_modified_map, last_run_timestamp,
                          local_files_cache, enable_resume, vector_store_id, deduplication_enabled,
-                         chunking_strategy, vector_store_cache, remove_selectors, rss_metadata=None):
+                         chunking_strategy, vector_store_cache, remove_selectors, rss_metadata=None, current_depth=0):
     """
     Process a URL that may have pagination by first checking for pagination,
     then processing all subpages if pagination is found.
@@ -3101,6 +3314,7 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
         vector_store_cache (dict): Vector store cache
         remove_selectors (str): CSS selectors to remove
         rss_metadata (dict, optional): RSS metadata if applicable
+        current_depth (int, optional): Current recursion depth (0 = root level)
     
     Returns:
         tuple: (success_count, total_processed) indicating processing results
@@ -3123,42 +3337,72 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
                                              deduplication_enabled, chunking_strategy, vector_store_cache,
                                              remove_selectors, rss_metadata)
         
-        # Step 2: Detect pagination in the HTML content
-        logger.info(f"🔍 Step 2: Analyzing HTML content for pagination indicators")
+        # Step 2: Detect pagination and suburls in the HTML content
+        logger.info(f"🔍 Step 2: Analyzing HTML content for pagination indicators and suburls")
         pagination_result = detect_pagination_in_html(html_content, url)
         
-        if not pagination_result['has_pagination']:
-            logger.info(f"❌ NO PAGINATION DETECTED: Processing URL normally (confidence: {pagination_result['confidence']}%)")
-            logger.info(f"📋 Indicators found: {pagination_result['indicators']}")
-            # Process the URL normally without pagination
+        # Check if current URL is enabled for recursive suburls processing and get max recursion level
+        url_recursive_enabled, max_recursive_level = is_url_recursive_enabled(url)
+        has_suburls = pagination_result.get('suburls', []) and url_recursive_enabled
+        
+        if not pagination_result['has_pagination'] and not has_suburls:
+            logger.info(f"❌ NO PAGINATION OR SUBURLS DETECTED: Processing URL normally")
+            logger.info(f"📋 Pagination confidence: {pagination_result['confidence']}%, Indicators: {pagination_result['indicators']}")
+            logger.info(f"🔄 Suburls found: {len(pagination_result.get('suburls', []))}, Recursive enabled: {url_recursive_enabled}, Max level: {max_recursive_level}, Current depth: {current_depth}")
+            # Process the URL normally without pagination or suburls
             return process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
                                              local_files_cache, enable_resume, vector_store_id,
                                              deduplication_enabled, chunking_strategy, vector_store_cache,
                                              remove_selectors, rss_metadata)
         
-        # Step 3: Extract pagination URLs
-        logger.info(f"✅ PAGINATION DETECTED: Confidence {pagination_result['confidence']}% - Extracting pagination URLs")
-        logger.info(f"📋 Pagination indicators: {pagination_result['indicators']}")
-        print(f"🔍 PAGINATION FOUND: {url}")
-        print(f"📊 Confidence: {pagination_result['confidence']}% with {len(pagination_result['indicators'])} indicators")
+        # Step 3: Extract pagination URLs and suburls
+        pagination_urls = []
+        suburls = []
         
-        # SIMPLIFIED APPROACH: ALWAYS use current URL as base for pagination
-        # This works for both query parameter (?page=1) and path-based (/page/2) pagination
-        logger.info(f"🔗 PAGINATION URL CONSTRUCTION: Always using current URL as base")
-        logger.info(f"🏗️ Base URL for pagination: {url}")
+        if pagination_result['has_pagination']:
+            logger.info(f"✅ PAGINATION DETECTED: Confidence {pagination_result['confidence']}% - Extracting pagination URLs")
+            logger.info(f"📋 Pagination indicators: {pagination_result['indicators']}")
+            print(f"🔍 PAGINATION FOUND: {url}")
+            print(f"📊 Confidence: {pagination_result['confidence']}% with {len(pagination_result['indicators'])} indicators")
+            
+            # SIMPLIFIED APPROACH: ALWAYS use current URL as base for pagination
+            # This works for both query parameter (?page=1) and path-based (/page/2) pagination
+            logger.info(f"🔗 PAGINATION URL CONSTRUCTION: Always using current URL as base")
+            logger.info(f"🏗️ Base URL for pagination: {url}")
+            
+            # Pass AI pagination data to extract_pagination_urls for intelligent processing
+            pagination_urls = extract_pagination_urls(html_content, url, url, ai_pagination_data=pagination_result)
+            
+            if pagination_urls:
+                logger.info(f"🔗 Found {len(pagination_urls)} pagination URLs to process")
+                print(f"📄 Found {len(pagination_urls)} pages to process")
+            else:
+                logger.warning(f"⚠️ Pagination detected but no pagination URLs extracted")
         
-        # Pass AI pagination data to extract_pagination_urls for intelligent processing
-        pagination_urls = extract_pagination_urls(html_content, url, url, ai_pagination_data=pagination_result)
+        if has_suburls:
+            logger.info(f"✅ SUBURLS DETECTED: Found {len(pagination_result['suburls'])} suburls for recursive URL")
+            print(f"🔄 SUBURLS FOUND: {len(pagination_result['suburls'])} direct descendants for {url}")
+            
+            # Extract suburls using AI data
+            suburls = extract_suburls_from_ai_data(pagination_result['suburls'], url, url)
+            
+            if suburls:
+                logger.info(f"🔄 Found {len(suburls)} valid suburls to process")
+                print(f"🔄 Found {len(suburls)} suburls to process")
+            else:
+                logger.warning(f"⚠️ Suburls detected but no valid suburls extracted")
         
-        if not pagination_urls:
-            logger.warning(f"⚠️ Pagination detected but no pagination URLs extracted, processing normally")
+        # Check if we have anything to process beyond the main URL
+        total_additional_urls = len(pagination_urls) + len(suburls)
+        if total_additional_urls == 0:
+            logger.warning(f"⚠️ Pagination or suburls detected but no additional URLs extracted, processing normally")
             return process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
                                              local_files_cache, enable_resume, vector_store_id,
                                              deduplication_enabled, chunking_strategy, vector_store_cache,
                                              remove_selectors, rss_metadata)
         
-        logger.info(f"🔗 Found {len(pagination_urls)} pagination URLs to process")
-        print(f"📄 Found {len(pagination_urls)} pages to process")
+        logger.info(f"🔗 Total additional URLs to process: {total_additional_urls} ({len(pagination_urls)} pagination + {len(suburls)} suburls)")
+        print(f"📄 Total additional URLs: {total_additional_urls} ({len(pagination_urls)} pagination + {len(suburls)} suburls)")
         
         # Step 4: Process the original URL first (page 1 or main page)
         logger.info(f"📄 Step 4: Processing original URL (main page): {url}")
@@ -3171,39 +3415,90 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
         total_processed += main_result[1]
         
         # Step 5: Process all pagination URLs (subpages)
-        logger.info(f"📄 Step 5: Processing {len(pagination_urls)} pagination subpages")
-        
-        for i, page_info in enumerate(pagination_urls, 1):
-            page_url = page_info['url']
-            page_number = page_info.get('page_number')
-            page_text = page_info.get('link_text', '')
+        if pagination_urls:
+            logger.info(f"📄 Step 5a: Processing {len(pagination_urls)} pagination subpages")
             
-            # Create subpage title with _PAGE[N] postfix
-            if page_number is not None:  # Handle page_number=0 correctly (don't treat as falsy)
-                subpage_title = f"{title}_PAGE{page_number}"
-                subpage_path = f"{path} > Page {page_number}"
+            for i, page_info in enumerate(pagination_urls, 1):
+                page_url = page_info['url']
+                page_number = page_info.get('page_number')
+                page_text = page_info.get('link_text', '')
+                
+                # Create subpage title with _PAGE[N] postfix
+                if page_number is not None:  # Handle page_number=0 correctly (don't treat as falsy)
+                    subpage_title = f"{title}_PAGE{page_number}"
+                    subpage_path = f"{path} > Page {page_number}"
+                else:
+                    subpage_title = f"{title}_PAGE{i}"
+                    subpage_path = f"{path} > {page_text or f'Page {i}'}"
+                
+                logger.info(f"📄 Processing pagination subpage {i}/{len(pagination_urls)}: {page_url}")
+                logger.info(f"📝 Subpage title: {subpage_title}")
+                
+                # Process the subpage with all existing functionality
+                subpage_result = process_single_url_normally(page_url, subpage_title, subpage_path,
+                                                           url_last_modified_map, last_run_timestamp,
+                                                           local_files_cache, enable_resume, vector_store_id,
+                                                           deduplication_enabled, chunking_strategy,
+                                                           vector_store_cache, remove_selectors, rss_metadata)
+                
+                success_count += subpage_result[0]
+                total_processed += subpage_result[1]
+                
+                # Small delay between subpage requests
+                time.sleep(1)
+            
+            logger.info(f"✅ PAGINATION PROCESSING COMPLETE: Processed {len(pagination_urls)} pagination URLs")
+        
+        # Step 6: Process all suburls (only if URL is configured for recursive processing AND within depth limit)
+        if suburls and url_recursive_enabled:
+            # Check if we're within the allowed recursion depth
+            if current_depth >= max_recursive_level:
+                logger.info(f"🚫 RECURSION DEPTH LIMIT REACHED: Current depth {current_depth} >= max level {max_recursive_level}")
+                logger.info(f"⚠️ SUBURLS SKIPPED: Found {len(suburls)} suburls but recursion depth limit reached")
+                print(f"🚫 Recursion depth limit reached: {current_depth}/{max_recursive_level} - skipping {len(suburls)} suburls")
             else:
-                subpage_title = f"{title}_PAGE{i}"
-                subpage_path = f"{path} > {page_text or f'Page {i}'}"
-            
-            logger.info(f"📄 Processing pagination subpage {i}/{len(pagination_urls)}: {page_url}")
-            logger.info(f"📝 Subpage title: {subpage_title}")
-            
-            # Process the subpage with all existing functionality
-            subpage_result = process_single_url_normally(page_url, subpage_title, subpage_path,
-                                                       url_last_modified_map, last_run_timestamp,
-                                                       local_files_cache, enable_resume, vector_store_id,
-                                                       deduplication_enabled, chunking_strategy,
-                                                       vector_store_cache, remove_selectors, rss_metadata)
-            
-            success_count += subpage_result[0]
-            total_processed += subpage_result[1]
-            
-            # Small delay between subpage requests
-            time.sleep(1)
+                logger.info(f"🔄 Step 5b: Processing {len(suburls)} suburls (recursive mode enabled, depth {current_depth+1}/{max_recursive_level})")
+                print(f"🔄 Processing suburls at depth {current_depth+1}/{max_recursive_level}")
+                
+                for i, suburl_info in enumerate(suburls, 1):
+                    suburl_url = suburl_info['url']
+                    suburl_text = suburl_info.get('link_text', '')
+                    suburl_type = suburl_info.get('url_type', 'other')
+                    
+                    # Create suburl title with _SUB postfix to distinguish from pagination
+                    suburl_title = f"{title}_SUB_{suburl_type.upper()}_{i}"
+                    suburl_path = f"{path} > Suburl: {suburl_text or f'Link {i}'}"
+                    
+                    logger.info(f"🔄 Processing suburl {i}/{len(suburls)} at depth {current_depth+1}: {suburl_url}")
+                    logger.info(f"📝 Suburl title: {suburl_title}")
+                    logger.info(f"🏷️ Suburl type: {suburl_type}")
+                    logger.info(f"📊 Recursion depth: {current_depth+1}/{max_recursive_level}")
+                    
+                    # Process the suburl with all existing functionality (including potential recursive pagination)
+                    # CRITICAL: Pass current_depth + 1 to track recursion depth
+                    suburl_result = process_paginated_url(suburl_url, suburl_title, suburl_path,
+                                                         url_last_modified_map, last_run_timestamp,
+                                                         local_files_cache, enable_resume, vector_store_id,
+                                                         deduplication_enabled, chunking_strategy,
+                                                         vector_store_cache, remove_selectors, rss_metadata,
+                                                         current_depth=current_depth + 1)
+                    
+                    success_count += suburl_result[0]
+                    total_processed += suburl_result[1]
+                    
+                    # Small delay between suburl requests
+                    time.sleep(1)
+                
+                logger.info(f"✅ SUBURLS PROCESSING COMPLETE: Processed {len(suburls)} suburls at depth {current_depth+1}")
+        elif suburls and not url_recursive_enabled:
+            logger.info(f"⚠️ SUBURLS SKIPPED: Found {len(suburls)} suburls but URL not configured for recursive processing")
+            print(f"⚠️ Suburls found but skipped (not in recursive_urls config): {len(suburls)}")
         
-        logger.info(f"✅ PAGINATION PROCESSING COMPLETE: {success_count}/{total_processed} pages processed successfully")
-        print(f"✅ Pagination complete: {success_count}/{total_processed} pages processed")
+        total_additional_processed = len(pagination_urls) + (len(suburls) if url_recursive_enabled and current_depth < max_recursive_level else 0)
+        logger.info(f"✅ ENHANCED PROCESSING COMPLETE: {success_count}/{total_processed} total URLs processed")
+        print(f"✅ Enhanced processing complete: {success_count}/{total_processed} total URLs processed")
+        processed_suburls = len(suburls) if url_recursive_enabled and current_depth < max_recursive_level else 0
+        print(f"📊 Breakdown: 1 main + {len(pagination_urls)} pagination + {processed_suburls} suburls (depth {current_depth}/{max_recursive_level})")
         
         return (success_count, total_processed)
         
@@ -6409,7 +6704,8 @@ def main(args=None):
                 pagination_result = process_paginated_url(
                     url, title, path, url_last_modified_map, last_run_timestamp,
                     local_files_cache, enable_resume, vector_store_id, deduplication_enabled,
-                    chunking_strategy, vector_store_cache, remove_selectors, rss_metadata
+                    chunking_strategy, vector_store_cache, remove_selectors, rss_metadata,
+                    current_depth=0  # Start at root level (depth 0)
                 )
                 
                 # Update counters based on pagination processing results

@@ -7,8 +7,15 @@
     "rss_feeds": [
       "https://www.khk.cz/rss.xml"
     ],
+    "recursive_urls": [
+      {
+        "url": "https://www.khk.cz/kraj/zastupitelstvo/usneseni-zastupitelstva",
+        "recursive_level": 1
+      }
+    ],
     "test_urls": [
-     
+      "https://www.khk.cz/urad/organizacni-struktura/odbory",
+      "https://www.khk.cz/kraj/zastupitelstvo/usneseni-zastupitelstva"
     ]
   },
   "api_keys": {
@@ -22,7 +29,7 @@
     "target_language": "Czech",
     "models": [
       "google/gemini-2.5-flash",
-      "anthropic/claude-sonnet-4"
+      "openai/gpt-4.1-mini" 
     ],
     "temperature": 0.1,
     "top_p": 0.9,
@@ -40,7 +47,7 @@
     "provider_sequence": "jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_68cf273814ec8191ae1e1efb35e271c3",
+    "id": "vs_68cfc7832c2081919f294425756928cf",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
