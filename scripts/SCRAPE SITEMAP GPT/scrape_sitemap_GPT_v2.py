@@ -2249,7 +2249,7 @@ def save_chunked_content_to_multiple_files(chunks, base_title, url, **save_kwarg
 
 def get_html_content_via_jina(url, remove_selectors=None):
     """Fetch HTML content using Jina AI API for sitemap processing."""
-    api_url = f"https://eu-r-beta.jina.ai/{url}"
+    api_url = MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
     headers = {
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
         "X-Return-Format": "html",
@@ -2297,7 +2297,7 @@ def get_html_content_via_jina(url, remove_selectors=None):
 
 def get_html_content_for_pagination_via_jina(url, remove_selectors=None):
     """Fetch HTML content using Jina AI API specifically for pagination detection."""
-    api_url = f"https://r.jina.ai/{url}"
+    api_url = MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {JINA_AI_API_KEY}",
@@ -3845,7 +3845,7 @@ def get_markdown_content(url, remove_selectors=None):
 
 def _fetch_jina_markdown(url, api_key, remove_selectors=None):
     """Fetch markdown content using Jina AI API."""
-    api_url = f"https://eu-r-beta.jina.ai/{url}"
+    api_url = MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
