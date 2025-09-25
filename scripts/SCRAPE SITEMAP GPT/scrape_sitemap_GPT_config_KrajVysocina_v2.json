@@ -1,11 +1,17 @@
 {
   "website": {
-    "base_url": "https://www.kr-karlovarsky.cz",
-    "sitemap_url": "https://www.kr-karlovarsky.cz/mapa-webu",
-    "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
+    "base_url": "https://kr-vysocina.cz/",
+    "sitemap_url": "https://kr-vysocina.cz/mapa-stranek",
+    "xml_sitemap_url": "https://kr-vysocina.cz/vismo/sitemap.asp",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml"
+	  "https://www.kr-vysocina.cz/rss/",
+      "https://www.kr-vysocina.cz/rss/?5",
+	  "https://www.kr-vysocina.cz/rss/?12",
+	  "https://archiv.kr-vysocina.cz/rss5/?2",
+	  "https://archiv.kr-vysocina.cz/rss5/?6",
+	  "https://archiv.kr-vysocina.cz/rss5/?7",
+	  "https://www.kr-vysocina.cz/rss/?10"
     ],
     "test_urls": [
      

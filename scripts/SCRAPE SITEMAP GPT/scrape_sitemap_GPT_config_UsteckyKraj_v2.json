@@ -1,11 +1,11 @@
 {
   "website": {
-    "base_url": "https://www.kr-karlovarsky.cz",
-    "sitemap_url": "https://www.kr-karlovarsky.cz/mapa-webu",
-    "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
+    "base_url": "https://www.kr-ustecky.cz",
+    "sitemap_url": "https://www.kr-ustecky.cz/mapa-stranek",
+    "xml_sitemap_url": "https://www.kr-ustecky.cz/vismo/sitemap.asp",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml"
+      "https://www.kr-ustecky.cz/rss/?21"
     ],
     "test_urls": [
      

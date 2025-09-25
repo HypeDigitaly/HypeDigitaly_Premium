@@ -1,11 +1,11 @@
 {
   "website": {
-    "base_url": "https://www.kr-karlovarsky.cz",
-    "sitemap_url": "https://www.kr-karlovarsky.cz/mapa-webu",
-    "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
+    "base_url": "https://healthytwenty.cz/",
+    "sitemap_url": "",
+    "xml_sitemap_url": "https://healthytwenty.cz/sitemap.xml",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml"
+     
     ],
     "test_urls": [
      

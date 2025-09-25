@@ -1,11 +1,12 @@
 {
   "website": {
-    "base_url": "https://www.kr-karlovarsky.cz",
-    "sitemap_url": "https://www.kr-karlovarsky.cz/mapa-webu",
-    "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
+    "base_url": "https://www.teplice.cz",
+    "sitemap_url": "https://teplice.cz/mapa-stranek",
+    "xml_sitemap_url": "https://teplice.cz/vismo/sitemap.asp",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml"
+      "https://www.teplice.cz/rss/?21",
+	  "https://www.teplice.cz/rss/?22"
     ],
     "test_urls": [
      

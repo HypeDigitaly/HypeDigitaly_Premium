@@ -1,11 +1,11 @@
 {
   "website": {
-    "base_url": "https://www.kr-karlovarsky.cz",
-    "sitemap_url": "https://www.kr-karlovarsky.cz/mapa-webu",
-    "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
+    "base_url": "https://stredoceskykraj.cz/",
+    "sitemap_url": "https://stredoceskykraj.cz/web/urad/mapa-stranek",
+    "xml_sitemap_url": "https://stredoceskykraj.cz/sitemap.xml",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml"
+      "https://stredoceskykraj.cz/web/urad/stredocesky-kraj/-/asset_publisher/ykru/rss"
     ],
     "test_urls": [
      
@@ -32,7 +32,7 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "header, footer, aside"
+      "remove_selectors": "#gov-portal-header, .gov-portal-header, #gov-footer, .gov-footer"
     },
     "firecrawl": {
       "name": "firecrawl"
