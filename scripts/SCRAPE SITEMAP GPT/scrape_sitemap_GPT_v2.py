@@ -625,7 +625,7 @@ Tato stránka obsahuje kompletní telefonní seznam a organizační strukturu Kr
 
 Pro každého ze 300+ zaměstnanců jsou poskytnuty kompletní kontaktní údaje v standardizovaném formátu (jméno, funkce, telefonní číslo včetně mobilního, e-mailová adresa, číslo místnosti), přičemž organizační struktura je uspořádána hierarchicky od ředitele přes vedoucí odborů a oddělení až po jednotlivé referenty a specialisty, což umožňuje precizní navazování obsahového toku napříč rozdělenými soubory při zachování úplné organizační kontinuity."""
 
-def generate_question_section(url, title, target_language="Czech", page_summary=None):
+def generate_question_section(url, title, target_language="Czech", page_summary=None, rss_metadata=None):
     """
     Generate the QUESTION section based on URL, title, and page summary using OpenRouter API.
     Produces 3 keywords and 3 RAG-optimized questions in pipe-separated format.
@@ -635,11 +635,21 @@ def generate_question_section(url, title, target_language="Czech", page_summary=
         title (str): Page title
         target_language (str): Target language for output
         page_summary (str, optional): Source page summary for enhanced context
+        rss_metadata (dict, optional): RSS metadata including event_metadata for Events RSS
     
     Returns:
         str: Pipe-separated keywords and questions, or fallback string if API fails
     """
     logger.info(f"Generating QUESTION section via OpenRouter API for URL: {url}, Title: {title}")
+    
+    # Check if this is an Events RSS URL with rich metadata
+    is_events_rss = (rss_metadata and
+                    rss_metadata.get('event_metadata') and
+                    'eventId=' in url)
+    
+    if is_events_rss:
+        logger.info(f"🎪 EVENTS RSS DETECTED: Using event-specific question generation")
+        return generate_events_question_section(url, title, target_language, rss_metadata)
     
     # Check if OpenRouter is configured
     if not OPENROUTER_API_KEY:
@@ -727,6 +737,141 @@ Hejtman | Hejtman Královéhradeckého kraje | Kontakt hejtman | Kdo je hejtman?
     except Exception as e:
         logger.error(f"Error generating QUESTION section: {str(e)}, using fallback")
         return f"{title} | {urlparse(url).path} | key info | What is {title}? | Details on {title} | Contact for {title}"
+
+
+def generate_events_question_section(url, title, target_language="Czech", rss_metadata=None):
+    """
+    Generate specialized QUESTION section for Events RSS URLs using rich event metadata.
+    Creates event-specific keywords and questions based on actual event data.
+    
+    Args:
+        url (str): Event detail URL with eventId parameter
+        title (str): Enhanced event title with name and date
+        target_language (str): Target language for output
+        rss_metadata (dict): RSS metadata containing event_metadata
+    
+    Returns:
+        str: Pipe-separated event-specific keywords and questions
+    """
+    logger.info(f"🎪 Generating EVENT-SPECIFIC QUESTION section for: {url}")
+    
+    # Extract event metadata
+    event_data = rss_metadata.get('event_metadata', {}) if rss_metadata else {}
+    event_name = event_data.get('event_name', 'Unknown Event')
+    event_type = event_data.get('event_type', 'Unknown')
+    organizer = event_data.get('organizer', 'Unknown')
+    place = event_data.get('place', 'Unknown')
+    event_id = event_data.get('event_id', 'Unknown')
+    start_date = event_data.get('start_date', 'Unknown')
+    start_time = event_data.get('start_time', 'Unknown')
+    
+    # Check if OpenRouter is configured
+    if not OPENROUTER_API_KEY:
+        logger.info(f"OpenRouter API key not configured, using event-specific fallback")
+        # Create event-specific fallback using RSS metadata
+        keywords = [event_name, event_type, organizer][:3]
+        keywords = [k for k in keywords if k != 'Unknown'][:3]
+        
+        # Add generic keywords if needed
+        while len(keywords) < 3:
+            keywords.extend(['událost', 'akce', 'program'])
+        keywords = keywords[:3]
+        
+        questions = [
+            f"Co je {event_name}?",
+            f"Kdy a kde se koná {event_name}?",
+            f"Kdo organizuje {event_name}?"
+        ]
+        
+        fallback = " | ".join(keywords + questions)
+        logger.info(f"🎪 Event-specific fallback generated: {fallback[:100]}...")
+        return fallback
+    
+    # Create event-specific prompt with rich metadata context
+    event_context = f"""
+Event Details:
+- Event Name: {event_name}
+- Event Type: {event_type}
+- Organizer: {organizer}
+- Place: {place}
+- Date: {start_date}
+- Time: {start_time}
+- Event ID: {event_id}"""
+    
+    prompt = f"""🤖 EVENT-SPECIFIC KEYWORD AND QUESTION GENERATOR: Based on the event metadata and enhanced title, generate event-focused search terms:
+- 3 most relevant event keywords (event name, type, organizer, location)
+- 3 RAG-optimized questions about this specific event
+
+Output ONLY a single pipe-separated string: keyword1 | keyword2 | keyword3 | question1 | question2 | question3
+
+URL: {url}
+Enhanced Title: {title}{event_context}
+
+Language: {target_language}
+
+EXAMPLE OUTPUT (for Event: MUZEUM ČTE DĚTEM, Type: ostatní, Organizer: Oblastní muzeum):
+MUZEUM ČTE DĚTEM | Oblastní muzeum | program pro děti | Co je akce MUZEUM ČTE DĚTEM? | Kdy se koná MUZEUM ČTE DĚTEM v Oblastním muzeu? | Jaké aktivity nabízí program MUZEUM ČTE DĚTEM?"""
+    
+    # Prepare the OpenRouter API request
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": url,
+        "X-Title": "HypeDigitaly Events Question Generator"
+    }
+    
+    # Use primary model
+    primary_model = OPENROUTER_MODELS[0] if isinstance(OPENROUTER_MODELS, list) else OPENROUTER_MODELS
+    payload = {
+        "model": primary_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 200,
+        "temperature": 0.3,  # Low temperature for consistent output
+        "top_p": OPENROUTER_TOP_P
+    }
+    
+    try:
+        response = requests_retry_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+
+        # Log the full API response
+        logger.info("=== FULL OPENROUTER API RESPONSE FOR EVENTS QUESTION GENERATION ===")
+        logger.info(f"Full response: {response.text}")
+        logger.info("=== END FULL OPENROUTER API RESPONSE ===")
+
+        data = response.json()
+
+        # Log token usage for this API call
+        log_openrouter_token_usage(data, "EVENTS_QUESTION_SECTION_GENERATION", url)
+
+        if "choices" in data and len(data["choices"]) > 0:
+            message = data["choices"][0]["message"]
+            question_text = message.get("content", "").strip()
+            
+            # Handle reasoning mode responses (e.g., openai/gpt-5)
+            if not question_text and message.get("reasoning"):
+                question_text = message.get("reasoning", "").strip()
+                logger.info("✅ Extracted events content from reasoning field")
+            
+            # Use AI response directly
+            if question_text and len(question_text) > 10:
+                logger.info(f"✅ Generated EVENT-SPECIFIC QUESTION section: {question_text[:100]}...")
+                return question_text
+            else:
+                logger.warning("API response too short or empty, using event-specific fallback")
+                return f"{event_name} | {event_type} | {organizer} | Co je {event_name}? | Kdy se koná {event_name}? | Kdo organizuje {event_name}?"
+        else:
+            logger.warning("No choices from API, using event-specific fallback")
+            return f"{event_name} | {event_type} | {organizer} | Co je {event_name}? | Kdy se koná {event_name}? | Kdo organizuje {event_name}?"
+            
+    except Exception as e:
+        logger.error(f"Error generating EVENT-SPECIFIC QUESTION section: {str(e)}, using fallback")
+        return f"{event_name} | {event_type} | {organizer} | Co je {event_name}? | Kdy se koná {event_name}? | Kdo organizuje {event_name}?"
 
 
 def generate_page_summary_via_openrouter(markdown_content, title="", url="", target_language="Czech"):
@@ -1328,18 +1473,20 @@ def sanitize_filename(filename):
     max_length = getattr(globals(), 'MAX_FILENAME_LENGTH', 200)
     return filename[:max_length]
 
-def create_filename_from_url(url, title=""):
+def create_filename_from_url(url, title="", rss_metadata=None):
     """
-    Create a filename from URL path segments instead of page title.
+    Create a filename from URL path segments with enhanced support for Events XML URLs.
     
     Examples:
     - "https://www.khk.cz/kraj/rada/seznam-clenu-rady" → "Rada_Seznam_Clenu_Rady"
     - "https://www.khk.cz/dotace-prehled/aktuality" → "Dotace_Prehled_Aktuality"
     - "https://teplice.cz/vismo/telefonni-seznam.asp" → "Vismo_Telefonni_Seznam"
+    - "http://www.usti.cz/cz/volny-cas/kultura/detail-akce.html?eventId=75318" → "Event_75318_MUZEUM_CTE_DETEM"
     
     Args:
         url (str): Source URL to extract path from
-        title (str): Fallback title if URL parsing fails
+        title (str): Title for enhanced filename generation (especially for Events XML)
+        rss_metadata (dict, optional): RSS metadata for Events RSS enhanced naming
     
     Returns:
         str: Base filename without extension or postfixes
@@ -1347,6 +1494,59 @@ def create_filename_from_url(url, title=""):
     try:
         parsed_url = urlparse(url)
         path_parts = [part for part in parsed_url.path.split('/') if part.strip()]
+        
+        # ENHANCED: Special handling for Events XML URLs with eventId parameters
+        if parsed_url.query and 'eventId=' in parsed_url.query:
+            # Extract eventId from query parameters
+            from urllib.parse import parse_qs
+            query_params = parse_qs(parsed_url.query)
+            event_id = query_params.get('eventId', [None])[0]
+            
+            if event_id:
+                # ENHANCED: Use RSS metadata for better event filename if available
+                if rss_metadata and rss_metadata.get('event_metadata'):
+                    event_data = rss_metadata['event_metadata']
+                    event_name = event_data.get('event_name', '').strip()
+                    
+                    if event_name:
+                        # Use actual event name from RSS metadata
+                        clean_event_name = event_name
+                        # Clean and normalize for filename
+                        clean_event_name = re.sub(r'[^\w\s\-–áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]', '_', clean_event_name)
+                        clean_event_name = re.sub(r'\s+', '_', clean_event_name)
+                        clean_event_name = re.sub(r'_+', '_', clean_event_name).strip('_')
+                        
+                        # Create unique event filename with RSS event name
+                        event_filename = f"Event_{event_id}_{clean_event_name}"
+                        
+                        # Sanitize and return
+                        event_filename = sanitize_filename(event_filename)
+                        logger.debug(f"🎯 Created Events RSS filename: {url} → {event_filename}")
+                        return event_filename
+                
+                # Fallback: Extract clean event name from title (remove date/time info in parentheses)
+                if title and title.strip():
+                    clean_title = title.strip()
+                    # Remove date/time pattern like "(25.09.2025 16:00)" from the end
+                    import re
+                    clean_title = re.sub(r'\s*\([^)]*\d{2}\.\d{2}\.\d{4}[^)]*\)$', '', clean_title)
+                    # Clean and normalize for filename
+                    clean_title = re.sub(r'[^\w\s\-–áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]', '_', clean_title)
+                    clean_title = re.sub(r'\s+', '_', clean_title)
+                    clean_title = re.sub(r'_+', '_', clean_title).strip('_')
+                    
+                    # Create unique event filename
+                    event_filename = f"Event_{event_id}_{clean_title}"
+                    
+                    # Sanitize and return
+                    event_filename = sanitize_filename(event_filename)
+                    logger.debug(f"🎯 Created Events XML filename: {url} → {event_filename}")
+                    return event_filename
+                else:
+                    # Fallback to just eventId if no title
+                    event_filename = f"Event_{event_id}"
+                    logger.debug(f"🎯 Created Events XML filename (no title): {url} → {event_filename}")
+                    return sanitize_filename(event_filename)
         
         if not path_parts:
             # Fallback to homepage or title
@@ -3531,11 +3731,21 @@ def process_single_url_normally(url, title, path, url_last_modified_map, last_ru
                 final_title = title
                 logger.info(f"🔖 PAGINATION-AWARE NAMING: Preserving pagination title: {title}")
             else:
-                # Use title from API response if available, otherwise use provided title
-                final_title = api_title if api_title and api_title.strip() else title
+                # ENHANCED: Preserve RSS event titles over generic API titles for Events RSS
+                if (rss_metadata and
+                    rss_metadata.get('event_metadata') and
+                    'eventId=' in url and
+                    api_title == "Detail akce"):
+                    # This is an Events RSS URL with generic "Detail akce" title from API
+                    # Preserve the enhanced event title from RSS instead
+                    final_title = title
+                    logger.info(f"🎪 EVENTS RSS: Preserving RSS event title '{title}' over generic API title '{api_title}'")
+                else:
+                    # Use title from API response if available, otherwise use provided title
+                    final_title = api_title if api_title and api_title.strip() else title
             
-            # Generate QUESTION section
-            question_text = generate_question_section(url, final_title, OPENROUTER_TARGET_LANGUAGE)
+            # Generate QUESTION section with RSS metadata for Events RSS
+            question_text = generate_question_section(url, final_title, OPENROUTER_TARGET_LANGUAGE, rss_metadata=rss_metadata)
             
             # Find last modified date
             last_modified = find_url_last_modified(url, url_last_modified_map)
@@ -3570,7 +3780,7 @@ def process_single_url_normally(url, title, path, url_last_modified_map, last_ru
                     is_last_chunk = (chunk_order == total_chunks)
                     
                     # NEW URL-BASED CHUNKING: Enhanced filename generation using URL path
-                    base_filename = create_filename_from_url(url, final_title)
+                    base_filename = create_filename_from_url(url, final_title, rss_metadata)
                     
                     # Extract pagination info if this is a paginated URL
                     is_paginated = False
@@ -3613,7 +3823,7 @@ def process_single_url_normally(url, title, path, url_last_modified_map, last_ru
                         )
                     
                     # PAGINATION-AWARE DEDUPLICATION: Enhanced URL generation for vector store
-                    chunk_question_text = generate_question_section(url, final_title, OPENROUTER_TARGET_LANGUAGE)
+                    chunk_question_text = generate_question_section(url, final_title, OPENROUTER_TARGET_LANGUAGE, rss_metadata=rss_metadata)
                     
                     # Create unique lookup URL for vector store that distinguishes paginated chunks
                     if "_PAGE" in final_title:
@@ -4992,6 +5202,11 @@ def parse_rss_feed(rss_url):
             logger.info(f"Detected RSS 2.0 feed format for: {rss_url}")
             return parse_rss_2_0_feed(soup, rss_url)
         
+        # Check if it's Events XML format
+        elif soup.find('events') and soup.find('event'):
+            logger.info(f"Detected Events XML format for: {rss_url}")
+            return parse_events_feed(soup, rss_url)
+        
         # Try parsing as HTML/XML with generic approach
         else:
             logger.info(f"Attempting generic XML parsing for: {rss_url}")
@@ -5109,6 +5324,163 @@ def parse_rss_2_0_feed(soup, rss_url):
             logger.error(f"Error processing RSS 2.0 item: {str(e)}")
             continue
     
+    return extracted_urls
+
+def parse_events_feed(soup, rss_url):
+    """Parse Events XML format - extracts structured event data and detail page URLs."""
+    extracted_urls = []
+    
+    events = soup.find_all('event')
+    logger.info(f"Found {len(events)} events in Events XML feed")
+    
+    for event in events:
+        try:
+            # Extract event URL from <details><url>
+            details = event.find('details')
+            if not details or not details.find('url'):
+                logger.debug(f"Skipping event without details/url")
+                continue
+                
+            url = details.find('url').text.strip()
+            if not url:
+                continue
+            
+            # Make URL absolute
+            absolute_url = urljoin(BASE_URL, url)
+            
+            # Extract event ID
+            event_id_elem = event.find('id')
+            event_id = event_id_elem.text.strip() if event_id_elem else 'Unknown'
+            
+            # Extract event name (handle CDATA)
+            name_elem = event.find('name')
+            if name_elem:
+                # Handle CDATA content
+                name = name_elem.get_text().strip() if name_elem.get_text() else 'Unknown Event'
+            else:
+                name = f"Event {event_id}"
+            
+            # Extract date and time information
+            start_date = 'Unknown'
+            start_time = 'Unknown'
+            dates = event.find('dates')
+            if dates and dates.find('date'):
+                date_elem = dates.find('date')
+                if date_elem.find('start_date'):
+                    start_date = date_elem.find('start_date').text.strip()
+                if date_elem.find('start_time'):
+                    start_time_elem = date_elem.find('start_time')
+                    start_time = start_time_elem.get_text().strip() if start_time_elem else 'Unknown'
+            
+            # Extract organizer (handle CDATA)
+            organizer = 'Unknown'
+            org_elem = event.find('organizer')
+            if org_elem and org_elem.find('name'):
+                org_name_elem = org_elem.find('name')
+                organizer = org_name_elem.get_text().strip() if org_name_elem else 'Unknown'
+            
+            # Extract place/location (handle CDATA)
+            place = 'Unknown'
+            place_elem = event.find('place')
+            if place_elem:
+                if place_elem.find('other'):
+                    place = place_elem.find('other').get_text().strip()
+                # Could also extract GPS coordinates if needed
+                # wgs84 = place_elem.find('wgs84')
+                # if wgs84:
+                #     latitude = wgs84.find('latitude').text if wgs84.find('latitude') else None
+                #     longitude = wgs84.find('longitude').text if wgs84.find('longitude') else None
+            
+            # Extract event type
+            event_type = 'Unknown'
+            types_elem = event.find('types')
+            if types_elem and types_elem.find('type'):
+                event_type = types_elem.find('type').text.strip()
+            
+            # Extract description (handle CDATA and embedded HTML)
+            description = None
+            desc_elem = event.find('description')
+            if desc_elem:
+                description = desc_elem.get_text().strip()
+                # Clean up HTML tags if present but preserve links
+                if description and len(description) > 500:
+                    description = description[:500] + "..."
+            
+            # Create enhanced title with event info for better identification
+            if start_date != 'Unknown' and start_time != 'Unknown':
+                enhanced_title = f"{name} ({start_date} {start_time})"
+            elif start_date != 'Unknown':
+                enhanced_title = f"{name} ({start_date})"
+            else:
+                enhanced_title = name
+            
+            # Create comprehensive event metadata for RSS processing
+            event_metadata = {
+                'event_id': event_id,
+                'event_name': name,
+                'start_date': start_date,
+                'start_time': start_time,
+                'organizer': organizer,
+                'place': place,
+                'event_type': event_type,
+                'source_feed': rss_url
+            }
+            
+            # Create enhanced description combining XML data
+            enhanced_description = []
+            if description:
+                enhanced_description.append(f"Popis: {description}")
+            if organizer != 'Unknown':
+                enhanced_description.append(f"Organizátor: {organizer}")
+            if place != 'Unknown':
+                enhanced_description.append(f"Místo: {place}")
+            if event_type != 'Unknown':
+                enhanced_description.append(f"Typ: {event_type}")
+                
+            combined_description = " | ".join(enhanced_description) if enhanced_description else description
+            
+            # Create navigation path for event items
+            path = f"Events Feed: {rss_url} > {enhanced_title}"
+            
+            # Use event start_date as published date for timestamp comparison
+            published_date = None
+            if start_date != 'Unknown':
+                try:
+                    # Try to parse Czech date format (DD.MM.YYYY)
+                    if '.' in start_date:
+                        day, month, year = start_date.split('.')
+                        if start_time != 'Unknown' and ':' in start_time:
+                            # Include time if available
+                            published_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}T{start_time}:00"
+                        else:
+                            published_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}T00:00:00"
+                    else:
+                        # Fallback: use as-is if already in ISO format
+                        published_date = start_date
+                except Exception as e:
+                    logger.warning(f"Could not parse event date {start_date}: {str(e)}")
+                    published_date = start_date  # Use as-is
+            
+            extracted_urls.append({
+                'url': absolute_url,
+                'title': enhanced_title,
+                'path': path,
+                'published': published_date,
+                'summary': combined_description,
+                'description': combined_description,
+                'event_metadata': event_metadata,  # Rich event data for potential future use
+                'source_feed': rss_url
+            })
+            
+            logger.debug(f"Extracted from Events XML: {absolute_url} - {enhanced_title}")
+            logger.debug(f"  Event ID: {event_id}, Date: {start_date} {start_time}")
+            logger.debug(f"  Organizer: {organizer}, Place: {place}, Type: {event_type}")
+                    
+        except Exception as e:
+            logger.error(f"Error processing Events XML entry: {str(e)}")
+            continue
+    
+    logger.info(f"Successfully extracted {len(extracted_urls)} events from Events XML feed")
     return extracted_urls
 
 def parse_generic_feed(soup, rss_url):
@@ -6021,6 +6393,56 @@ def create_metadata_header(url, title, last_modified=None, path=None, provider_u
                 f"### **{summary}**",
                 ""
             ])
+        
+        # Add Events XML specific metadata if available
+        if rss_metadata.get('event_metadata'):
+            event_data = rss_metadata['event_metadata']
+            metadata_lines.extend([
+                f"## 🎪 **INFORMACE O UDÁLOSTI:**",
+                ""
+            ])
+            
+            # Add event details in a structured format
+            if event_data.get('event_id', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **ID události**: {event_data['event_id']}")
+            if event_data.get('start_date', 'Unknown') != 'Unknown':
+                date_time = f"{event_data['start_date']}"
+                if event_data.get('start_time', 'Unknown') != 'Unknown':
+                    date_time += f" {event_data['start_time']}"
+                metadata_lines.append(f"- **Datum a čas**: {date_time}")
+            if event_data.get('organizer', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **Organizátor**: {event_data['organizer']}")
+            if event_data.get('place', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **Místo**: {event_data['place']}")
+            if event_data.get('event_type', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **Typ události**: {event_data['event_type']}")
+            
+            metadata_lines.append("")
+        
+        # Add Events XML specific metadata if available
+        if rss_metadata.get('event_metadata'):
+            event_data = rss_metadata['event_metadata']
+            metadata_lines.extend([
+                f"## 🎪 **INFORMACE O UDÁLOSTI:**",
+                ""
+            ])
+            
+            # Add event details in a structured format
+            if event_data.get('event_id', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **ID události**: {event_data['event_id']}")
+            if event_data.get('start_date', 'Unknown') != 'Unknown':
+                date_time = f"{event_data['start_date']}"
+                if event_data.get('start_time', 'Unknown') != 'Unknown':
+                    date_time += f" {event_data['start_time']}"
+                metadata_lines.append(f"- **Datum a čas**: {date_time}")
+            if event_data.get('organizer', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **Organizátor**: {event_data['organizer']}")
+            if event_data.get('place', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **Místo**: {event_data['place']}")
+            if event_data.get('event_type', 'Unknown') != 'Unknown':
+                metadata_lines.append(f"- **Typ události**: {event_data['event_type']}")
+            
+            metadata_lines.append("")
     else:
         # If no RSS metadata, indicate it's from sitemap
         metadata_lines.extend([
@@ -6066,7 +6488,7 @@ def save_markdown_to_file(content, title, url, question_text=None, upload_to_vec
             logger.info(f"🏷️ Using pre-constructed filename: {filename}")
         else:
             # Create base filename from URL path instead of title
-            base_filename = create_filename_from_url(url, title)
+            base_filename = create_filename_from_url(url, title, rss_metadata)
             
             # Check if this is a paginated file and extract page number
             is_paginated = False
@@ -6689,14 +7111,20 @@ def main(args=None):
             
             # Prepare RSS metadata if available
             rss_metadata = None
-            if any(key in url_info for key in ['published', 'summary', 'description', 'source_feed']):
+            if any(key in url_info for key in ['published', 'summary', 'description', 'source_feed', 'event_metadata']):
                 rss_metadata = {
                     'published': url_info.get('published'),
                     'summary': url_info.get('summary'),
                     'description': url_info.get('description'),
-                    'source_feed': url_info.get('source_feed')
+                    'source_feed': url_info.get('source_feed'),
+                    'event_metadata': url_info.get('event_metadata')  # Include event-specific metadata
                 }
                 logger.info(f"RSS metadata available - Published: {rss_metadata['published']}, Source: {rss_metadata['source_feed']}")
+                
+                # Log event metadata if present
+                if rss_metadata.get('event_metadata'):
+                    event_data = rss_metadata['event_metadata']
+                    logger.info(f"Event metadata - ID: {event_data.get('event_id')}, Type: {event_data.get('event_type')}, Organizer: {event_data.get('organizer')}")
             
             # NEW ENHANCED PROCESSING WITH PAGINATION SUPPORT
             try:
@@ -6869,6 +7297,8 @@ if __name__ == "__main__":
                         help="Resume processing by skipping URLs that already have local files")
     parser.add_argument("--test-resume", action="store_true",
                         help="Test resume cache building and show statistics without processing")
+    parser.add_argument("--test-events-xml", action="store_true",
+                        help="Test Events XML parsing functionality with sample data")
     
     # Vector Store options
     parser.add_argument("--vector-store-id", type=str,
