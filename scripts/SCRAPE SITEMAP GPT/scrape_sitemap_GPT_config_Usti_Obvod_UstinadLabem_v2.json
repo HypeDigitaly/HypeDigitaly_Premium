@@ -1,0 +1,66 @@
+{
+  "website": {
+    "base_url": "https://www.mesto-ul.cz/",
+    "sitemap_url": "https://www.mesto-ul.cz/cz/mapa-serveru.html",
+    "xml_sitemap_url": "https://www.mesto-ul.cz/sitemap.xml",
+    "blacklisted_urls": [],
+    "rss_feeds": [
+      "https://www.mesto-ul.cz/cz/rss-kanal.html"
+    ],
+    "recursive_urls": [
+      
+    ],
+    "test_urls": [
+      
+    ]
+  },
+  "api_keys": {
+    "jina_ai": "REMOVED-JINA-KEY",
+    "firecrawl": "REMOVED-FIRECRAWL-KEY",
+    "openai": "REMOVED-OPENAI-KEY",
+    "openrouter": "REMOVED-OPENROUTER-KEY"
+  },
+  "openrouter": {
+    "max_tokens": 64000,
+    "target_language": "Czech",
+    "models": [
+      "google/gemini-2.5-flash",
+      "openai/gpt-4.1-mini" 
+    ],
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "fallback_enabled": true,
+    "timeout_seconds": 120
+  },
+  "content_providers": {
+    "jina": {
+      "name": "jina",
+      "remove_selectors": "header, footer, aside"
+    },
+    "firecrawl": {
+      "name": "firecrawl"
+    },
+    "provider_sequence": "jina,firecrawl"
+  },
+  "vector_store": {
+    "id": "vs_68d053eae7b88191bff354dfb9a4d437",
+    "enable_deduplication": true,
+    "chunking_strategy": "static",
+    "max_chunk_size": 4096,
+    "chunk_overlap": 0
+  },
+  "http_settings": {
+    "request_timeout": 150,
+    "retry_codes": [500, 502, 503, 504, 524],
+    "retry_count": 3,
+    "backoff_factor": 0.3
+  },
+  "processing": {
+    "check_last_modified": true,
+    "max_filename_length": 200
+  },
+  "script_info": {
+    "name": "scrape_sitemap_universal",
+    "version": "1.0.0"
+  }
+} 
