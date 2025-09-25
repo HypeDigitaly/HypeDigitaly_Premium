@@ -2109,34 +2109,50 @@ def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
     
     for line in lines:
         line_tokens = count_tokens_approximate(line)
-        
-        # 🚨 CRITICAL FIX: Check if single line exceeds max_chunk_size
+
         if line_tokens > max_chunk_size:
-            logger.error(f"🚨 CRITICAL: Single line has {line_tokens:,} tokens > max_chunk_size {max_chunk_size:,}")
-            logger.error(f"❌ Line content preview: {line[:200]}...")
-            logger.error(f"💡 This indicates corrupted data or invalid content that must be truncated")
+            logger.warning(f"⚠️ Single line has {line_tokens:,} tokens > max_chunk_size {max_chunk_size:,}. Splitting line.")
+            words = line.split(' ')
+            current_line_segment = ""
+            for word in words:
+                word_tokens = count_tokens_approximate(word)
+                if count_tokens_approximate(current_line_segment) + word_tokens > max_chunk_size:
+                    if current_chunk.strip():
+                        postfix = get_chunk_postfix(chunk_number)
+                        chunks.append({
+                            'content': current_chunk.strip(),
+                            'tokens': count_tokens_approximate(current_chunk),
+                            'chunk_postfix': postfix,
+                            'chunk_number': chunk_number + 1,
+                            'type': 'simple_size_based_chunk',
+                            'filename_postfix': postfix
+                        })
+                        logger.info(f"📄 Created chunk {postfix}: {count_tokens_approximate(current_chunk):,} tokens")
+                        current_chunk = ""
+                        chunk_number += 1
+                    current_chunk += current_line_segment + " "
+                    current_line_segment = word + " "
+                else:
+                    current_line_segment += word + " "
             
-            # Emergency truncation to prevent Vector Store rejection
-            estimated_chars = max_chunk_size * 4  # Approximate chars per token
-            truncated_line = line[:estimated_chars]
-            logger.warning(f"⚠️ EMERGENCY TRUNCATION: Line truncated to ~{max_chunk_size:,} tokens")
-            line = truncated_line + "\n[CONTENT TRUNCATED - LINE EXCEEDED MAX CHUNK SIZE]"
-            line_tokens = count_tokens_approximate(line)
-        
-        # Check if adding this line would exceed the chunk size
-        if current_tokens + line_tokens > max_chunk_size and current_chunk.strip():
-            # 🚨 CRITICAL VALIDATION: Ensure chunk never exceeds max_chunk_size
-            if current_tokens > max_chunk_size:
-                logger.error(f"🚨 CHUNK SIZE VIOLATION: {current_tokens:,} > {max_chunk_size:,} tokens")
-                logger.error(f"❌ This should NEVER happen! Enforcing emergency size limit.")
-                
-                # Emergency chunk size enforcement
-                estimated_chars = max_chunk_size * 4
-                current_chunk = current_chunk[:estimated_chars] + "\n[CHUNK TRUNCATED - EXCEEDED MAX SIZE]"
-                current_tokens = count_tokens_approximate(current_chunk)
-                logger.warning(f"⚠️ EMERGENCY: Chunk truncated to {current_tokens:,} tokens")
-            
-            # Save current chunk (now guaranteed to be within limits)
+            if current_line_segment:
+                if count_tokens_approximate(current_chunk) + count_tokens_approximate(current_line_segment) > max_chunk_size:
+                    if current_chunk.strip():
+                        postfix = get_chunk_postfix(chunk_number)
+                        chunks.append({
+                            'content': current_chunk.strip(),
+                            'tokens': count_tokens_approximate(current_chunk),
+                            'chunk_postfix': postfix,
+                            'chunk_number': chunk_number + 1,
+                            'type': 'simple_size_based_chunk',
+                            'filename_postfix': postfix
+                        })
+                        logger.info(f"📄 Created chunk {postfix}: {count_tokens_approximate(current_chunk):,} tokens")
+                        chunk_number += 1
+                    current_chunk = current_line_segment
+                else:
+                    current_chunk += current_line_segment
+        elif current_tokens + line_tokens > max_chunk_size and current_chunk.strip():
             postfix = get_chunk_postfix(chunk_number)
             chunks.append({
                 'content': current_chunk.strip(),
@@ -2144,18 +2160,16 @@ def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
                 'chunk_postfix': postfix,
                 'chunk_number': chunk_number + 1,
                 'type': 'simple_size_based_chunk',
-                'filename_postfix': postfix  # For [A-Z] naming
+                'filename_postfix': postfix
             })
+            logger.info(f"📄 Created chunk {postfix}: {current_tokens:,} tokens")
             
-            logger.info(f"📄 Created chunk {postfix}: {current_tokens:,} tokens (limit: {max_chunk_size:,})")
-            
-            # Start new chunk
             current_chunk = line + '\n'
             current_tokens = line_tokens
             chunk_number += 1
         else:
             current_chunk += line + '\n'
-            current_tokens += line_tokens
+            current_tokens = count_tokens_approximate(current_chunk)
     
     # Add final chunk if there's content left
     if current_chunk.strip():
@@ -6227,10 +6241,50 @@ def is_url_already_processed_locally(url, local_cache):
     """Check if URL has already been processed based on local files cache."""
     return url in local_cache
 
+def is_url_from_test_urls(url):
+    """Check if a URL is from the test_urls array in config."""
+    if not TEST_URLS:
+        return False
+    
+    # Normalize URLs for comparison (remove trailing slashes, etc.)
+    normalized_url = url.rstrip('/')
+    
+    for test_url in TEST_URLS:
+        normalized_test_url = test_url.rstrip('/')
+        if normalized_url == normalized_test_url:
+            return True
+    
+    return False
 
 def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None):
     """Enhanced version of should_process_url that supports resume functionality and RSS-specific handling."""
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
+    
+    # SPECIAL HANDLING FOR TEST URLs: Bypass last modified check for test_urls from config
+    if is_url_from_test_urls(url):
+        logger.info(f"🧪 TEST URL DETECTED: {url} is from test_urls array - BYPASSING last modified check")
+        print(f"\n=== TEST URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"Source: test_urls array in config")
+        print(f"Last modified check: BYPASSED")
+        print(f"Processing: WILL PROCEED (TEST URL)")
+        print("==================================\n")
+        
+        # Still check local resume cache if enabled
+        if enable_resume and local_cache is not None:
+            if is_url_already_processed_locally(url, local_cache):
+                logger.info(f"URL {url} already processed locally. Skipping (RESUME).")
+                print(f"\n=== TEST URL PROCESSING STATUS (RESUME) ===")
+                print(f"URL: {url}")
+                print(f"Local file exists: YES")
+                print(f"Processing: SKIPPED (RESUME)")
+                print("============================================\n")
+                return False
+            else:
+                logger.info(f"Test URL {url} not found in local cache. Will process.")
+        
+        # For test URLs, always process (bypass last modified check)
+        return True
     
     # Step 1: Check local resume cache first (if enabled)
     if enable_resume and local_cache is not None:
