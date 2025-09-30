@@ -38,7 +38,7 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "header, footer, aside"
+      "remove_selectors": "header, footer, aside, .obalhlava, #menu1, #nadpatou, #obalpata, #fullscreen-search, #vismo-cookies"
     },
     "firecrawl": {
       "name": "firecrawl"

@@ -32,7 +32,7 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "header, footer, aside"
+      "remove_selectors": "header, footer, aside, #obalhlava, #fullscreen-search, #nadpatou, #obalpata, #menu-start"
     },
     "firecrawl": {
       "name": "firecrawl"
