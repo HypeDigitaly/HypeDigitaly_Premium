@@ -8389,3 +8389,4 @@ if __name__ == "__main__":
     
     # Run main function (config loading and logging setup happens inside main)
     main(args)
+
