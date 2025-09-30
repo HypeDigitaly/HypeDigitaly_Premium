@@ -109,7 +109,17 @@ def validate_config(config):
         chunking_strategy = vector_store_config.get("chunking_strategy", "auto")
         max_chunk_size = vector_store_config.get("max_chunk_size", 800)
         chunk_overlap = vector_store_config.get("chunk_overlap", 400)
+        content_token_offset = vector_store_config.get("content_token_offset", 0)
+
+        # Validate content_token_offset
+        if not isinstance(content_token_offset, int) or content_token_offset < 0:
+            raise ValueError(f"Config validation failed: vector_store.content_token_offset must be a non-negative integer, got: {content_token_offset}")
         
+        # The content limit must be positive
+        content_limit = max_chunk_size - content_token_offset
+        if content_limit <= 0:
+            raise ValueError(f"Config validation failed: max_chunk_size ({max_chunk_size}) minus content_token_offset ({content_token_offset}) must result in a positive content limit.")
+
         # Only validate static strategy constraints (auto uses fixed OpenAI values)
         if chunking_strategy.lower() == "static":
             # Validate max_chunk_size_tokens range (100-4096)
@@ -139,7 +149,29 @@ def validate_config(config):
         else:
             raise ValueError(f"Config validation failed: vector_store.chunking_strategy must be 'auto' or 'static', got: {chunking_strategy}")
     
+    # Validate RSS Date Threshold if present
+    rss_date_threshold_str = config.get("processing", {}).get("RSSDateThreshold")
+    if rss_date_threshold_str:
+        try:
+            parsed_date = parse_rss_date_threshold(rss_date_threshold_str)
+            print(f"PASS: RSSDateThreshold validated: {rss_date_threshold_str} -> {parsed_date.isoformat()}")
+        except ValueError as e:
+            raise ValueError(f"Config validation failed: {str(e)}")
+    
     return True
+
+def parse_rss_date_threshold(date_str):
+    """Parse RSSDateThreshold (DD-MM-YYYY) into a UTC datetime object."""
+    if not date_str:
+        return None
+    
+    try:
+        # Parse DD-MM-YYYY format
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+        # Set time to midnight UTC and return
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    except ValueError:
+        raise ValueError(f"Invalid RSSDateThreshold format: '{date_str}'. Expected DD-MM-YYYY.")
 
 # ============================================================================
 # GLOBAL CONFIGURATION VARIABLES
@@ -254,14 +286,14 @@ def load_configuration(config_file="config.json"):
     """Load and initialize global configuration."""
     global CONFIG, SCRIPT_NAME, LOG_DIR, LOG_FILE, OUTPUT_DIR
     global JINA_AI_API_KEY, FIRECRAWL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
-    global JINA_REMOVE_SELECTORS, OPENAI_VECTOR_STORE_ID, ENABLE_DEDUPLICATION
-    global DEFAULT_CHUNKING_STRATEGY, DEFAULT_MAX_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
+    global JINA_REMOVE_SELECTORS, JINA_TARGET_SELECTORS, OPENAI_VECTOR_STORE_ID, ENABLE_DEDUPLICATION
+    global DEFAULT_CHUNKING_STRATEGY, DEFAULT_MAX_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_CONTENT_TOKEN_OFFSET, DEFAULT_CONTENT_RATIO
     global OPENROUTER_MAX_TOKENS, OPENROUTER_MODELS, OPENROUTER_TEMPERATURE, OPENROUTER_TOP_P, OPENROUTER_TARGET_LANGUAGE
     global BASE_URL, PARSED_BASE_URL, BASE_NETLOC, NON_WWW_BASE_NETLOC, BASE_SCHEME
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
     global BLACKLISTED_URLS, RSS_FEEDS, RECURSIVE_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
-    global VERBOSE_URL_MATCHING, TEST_URLS
+    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD
     
     # Load configuration
     CONFIG = load_config(config_file)
@@ -288,6 +320,7 @@ def load_configuration(config_file="config.json"):
     
     # Set content provider configuration
     JINA_REMOVE_SELECTORS = CONFIG["content_providers"]["jina"]["remove_selectors"]
+    JINA_TARGET_SELECTORS = CONFIG["content_providers"]["jina"].get("target_selectors", "")
     MARKDOWN_PROVIDER_SEQUENCE = CONFIG["content_providers"]["provider_sequence"]
     
     # Set OpenRouter configuration with backwards compatibility
@@ -330,6 +363,8 @@ def load_configuration(config_file="config.json"):
     DEFAULT_CHUNKING_STRATEGY = CONFIG["vector_store"]["chunking_strategy"]
     DEFAULT_MAX_CHUNK_SIZE = CONFIG["vector_store"]["max_chunk_size"]
     DEFAULT_CHUNK_OVERLAP = CONFIG["vector_store"]["chunk_overlap"]
+    DEFAULT_CONTENT_TOKEN_OFFSET = CONFIG["vector_store"].get("content_token_offset", 0)
+    DEFAULT_CONTENT_RATIO = CONFIG["vector_store"].get("content_ratio", 0.5)
     
     # Set URL configuration
     BASE_URL = CONFIG["website"]["base_url"]
@@ -384,6 +419,14 @@ def load_configuration(config_file="config.json"):
     # Set processing flags
     CHECK_LAST_MODIFIED = CONFIG["processing"]["check_last_modified"]
     MAX_FILENAME_LENGTH = CONFIG["processing"]["max_filename_length"]
+    
+    # New RSS Date Threshold parameter (DD-MM-YYYY format)
+    rss_date_threshold_str = CONFIG["processing"].get("RSSDateThreshold")
+    if rss_date_threshold_str:
+        RSS_DATE_THRESHOLD = parse_rss_date_threshold(rss_date_threshold_str)
+    else:
+        RSS_DATE_THRESHOLD = None
+    
     # TOKEN_THRESHOLD removed - we now always save full markdown content
     
     # Set file paths (use unique path generated from config filename)
@@ -423,6 +466,8 @@ def load_configuration(config_file="config.json"):
     print(f"📡 RSS feeds: {len(RSS_FEEDS)} configured")
     print(f"🔄 Recursive URLs: {len(RECURSIVE_URLS)} configured")
     print(f"🧪 Test URLs: {len(TEST_URLS)} configured")
+    if RSS_DATE_THRESHOLD:
+        print(f"📅 RSS Date Threshold: {RSS_DATE_THRESHOLD.strftime('%d-%m-%Y')} (UTC)")
     if TEST_URLS:
         print(f"⚠️  TEST MODE: Test URLs will override HTML sitemap processing")
     if RECURSIVE_URLS:
@@ -564,66 +609,36 @@ def get_page_summary_instructions(target_language="Czech", url="", title=""):
     # Language instruction for non-English targets
     language_instruction = f"- **OUTPUT LANGUAGE:** {target_language}\n" if target_language.lower() != "english" else ""
     
-    return f"""🤖 EXPERT PAGE CONTENT ANALYST: You are a specialist who creates SHORT, FACTUAL summaries about entire webpage content for metadata purposes with ADVANCED CONTEXTUAL INTELLIGENCE.
+    return f"""🤖 EXPERT PAGE CONTENT ANALYST: Create ULTRA-SHORT, HIGH-LEVEL summary about entire webpage content.
 
-## 🚨 CRITICAL: VECTOR STORE TOKEN COMPLIANCE MANDATORY!
-## 🎯 TASK: Create 1-2 paragraph summary about the ENTIRE PAGE CONTENT with STRATEGIC FACTUAL CONTEXT
+## 🎯 TASK: Create 1-2 SHORT sentences about ENTIRE PAGE CONTENT
 
 {language_instruction}
-### **📋 SUMMARY REQUIREMENTS:**
-- **🚨 CRITICAL TOKEN LIMIT:** 190 tokens ABSOLUTE MAXIMUM (Vector Store compliance with safety margin - NON-NEGOTIABLE!)
-- **LENGTH:** Maximum 1-2 paragraphs (MUST BE UNDER 190 tokens!)
-- **STRATEGIC FOCUS:** Complete overview with SEMANTIC ANCHORS for chunked file navigation
-- **FACTUAL DENSITY:** Maximum essential information per token for optimal chunking context
-- **PURPOSE:** Provide STRATEGIC CONTEXT enabling seamless understanding across all chunked files
+### **📋 CRITICAL REQUIREMENTS:**
+- **LENGTH:** Maximum 1-2 short sentences (like SMS messages)
+- **🚨 ABSOLUTELY FORBIDDEN:** DO NOT mention any specific individual names, personal titles, specific department names, or any detailed information
+- **FOCUS:** Only overall counts, content type, and general structure
+- **PURPOSE:** Provide basic context about what type of content the page contains
 
-### **🧠 ADVANCED CONTENT ANALYSIS METHODOLOGY:**
+### **✅ WHAT TO INCLUDE:**
+- Total number of people/items/sections (numbers only)
+- Type of content (contact list, meeting documents, news, etc.)
+- Basic organizational structure (how many main sections/categories)
+- Available contact data types (phone, email, etc.)
 
-**STEP 1: CONTENT TYPE IDENTIFICATION**
-First, identify the primary content category and adapt analysis accordingly:
-
-**🏢 ORGANIZATIONAL STRUCTURES (contacts/phone lists):**
-- **Hierarchy Mapping:** Exact count of organizational levels (sections→departments→subdivisions)
-- **Personnel Quantification:** Total employees, leadership positions, department distribution
-- **Contact Completeness:** Full contact data availability (name, position, phone, email, location)
-- **Structural Flow:** Logical organization pattern for chunking navigation
-
-**📋 MEETING/SESSION DOCUMENTS (usnesení/zasedání):**
-- **Session Details:** Exact date, session number, governing body, location
-- **Agenda Structure:** Total items, thematic categories, voting procedures
-- **Documentation:** Attachment types, reference documents, legal frameworks
-- **Decision Flow:** How agenda progresses for logical file breaks
-
-**👥 POLITICAL/MEMBERSHIP LISTS:**
-- **Membership Stats:** Exact member counts, party distributions, leadership structure
-- **Role Definitions:** Position hierarchy, responsibilities, contact availability
-- **Organizational Context:** How positions relate for seamless chunking
-
-**📑 LEGAL/ADMINISTRATIVE DOCUMENTS:**
-- **Document Structure:** Article/section organization, regulatory frameworks
-- **Content Flow:** Logical progression for intelligent file breaks
-- **Reference Network:** Cross-references, dependencies, legal connections
-
-**🗞️ NEWS/EVENT CONTENT:**
-- **Temporal Context:** Dates, sequences, event relationships
-- **Thematic Organization:** Topic categories, content logical flow
-- **Information Density:** Key facts distribution for chunking strategy
-
-**STEP 2: SEMANTIC ANCHOR EXTRACTION**
-Identify and preserve KEY FACTUAL ANCHORS that enable chunked file navigation:
-- **Structural Boundaries:** Where logical breaks occur in content
-- **Quantified Elements:** Exact counts that provide navigation context
-- **Hierarchical Positions:** Leadership/structural positions for orientation
-- **Temporal Markers:** Dates, sequences, ordering information
-- **Reference Points:** Elements that connect different content sections
+### **❌ WHAT TO NEVER MENTION:**
+- Individual names or surnames
+- Specific department names or abbreviations
+- Personal titles (Ing., Mgr., etc.)
+- Specific phone numbers or emails
+- Any detailed information
 
 ### **🎯 OUTPUT FORMAT:**
-Provide ONLY the 1-2 paragraph summary in {target_language}. No additional formatting, no headings, just the strategically crafted summary paragraphs.
+Provide ONLY the 1-2 extremely short sentences in {target_language}. No formatting, no headings.
 
-**PROFESSIONAL EXAMPLE OUTPUT:**
-Tato stránka obsahuje kompletní telefonní seznam a organizační strukturu Krajského úřadu Středočeského kraje sestávající z 3 hierarchických sekcí (Ředitel krajského úřadu, Sekce finanční a majetková, Sekce veřejných služeb) zahrnujících celkem 20 specializovaných odborů a více než 80 funkčních oddělení s přibližně 300 zaměstnanci. Organizační hierarchie začíná ředitelem s 4 organizačními pracovníky a systematicky pokračuje odbory jako Odbor bezpečnosti a krizového řízení (3 oddělení, 12 zaměstnanců), Odbor digitalizace (5 oddělení, 18 zaměstnanců), Odbor informatiky (2 oddělení, 15 zaměstnanců), Odbor kancelář hejtmanky (4 oddělení, 25 zaměstnanců), což vytváří logické chunking body pro rozdělení obsahu.
-
-Pro každého ze 300+ zaměstnanců jsou poskytnuty kompletní kontaktní údaje v standardizovaném formátu (jméno, funkce, telefonní číslo včetně mobilního, e-mailová adresa, číslo místnosti), přičemž organizační struktura je uspořádána hierarchicky od ředitele přes vedoucí odborů a oddělení až po jednotlivé referenty a specialisty, což umožňuje precizní navazování obsahového toku napříč rozdělenými soubory při zachování úplné organizační kontinuity."""
+**CORRECT EXAMPLE:**
+Stránka obsahuje telefonní seznam krajského úřadu s celkem 300 zaměstnanci rozdělených do 20 organizačních jednotek. Všechny kontakty mají kompletní údaje včetně funkce, telefonu a emailu.
+"""
 
 def generate_question_section(url, title, target_language="Czech", page_summary=None, rss_metadata=None):
     """
@@ -1021,15 +1036,15 @@ def get_current_file_summary_instructions(file_order, total_files, target_langua
     return f"""🤖 EXPERT CONTEXTUAL FILE CONTENT ANALYST: You are a specialist who creates FACTUAL summaries of chunked file content with PRECISE details about its position and content in the complete document sequence.
 
 ## 🚨 CRITICAL: VECTOR STORE TOKEN COMPLIANCE MANDATORY!
-## 🎯 TASK: Create FACTUAL summary of CURRENT FILE ({file_order}/{total_files}) with PRECISE CONTEXTUAL DETAILS
+## 🎯 TASK: Create an EXTREMELY SHORT, CONCISE, FACTUAL summary (1-2 short sentences) of CURRENT FILE ({file_order}/{total_files}) with PRECISE CONTEXTUAL DETAILS.
 
 {language_instruction}
 ### **📋 CURRENT FILE SUMMARY REQUIREMENTS:**
-- **🚨 CRITICAL TOKEN LIMIT:** 240 tokens ABSOLUTE MAXIMUM (Vector Store compliance with safety margin - NON-NEGOTIABLE!)
-- **LENGTH:** Maximum 2-3 paragraphs (MUST BE UNDER 240 tokens!)
-- **FACTUAL PRECISION:** EXACT counts, names, numbers, dates, and structural details
-- **CONTEXTUAL POSITIONING:** Clear explanation of this file's role in the {total_files}-file sequence
-- **CONTENT DENSITY:** Maximum factual information per token used
+- **LENGTH:** Maximum 1-2 extremely short sentences
+- **FACTUAL PRECISION:** EXACT counts, numbers, dates, and structural details.
+- **❌ FORBIDDEN:** DO NOT mention specific individual names, personal titles, detailed contact information (e.g., specific phone numbers or emails), or token counts.
+- **CONTEXTUAL POSITIONING:** Clear explanation of this file's role in the {total_files}-file sequence.
+- **CONTENT DENSITY:** Maximum factual information per word.
 
 ### **📊 ADAPTIVE CONTENT ANALYSIS FOR FILE {file_order}/{total_files}:**
 **For ANY content type, include these EXACT details:**
@@ -1201,58 +1216,49 @@ def get_overlap_summary_instructions(previous_file_order, current_file_order, to
     # Language instruction for non-English targets
     language_instruction = f"- **OUTPUT LANGUAGE:** {target_language}\n" if target_language.lower() != "english" else ""
     
-    return f"""🤖 EXPERT SEMANTIC BRIDGING SPECIALIST: You are a specialist who creates PRECISE overlap summaries using ADVANCED TRANSITION ANALYSIS to describe exactly where the previous file ended and how the current file continues.
-
-## 🚨 CRITICAL: VECTOR STORE TOKEN COMPLIANCE MANDATORY!
-## 🎯 TASK: Create SEMANTIC BRIDGE between PREVIOUS file ({previous_file_order}/{total_files}) and CURRENT file ({current_file_order}/{total_files}) using SYSTEMATIC BOUNDARY ANALYSIS
-
-{language_instruction}
-### **📋 OVERLAP SUMMARY REQUIREMENTS:**
-- **🚨 CRITICAL TOKEN LIMIT:** 190 tokens ABSOLUTE MAXIMUM (Vector Store compliance with safety margin - NON-NEGOTIABLE!)
-- **LENGTH:** Maximum 1-2 paragraphs (MUST BE UNDER 190 tokens!)
-- **SEMANTIC PRECISION:** EXACT transition details with logical flow preservation
-- **CONTEXTUAL BRIDGE:** Strategic information transfer for seamless file continuity
-- **BOUNDARY INTELLIGENCE:** Sophisticated analysis of content break points and connections
-
-### **🧠 ADVANCED SEMANTIC TRANSITION METHODOLOGY:**
-
-**ANALYTICAL PHASE 1: ENDPOINT BOUNDARY ANALYSIS**
-Systematically identify WHERE and HOW the previous file concluded:
-- **STRUCTURAL ENDPOINT:** Last organizational unit, agenda item, document section, or content category
-- **QUANTIFIED COVERAGE:** Exact count of elements covered (employees, items, sections, topics)
-- **HIERARCHICAL POSITION:** Precise position in overall structure (which level, which branch)
-- **COMPLETION STATUS:** Whether previous file ended mid-section or at natural boundary
-
-**ANALYTICAL PHASE 2: CONTINUATION POINT MAPPING**
-Identify EXACTLY how current file connects and continues:
-- **LOGICAL SUCCESSION:** Next immediate element in sequence (next employee, agenda item, section)
-- **STRUCTURAL CONTINUITY:** How current content maintains hierarchical flow
-- **INFORMATION INHERITANCE:** Essential context carried forward from previous file
-- **GAP PREVENTION:** Ensure no missing elements between file boundaries
-
-**ANALYTICAL PHASE 3: CONTEXTUAL BRIDGE CONSTRUCTION**
-Create ESSENTIAL factual context for seamless understanding:
-- **REFERENCE ANCHORS:** Key organizational/structural positions for orientation
-- **QUANTIFIED TRANSITIONS:** Specific counts and positions for precise navigation
-- **LOGICAL FLOW PRESERVATION:** Maintain content reasoning and structure across break
-- **SEMANTIC CONTINUITY:** Ensure concepts and relationships remain clear
-
-### **📊 CONTENT-ADAPTIVE TRANSITION TECHNIQUES:**
-
-**🏢 ORGANIZATIONAL TRANSITIONS:** Specific department→next department, exact employee position, hierarchical level maintenance
-**📋 PROCEDURAL TRANSITIONS:** Agenda item numbers, topic progression, decision flow continuity
-**👥 CONTACT SEQUENCE TRANSITIONS:** Alphabetical position, organizational order, directory flow
-**📑 DOCUMENT STRUCTURE TRANSITIONS:** Article/section numbers, legal progression, regulatory sequence
-**🗞️ TEMPORAL TRANSITIONS:** Event chronology, publication sequences, time-based organization
-**📊 DATA TRANSITIONS:** Table continuations, statistical categories, dataset boundaries
-
-### **🎯 OUTPUT FORMAT:**
-Provide ONLY the 1-2 paragraph overlap summary in {target_language}. No additional formatting, no headings, just the semantically bridged summary paragraphs.
-
-**PROFESSIONAL EXAMPLE OUTPUT:**
-Předchozí soubor ({previous_file_order}/{total_files}) dokumentu "{title}" systematicky pokrýval organizační strukturu od ředitele krajského úřadu přes první 3 odbory: dokončený Odbor bezpečnosti a krizového řízení (3 oddělení, 12 zaměstnanců), kompletní Odbor digitalizace (5 oddělení, 18 zaměstnanců) a Odbor informatiky (2 oddělení, 15 zaměstnanců). Soubor končil posledním zaměstnancem oddělení podpory a provozu (INFPP) - Rýgl Tomáš, podpora uživatelů, čímž uzavřel sekci informatických služeb krajského úřadu.
-
-Aktuální soubor ({current_file_order}/{total_files}) strategicky navazuje přechodem k politicko-administrativní sekci a začíná Odborem kancelář hejtmanky (KHT) s vedoucím Mgr. Rott David, čímž logicky pokračuje v hierarchické struktuře krajského úřadu od technických oddělení k politické reprezentaci, zajišťující úplnou organizační kontinuitu bez strukturálních mezer nebo duplicitních kontaktů."""
+    return f"""🤖 EXPERT SEMANTIC BRIDGING SPECIALIST: You are a specialist who creates EXTREMELY CONCISE and PRECISE overlap summaries using ADVANCED TRANSITION ANALYSIS to describe exactly where the previous file ended and how the current file continues.
+    
+    ## 🎯 TASK: Create an EXTREMELY SHORT, CONCISE SEMANTIC BRIDGE (1-2 sentences) between PREVIOUS file ({previous_file_order}/{total_files}) and CURRENT file ({current_file_order}/{total_files}) using SYSTEMATIC BOUNDARY ANALYSIS.
+    
+    {language_instruction}
+    ### **📋 OVERLAP SUMMARY REQUIREMENTS:**
+    - **LENGTH:** Maximum 1-2 extremely short sentences
+    - **SEMANTIC PRECISION:** MUST mention the EXACT last entity (structural boundary, last name, or item number) of the previous file and the EXACT first entity of the current file.
+    - **❌ FORBIDDEN:** DO NOT mention specific individual names, personal titles, or token counts. Prioritize structural boundaries over names.
+    - **CONTEXTUAL BRIDGE:** Strategic information transfer for seamless file continuity.
+    - **BOUNDARY INTELLIGENCE:** Sophisticated analysis of content break points and connections.
+    
+    ### **🧠 ADVANCED SEMANTIC TRANSITION METHODOLOGY:**
+    
+    **ANALYTICAL PHASE 1: ENDPOINT BOUNDARY ANALYSIS**
+    Systematically identify WHERE and HOW the previous file concluded:
+    - **STRUCTURAL ENDPOINT:** Last organizational unit, agenda item, document section, or content category.
+    - **EXACT LAST ENTITY:** Identify the precise name, figure, or item number where the previous file ended.
+    
+    **ANALYTICAL PHASE 2: CONTINUATION POINT MAPPING**
+    Identify EXACTLY how current file connects and continues:
+    - **LOGICAL SUCCESSION:** Next immediate element in sequence (next employee, agenda item, section).
+    - **EXACT FIRST ENTITY:** Identify the precise name, figure, or item number where the current file begins.
+    
+    **ANALYTICAL PHASE 3: CONTEXTUAL BRIDGE CONSTRUCTION**
+    Create ESSENTIAL factual context for seamless understanding:
+    - **REFERENCE ANCHORS:** Key organizational/structural positions for orientation.
+    - **QUANTIFIED TRANSITIONS:** Specific counts and positions for precise navigation.
+    
+    ### **📊 CONTENT-ADAPTIVE TRANSITION TECHNIQUES:**
+    
+    **🏢 ORGANIZATIONAL TRANSITIONS:** Specific department→next department, EXACT employee position, hierarchical level maintenance.
+    **📋 PROCEDURAL TRANSITIONS:** Agenda item numbers, topic progression, decision flow continuity.
+    **👥 CONTACT SEQUENCE TRANSITIONS:** Alphabetical position, organizational order, structural transition (use last name only if necessary).
+    **📑 DOCUMENT STRUCTURE TRANSITIONS:** Article/section numbers, legal progression, regulatory sequence.
+    **🗞️ TEMPORAL TRANSITIONS:** Event chronology, publication sequences, time-based organization.
+    **📊 DATA TRANSITIONS:** Table continuations, statistical categories, dataset boundaries.
+    
+    ### **🎯 OUTPUT FORMAT:**
+    Provide ONLY the 1-2 extremely short sentence overlap summary in {target_language}. No additional formatting, no headings, just the semantically bridged summary.
+    
+    **PROFESSIONAL EXAMPLE OUTPUT:**
+    Předchozí soubor ({previous_file_order}/{total_files}) končil profilem zastupitele Motešického (SPD), čímž uzavřel první část detailního výčtu. Aktuální soubor ({current_file_order}/{total_files}) plynule navazuje pokračováním seznamu zastupitelů, začínajícím profilem Vildumetzové (ANO), a pokračuje až do konce kompletního seznamu."""
 
 def generate_overlap_summary_via_openrouter(original_page_summary, previous_file_summary, previous_file_content, previous_file_order, current_file_order, total_files, title="", url="", target_language="Czech"):
     """
@@ -1491,6 +1497,7 @@ def create_filename_from_url(url, title="", rss_metadata=None):
     Returns:
         str: Base filename without extension or postfixes
     """
+    from urllib.parse import parse_qs, unquote
     try:
         parsed_url = urlparse(url)
         path_parts = [part for part in parsed_url.path.split('/') if part.strip()]
@@ -1498,7 +1505,6 @@ def create_filename_from_url(url, title="", rss_metadata=None):
         # ENHANCED: Special handling for Events XML URLs with eventId parameters
         if parsed_url.query and 'eventId=' in parsed_url.query:
             # Extract eventId from query parameters
-            from urllib.parse import parse_qs
             query_params = parse_qs(parsed_url.query)
             event_id = query_params.get('eventId', [None])[0]
             
@@ -1557,6 +1563,9 @@ def create_filename_from_url(url, title="", rss_metadata=None):
         # Process each path part
         processed_parts = []
         for part in path_parts:
+            # CRITICAL FIX: URL decode the part before processing
+            part = unquote(part)
+            
             # Remove file extensions
             if '.' in part:
                 part_without_ext = part.rsplit('.', 1)[0]
@@ -1579,6 +1588,18 @@ def create_filename_from_url(url, title="", rss_metadata=None):
             # Join all parts with underscores
             base_filename = '_'.join(processed_parts)
             
+            # ENHANCED: Append unique ID from query parameters if available and not an event URL
+            # This handles generic URLs like vismo/dokumenty2.asp?id=48140
+            if parsed_url.query:
+                query_params = parse_qs(parsed_url.query)
+                
+                # Prioritize 'id' parameter for uniqueness in generic URLs
+                unique_id = query_params.get('id', [None])[0]
+                
+                if unique_id:
+                    base_filename = f"{base_filename}_{unique_id}"
+                    logger.debug(f"🏗️ Appended unique ID from query: {unique_id}")
+
             # Final sanitization
             base_filename = sanitize_filename(base_filename)
             
@@ -2073,11 +2094,198 @@ def _chunk_by_size_only(content, min_section_tokens):
     
     return chunks
 
+def chunk_content_with_metadata_budget(content, vector_store_max_chunk_size, base_title="", url="", target_language="Czech"):
+    """
+    NEW CONTENT SPLITTING SYSTEM: Split content into A-Z files with exact 50/50 token budget allocation.
+    Each file uses exactly half vector store limit for content and half for metadata.
+    
+    TOKEN BUDGET CALCULATION:
+    - Content Budget: vector_store_max_chunk_size / 2 tokens
+    - Metadata Budget: vector_store_max_chunk_size / 2 tokens
+    - Required Chunks: MARKDOWN CONTENT TOKENS / (VECTOR STORE TOKEN LIMIT / 2)
+    
+    Args:
+        content (str): Original markdown content to split
+        vector_store_max_chunk_size (int): Maximum tokens per file from vector store config
+        base_title (str): Base title for filename generation
+        url (str): Source URL for metadata
+        target_language (str): Target language for metadata generation
+    
+    Returns:
+        list: List of content chunks with [A-Z] naming, ready for immediate metadata generation and file saving
+    """
+    logger.info(f"🔀 NEW CONTENT SPLITTING SYSTEM: Processing content with 50/50 token budget allocation")
+    logger.info(f"📐 Vector Store max chunk size: {vector_store_max_chunk_size} tokens")
+    
+    # Calculate exact token budgets based on configured offset
+    # Content Limit = vector_store_max_chunk_size - DEFAULT_CONTENT_TOKEN_OFFSET
+    # Metadata Budget = DEFAULT_CONTENT_TOKEN_OFFSET
+    
+    offset = DEFAULT_CONTENT_TOKEN_OFFSET
+    
+    working_space = vector_store_max_chunk_size - offset
+    
+    # Calculate content and metadata budget based on content_ratio
+    content_ratio = DEFAULT_CONTENT_RATIO
+    
+    content_budget = int(working_space * content_ratio)
+    metadata_budget = working_space - content_budget
+    
+    logger.info(f"💰 Using configured token offset: {offset} tokens")
+    
+    # Safety check: ensure content budget is positive (already validated in validate_config, but safe to check here)
+    if content_budget <= 0:
+        logger.error(f"🚨 CRITICAL ERROR: Calculated content budget is {content_budget}. Defaulting to 100 tokens.")
+        content_budget = 100
+        metadata_budget = vector_store_max_chunk_size - 100
+    
+    logger.info(f"💰 TOKEN BUDGET ALLOCATION:")
+    logger.info(f"   📄 Content budget per file: {content_budget} tokens ({content_ratio*100:.0f}% of working space)")
+    logger.info(f"   📋 Dynamic Metadata budget per file: {metadata_budget} tokens ({(1-content_ratio)*100:.0f}% of working space)")
+    logger.info(f"   🗂️ Fixed Offset/Buffer: {offset} tokens (Reserved space at end)")
+    logger.info(f"   🎯 Total per file: {content_budget + metadata_budget + offset} tokens (= {vector_store_max_chunk_size})")
+    
+    # Calculate total content size and required chunks
+    total_content_tokens = count_tokens_approximate(content)
+    required_chunks = max(1, (total_content_tokens + content_budget - 1) // content_budget)  # Ceiling division
+    
+    logger.info(f"📊 CONTENT ANALYSIS:")
+    logger.info(f"   📄 Total content: {total_content_tokens:,} tokens")
+    logger.info(f"   📊 Required chunks: {required_chunks} (calculated as ⌈{total_content_tokens:,} / {content_budget}⌉)")
+    
+    # Generate alphabet postfixes (A, B, C, ..., Z, AA, AB, etc.)
+    def get_chunk_postfix(chunk_num):
+        if chunk_num < 26:
+            return chr(ord('A') + chunk_num)
+        else:
+            # For more than 26 chunks: AA, AB, AC, etc.
+            first_letter = chr(ord('A') + (chunk_num // 26) - 1)
+            second_letter = chr(ord('A') + (chunk_num % 26))
+            return first_letter + second_letter
+    
+    chunks = []
+    lines = content.split('\n')
+    current_chunk = ""
+    current_tokens = 0
+    chunk_number = 0
+    
+    logger.info(f"🔄 CONTENT SPLITTING: Creating {required_chunks} chunks with {content_budget} token budget each")
+    
+    for line in lines:
+        line_tokens = count_tokens_approximate(line)
+
+        # Handle extremely long lines that exceed content budget
+        if line_tokens > content_budget:
+            logger.warning(f"⚠️ Single line has {line_tokens:,} tokens > content_budget {content_budget:,}. Forcing word-level split.")
+            
+            # 1. Finalize any preceding content as a chunk
+            if current_chunk.strip():
+                postfix = get_chunk_postfix(chunk_number)
+                chunks.append({
+                    'content': current_chunk.strip(),
+                    'tokens': current_tokens,
+                    'chunk_postfix': postfix,
+                    'chunk_number': chunk_number + 1,
+                    'type': 'metadata_budget_chunk',
+                    'filename_postfix': postfix,
+                    'content_budget': content_budget,
+                    'metadata_budget': metadata_budget
+                })
+                logger.info(f"📄 Created chunk {postfix}: {current_tokens:,} tokens (preceding content)")
+                current_chunk = ""
+                current_tokens = 0
+                chunk_number += 1
+            
+            # 2. Split the long line into word-level segments
+            words = line.split(' ')
+            segment_buffer = ""
+            
+            for word in words:
+                test_content = segment_buffer + " " + word if segment_buffer else word
+                if count_tokens_approximate(test_content) > content_budget:
+                    # Save current segment as new chunk
+                    if segment_buffer.strip():
+                        postfix = get_chunk_postfix(chunk_number)
+                        chunks.append({
+                            'content': segment_buffer.strip(),
+                            'tokens': count_tokens_approximate(segment_buffer),
+                            'chunk_postfix': postfix,
+                            'chunk_number': chunk_number + 1,
+                            'type': 'metadata_budget_chunk',
+                            'filename_postfix': postfix,
+                            'content_budget': content_budget,
+                            'metadata_budget': metadata_budget
+                        })
+                        logger.info(f"📄 Created chunk {postfix}: {count_tokens_approximate(segment_buffer):,} tokens (long line segment)")
+                        chunk_number += 1
+                    
+                    # Start new segment with current word
+                    segment_buffer = word
+                else:
+                    # Continue accumulating
+                    segment_buffer = test_content
+            
+            # 3. Add final segment to current chunk buffer
+            if segment_buffer.strip():
+                current_chunk = segment_buffer.strip() + '\n'
+                current_tokens = count_tokens_approximate(current_chunk)
+            
+            continue
+            
+        # Normal line processing - check if adding this line would exceed content budget
+        elif current_tokens + line_tokens > content_budget and current_chunk.strip():
+            # Create new chunk with current content
+            postfix = get_chunk_postfix(chunk_number)
+            chunks.append({
+                'content': current_chunk.strip(),
+                'tokens': current_tokens,
+                'chunk_postfix': postfix,
+                'chunk_number': chunk_number + 1,
+                'type': 'metadata_budget_chunk',
+                'filename_postfix': postfix,
+                'content_budget': content_budget,
+                'metadata_budget': metadata_budget
+            })
+            logger.info(f"📄 Created chunk {postfix}: {current_tokens:,} tokens (budget: {content_budget:,})")
+            
+            # Start new chunk with current line
+            current_chunk = line + '\n'
+            current_tokens = line_tokens
+            chunk_number += 1
+        else:
+            # Add line to current chunk
+            current_chunk += line + '\n'
+            current_tokens = count_tokens_approximate(current_chunk)
+    
+    # Add final chunk if there's content left
+    if current_chunk.strip():
+        postfix = get_chunk_postfix(chunk_number)
+        chunks.append({
+            'content': current_chunk.strip(),
+            'tokens': current_tokens,
+            'chunk_postfix': postfix,
+            'chunk_number': chunk_number + 1,
+            'type': 'metadata_budget_chunk',
+            'filename_postfix': postfix,
+            'content_budget': content_budget,
+            'metadata_budget': metadata_budget
+        })
+        logger.info(f"📄 Created final chunk {postfix}: {current_tokens:,} tokens (budget: {content_budget:,})")
+    
+    logger.info(f"✅ METADATA BUDGET CHUNKING COMPLETE: {len(chunks)} chunks created")
+    logger.info(f"📊 Content budget per chunk: {content_budget:,} tokens")
+    logger.info(f"📋 Metadata budget per chunk: {metadata_budget:,} tokens")
+    logger.info(f"🎯 Total file size per chunk: {vector_store_max_chunk_size:,} tokens")
+    
+    return chunks
+
+
 def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
     """
-    Simple chunking for large files that need to be split for vector store compatibility.
-    Splits content into chunks based purely on max_chunk_size without intelligence.
-    Each chunk gets saved as [filename]A.txt, [filename]B.txt, etc.
+    DEPRECATED: Legacy simple chunking function - kept for backward compatibility.
+    
+    ⚠️ WARNING: This function is deprecated and should not be used for new implementations.
+    Use chunk_content_with_metadata_budget() instead for proper token budget management.
     
     Args:
         content (str): Original markdown content to chunk
@@ -2088,7 +2296,9 @@ def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
     Returns:
         list: List of simple content chunks with [A-Z] naming
     """
-    logger.info(f"🔢 SIMPLE CHUNKING: Splitting large content for {url}")
+    logger.warning(f"🚨 USING DEPRECATED FUNCTION: chunk_large_content_simple() is deprecated")
+    logger.warning(f"💡 RECOMMENDATION: Use chunk_content_with_metadata_budget() for proper token budget management")
+    logger.info(f"🔢 LEGACY SIMPLE CHUNKING: Splitting large content for {url}")
     logger.info(f"📐 Max chunk size: {max_chunk_size} tokens")
     
     chunks = []
@@ -2111,47 +2321,59 @@ def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
         line_tokens = count_tokens_approximate(line)
 
         if line_tokens > max_chunk_size:
-            logger.warning(f"⚠️ Single line has {line_tokens:,} tokens > max_chunk_size {max_chunk_size:,}. Splitting line.")
-            words = line.split(' ')
-            current_line_segment = ""
-            for word in words:
-                word_tokens = count_tokens_approximate(word)
-                if count_tokens_approximate(current_line_segment) + word_tokens > max_chunk_size:
-                    if current_chunk.strip():
-                        postfix = get_chunk_postfix(chunk_number)
-                        chunks.append({
-                            'content': current_chunk.strip(),
-                            'tokens': count_tokens_approximate(current_chunk),
-                            'chunk_postfix': postfix,
-                            'chunk_number': chunk_number + 1,
-                            'type': 'simple_size_based_chunk',
-                            'filename_postfix': postfix
-                        })
-                        logger.info(f"📄 Created chunk {postfix}: {count_tokens_approximate(current_chunk):,} tokens")
-                        current_chunk = ""
-                        chunk_number += 1
-                    current_chunk += current_line_segment + " "
-                    current_line_segment = word + " "
-                else:
-                    current_line_segment += word + " "
+            logger.warning(f"⚠️ Single line has {line_tokens:,} tokens > max_chunk_size {max_chunk_size:,}. Forcing split into segments.")
             
-            if current_line_segment:
-                if count_tokens_approximate(current_chunk) + count_tokens_approximate(current_line_segment) > max_chunk_size:
-                    if current_chunk.strip():
-                        postfix = get_chunk_postfix(chunk_number)
-                        chunks.append({
-                            'content': current_chunk.strip(),
-                            'tokens': count_tokens_approximate(current_chunk),
-                            'chunk_postfix': postfix,
-                            'chunk_number': chunk_number + 1,
-                            'type': 'simple_size_based_chunk',
-                            'filename_postfix': postfix
-                        })
-                        logger.info(f"📄 Created chunk {postfix}: {count_tokens_approximate(current_chunk):,} tokens")
-                        chunk_number += 1
-                    current_chunk = current_line_segment
+            # 1. Finalize any preceding content as a chunk (explains why Chunk A is short)
+            if current_chunk.strip():
+                postfix = get_chunk_postfix(chunk_number)
+                chunks.append({
+                    'content': current_chunk.strip(),
+                    'tokens': current_tokens,
+                    'chunk_postfix': postfix,
+                    'chunk_number': chunk_number + 1,
+                    'type': 'simple_size_based_chunk',
+                    'filename_postfix': postfix
+                })
+                logger.info(f"📄 Created chunk {postfix}: {current_tokens:,} tokens (preceding content)")
+                current_chunk = ""
+                current_tokens = 0
+                chunk_number += 1
+            
+            # 2. Segment the long line into pieces that fit max_chunk_size
+            words = line.split(' ')
+            segment_buffer = ""
+            
+            for word in words:
+                # Check if adding the next word exceeds the max chunk size
+                # We use a conservative check here to ensure the segment fits
+                if count_tokens_approximate(segment_buffer + " " + word) > max_chunk_size:
+                    # Save the current segment buffer as a new chunk
+                    postfix = get_chunk_postfix(chunk_number)
+                    chunks.append({
+                        'content': segment_buffer.strip(),
+                        'tokens': count_tokens_approximate(segment_buffer),
+                        'chunk_postfix': postfix,
+                        'chunk_number': chunk_number + 1,
+                        'type': 'simple_size_based_chunk',
+                        'filename_postfix': postfix
+                    })
+                    logger.info(f"📄 Created chunk {postfix}: {count_tokens_approximate(segment_buffer):,} tokens (long line segment)")
+                    chunk_number += 1
+                    
+                    # Start a new segment buffer with the current word
+                    segment_buffer = word + " "
                 else:
-                    current_chunk += current_line_segment
+                    # Continue accumulating the segment
+                    segment_buffer += word + " "
+            
+            # 3. Add the final segment of the long line to the current_chunk buffer
+            if segment_buffer.strip():
+                current_chunk = segment_buffer.strip() + '\n'
+                current_tokens = count_tokens_approximate(current_chunk)
+            
+            # Continue to next line in main loop (Line 2174)
+            continue
+            
         elif current_tokens + line_tokens > max_chunk_size and current_chunk.strip():
             postfix = get_chunk_postfix(chunk_number)
             chunks.append({
@@ -2173,16 +2395,10 @@ def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
     
     # Add final chunk if there's content left
     if current_chunk.strip():
-        # 🚨 CRITICAL VALIDATION: Final chunk size validation
-        if current_tokens > max_chunk_size:
-            logger.error(f"🚨 FINAL CHUNK SIZE VIOLATION: {current_tokens:,} > {max_chunk_size:,} tokens")
-            logger.error(f"❌ Enforcing emergency final chunk size limit")
-            
-            # Emergency final chunk size enforcement
-            estimated_chars = max_chunk_size * 4
-            current_chunk = current_chunk[:estimated_chars] + "\n[FINAL CHUNK TRUNCATED - EXCEEDED MAX SIZE]"
-            current_tokens = count_tokens_approximate(current_chunk)
-            logger.warning(f"⚠️ EMERGENCY: Final chunk truncated to {current_tokens:,} tokens")
+        # NOTE: We rely on the calling function (process_single_url_normally) to ensure that
+        # max_chunk_size is set low enough to accommodate the metadata header.
+        # We explicitly remove the emergency truncation here to prevent data loss,
+        # as the goal is for NO information to be lost.
         
         postfix = get_chunk_postfix(chunk_number)
         chunks.append({
@@ -2196,7 +2412,7 @@ def chunk_large_content_simple(content, max_chunk_size, base_title="", url=""):
         
         logger.info(f"📄 Created final chunk {postfix}: {current_tokens:,} tokens (limit: {max_chunk_size:,})")
     
-    logger.info(f"✅ Simple chunking complete: {len(chunks)} chunks created")
+    logger.info(f"✅ Legacy chunking complete: {len(chunks)} chunks created")
     return chunks
 
 def generate_section_based_filename(section_title, chunk_number, base_title=""):
@@ -2248,6 +2464,819 @@ def generate_section_based_filename(section_title, chunk_number, base_title=""):
     # The section title is already descriptive enough
     
     return section_filename
+
+
+# ============================================================================
+# NEW BUDGET-CONSTRAINED METADATA GENERATION FUNCTIONS
+# ============================================================================
+
+def calculate_metadata_token_allocation(metadata_budget, static_metadata_tokens=100):
+    """
+    Calculate optimal token allocation for dynamic metadata components within budget.
+    
+    Args:
+        metadata_budget (int): Total available tokens for metadata (e.g., 2048)
+        static_metadata_tokens (int): Estimated tokens for static metadata (URL, title, dates, etc.)
+    
+    Returns:
+        dict: Token allocation for each dynamic metadata component
+    """
+    logger.info(f"📊 CALCULATING METADATA TOKEN ALLOCATION:")
+    logger.info(f"   💰 Total metadata budget: {metadata_budget} tokens")
+    logger.info(f"   📋 Static metadata (URL, title, dates): ~{static_metadata_tokens} tokens")
+    
+    # Reserve tokens for static metadata
+    available_for_dynamic = metadata_budget - static_metadata_tokens
+    
+    if available_for_dynamic <= 0:
+        logger.warning(f"⚠️ No tokens available for dynamic metadata after static allocation!")
+        return {
+            'source_page_summary': 50,
+            'current_file_summary': 50,
+            'overlap_summary': 50,
+            'question_section': 50
+        }
+    
+    # Distribute remaining tokens among dynamic components
+    # Priority: Source page summary > Current file summary > Overlap summary > Question section
+    source_page_summary_tokens = min(available_for_dynamic // 4, 300)  # Max 300 tokens
+    remaining = available_for_dynamic - source_page_summary_tokens
+    
+    current_file_summary_tokens = min(remaining // 3, 400)  # Max 400 tokens
+    remaining -= current_file_summary_tokens
+    
+    overlap_summary_tokens = min(remaining // 2, 250)  # Max 250 tokens
+    remaining -= overlap_summary_tokens
+    
+    question_section_tokens = remaining  # Rest goes to questions
+    
+    allocation = {
+        'source_page_summary': source_page_summary_tokens,
+        'current_file_summary': current_file_summary_tokens,
+        'overlap_summary': overlap_summary_tokens,
+        'question_section': question_section_tokens,
+        'static_metadata': static_metadata_tokens,
+        'total_allocated': static_metadata_tokens + source_page_summary_tokens + current_file_summary_tokens + overlap_summary_tokens + question_section_tokens
+    }
+    
+    logger.info(f"📊 METADATA TOKEN ALLOCATION COMPLETE:")
+    logger.info(f"   📄 Source page summary: {allocation['source_page_summary']} tokens")
+    logger.info(f"   📋 Current file summary: {allocation['current_file_summary']} tokens")
+    logger.info(f"   🔄 Overlap summary: {allocation['overlap_summary']} tokens")
+    logger.info(f"   ❓ Question section: {allocation['question_section']} tokens")
+    logger.info(f"   📊 Static metadata: {allocation['static_metadata']} tokens")
+    logger.info(f"   💯 Total allocated: {allocation['total_allocated']} tokens (budget: {metadata_budget})")
+    
+    return allocation
+
+
+def generate_budget_constrained_page_summary(markdown_content, title="", url="", target_language="Czech", max_tokens=300):
+    """
+    Generate page summary with strict token budget constraints.
+    
+    Args:
+        markdown_content (str): Original markdown content to analyze
+        title (str): Page title for context
+        url (str): Source URL for context
+        target_language (str): Target language for the summary output
+        max_tokens (int): Maximum tokens allowed for this summary
+    
+    Returns:
+        str: Budget-constrained page summary or None if failed
+    """
+    logger.info(f"Generating budget-constrained page summary (max: {max_tokens} tokens) for URL: {url}")
+    
+    # Check if OpenRouter is configured
+    if not OPENROUTER_API_KEY:
+        logger.info(f"OpenRouter API key not configured, skipping page summary generation")
+        return None
+    
+    # Create budget-constrained prompt
+    prompt = f"""🤖 EXPERT PAGE CONTENT ANALYST: Create SHORT, FACTUAL summary about entire webpage content for metadata with STRICT TOKEN BUDGET COMPLIANCE.
+
+## 🚨 CRITICAL: STRICT TOKEN BUDGET COMPLIANCE MANDATORY!
+## 🎯 TASK: Create 1-2 paragraph summary about the ENTIRE PAGE CONTENT
+
+- **OUTPUT LANGUAGE:** {target_language}
+- **🚨 CRITICAL TOKEN LIMIT:** {max_tokens} tokens ABSOLUTE MAXIMUM (NON-NEGOTIABLE!)
+- **LENGTH:** Maximum 1-2 paragraphs
+- **FACTUAL DENSITY:** Maximum essential information per token
+- **PURPOSE:** Provide context for understanding across chunked files
+
+## SOURCE CONTENT TO ANALYZE:
+{markdown_content}"""
+    
+    try:
+        # Use existing OpenRouter infrastructure with budget constraints
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": url if url else "https://api.openrouter.ai",
+            "X-Title": "HypeDigitaly Budget Page Summary Generator"
+        }
+        
+        primary_model = OPENROUTER_MODELS[0] if isinstance(OPENROUTER_MODELS, list) else OPENROUTER_MODELS
+        payload = {
+            "model": primary_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional content analyst specializing in ultra-concise, high-level summaries. You NEVER mention specific individual names, personal titles, or detailed information. You focus ONLY on structural information, counts, and content types. Your responses are extremely brief, factual, and SMS-like in length."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens + 50,  # Small buffer for model
+            "temperature": 0.0,  # Deterministic output for consistent summaries
+            "top_p": OPENROUTER_TOP_P
+        }
+        
+        response = requests_retry_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT * 2
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        log_openrouter_token_usage(data, f"BUDGET_PAGE_SUMMARY_{max_tokens}T", url)
+        
+        if "choices" in data and len(data["choices"]) > 0:
+            message = data["choices"][0]["message"]
+            page_summary = message.get("content", "").strip()
+            
+            if not page_summary and message.get("reasoning"):
+                page_summary = message.get("reasoning", "").strip()
+            
+            if page_summary and page_summary.strip():
+                result_tokens = count_tokens_approximate(page_summary)
+                
+                # CRITICAL: Enforce budget limit
+                if result_tokens > max_tokens:
+                    logger.warning(f"🚨 PAGE SUMMARY EXCEEDS BUDGET: {result_tokens} > {max_tokens} tokens - TRUNCATING")
+                    estimated_chars = max_tokens * 4
+                    page_summary = page_summary[:estimated_chars] + "..."
+                    result_tokens = count_tokens_approximate(page_summary)
+                
+                logger.info(f"✅ Generated budget page summary: {result_tokens} tokens (budget: {max_tokens})")
+                return page_summary
+            else:
+                logger.error("❌ Generated page summary is empty")
+                return None
+        else:
+            logger.error("❌ No choices returned from OpenRouter API")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Error generating budget page summary: {str(e)}")
+        return None
+
+
+def generate_budget_constrained_current_file_summary(file_content, file_order, total_files, title="", url="", target_language="Czech", max_tokens=400):
+    """
+    Generate current file summary with strict token budget constraints.
+    
+    Args:
+        file_content (str): Content of the current file to summarize
+        file_order (int): Current file position (e.g., 1, 2, 3...)
+        total_files (int): Total number of files in sequence
+        title (str): Page title for context
+        url (str): Source URL for context
+        target_language (str): Target language for the summary output
+        max_tokens (int): Maximum tokens allowed for this summary
+    
+    Returns:
+        str: Budget-constrained current file summary or None if failed
+    """
+    logger.info(f"Generating budget-constrained current file summary ({file_order}/{total_files}, max: {max_tokens} tokens)")
+    
+    if not OPENROUTER_API_KEY:
+        logger.info(f"OpenRouter API key not configured, skipping current file summary")
+        return None
+    
+    prompt = f"""🤖 EXPERT CONTEXTUAL FILE ANALYST: Create ULTRA-SHORT summary of current file in sequence.
+
+## 🎯 TASK: Create 1-2 SHORT sentences about CURRENT FILE ({file_order}/{total_files})
+
+- **OUTPUT LANGUAGE:** {target_language}
+- **🚨 CRITICAL TOKEN LIMIT:** {max_tokens} tokens MAXIMUM
+- **LENGTH:** Maximum 1-2 short sentences (like SMS messages)
+- **🚨 ABSOLUTELY FORBIDDEN:** DO NOT mention any specific individual names, personal titles, or detailed information
+- **FOCUS:** Only file position, overall counts, and general content type
+
+### **✅ WHAT TO INCLUDE:**
+- File position: "část {file_order} z {total_files}"
+- Total number of items/people in THIS file (numbers only)
+- Basic content type and structure
+
+### **❌ WHAT TO NEVER MENTION:**
+- Individual names or surnames
+- Specific department names
+- Personal titles (Ing., Mgr., etc.)
+- Any detailed information
+
+### **🎯 OUTPUT FORMAT:**
+Provide ONLY the 1-2 extremely short sentences in {target_language}. No formatting, no headings.
+
+## CURRENT FILE CONTENT TO ANALYZE (File {file_order}/{total_files}):
+{file_content}"""
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": url if url else "https://api.openrouter.ai",
+            "X-Title": f"HypeDigitaly Budget Current File Summary ({file_order}/{total_files})"
+        }
+        
+        primary_model = OPENROUTER_MODELS[0] if isinstance(OPENROUTER_MODELS, list) else OPENROUTER_MODELS
+        payload = {
+            "model": primary_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional file content analyst specializing in ultra-concise file summaries within document sequences. You NEVER mention specific individual names, personal titles, or detailed information. You focus ONLY on file position, structural boundaries, and content counts. Your responses are extremely brief, factual, and SMS-like in length."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens + 50,
+            "temperature": 0.0,  # Deterministic output for consistent file summaries
+            "top_p": OPENROUTER_TOP_P
+        }
+        
+        response = requests_retry_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT * 2
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        log_openrouter_token_usage(data, f"BUDGET_CURRENT_FILE_SUMMARY_{file_order}_{total_files}_{max_tokens}T", url)
+        
+        if "choices" in data and len(data["choices"]) > 0:
+            message = data["choices"][0]["message"]
+            current_file_summary = message.get("content", "").strip()
+            
+            if not current_file_summary and message.get("reasoning"):
+                current_file_summary = message.get("reasoning", "").strip()
+            
+            if current_file_summary and current_file_summary.strip():
+                result_tokens = count_tokens_approximate(current_file_summary)
+                
+                # CRITICAL: Enforce budget limit
+                if result_tokens > max_tokens:
+                    logger.warning(f"🚨 CURRENT FILE SUMMARY EXCEEDS BUDGET: {result_tokens} > {max_tokens} tokens - TRUNCATING")
+                    estimated_chars = max_tokens * 4
+                    current_file_summary = current_file_summary[:estimated_chars] + "..."
+                    result_tokens = count_tokens_approximate(current_file_summary)
+                
+                logger.info(f"✅ Generated budget current file summary: {result_tokens} tokens (budget: {max_tokens})")
+                return current_file_summary
+            else:
+                logger.error("❌ Generated current file summary is empty")
+                return None
+        else:
+            logger.error("❌ No choices returned from OpenRouter API")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Error generating budget current file summary: {str(e)}")
+        return None
+
+
+def generate_budget_constrained_overlap_summary(original_page_summary, previous_file_summary, previous_file_content, previous_file_order, current_file_order, total_files, title="", url="", target_language="Czech", max_tokens=250):
+    """
+    Generate overlap summary with strict token budget constraints.
+    
+    Args:
+        original_page_summary (str): Summary of the entire original page
+        previous_file_summary (str): Summary of the previous file
+        previous_file_content (str): Full content of the previous file
+        previous_file_order (int): Previous file position
+        current_file_order (int): Current file position
+        total_files (int): Total number of files in sequence
+        title (str): Page title for context
+        url (str): Source URL for context
+        target_language (str): Target language for the summary output
+        max_tokens (int): Maximum tokens allowed for this summary
+    
+    Returns:
+        str: Budget-constrained overlap summary or None if failed
+    """
+    logger.info(f"Generating budget-constrained overlap summary (prev:{previous_file_order}->curr:{current_file_order}, max: {max_tokens} tokens)")
+    
+    if not OPENROUTER_API_KEY:
+        logger.info(f"OpenRouter API key not configured, skipping overlap summary")
+        return None
+    
+    prompt = f"""🤖 EXPERT SEMANTIC BRIDGING SPECIALIST: Create PRECISE overlap summary with STRICT TOKEN BUDGET COMPLIANCE.
+
+## 🚨 CRITICAL: STRICT TOKEN BUDGET COMPLIANCE MANDATORY!
+## 🎯 TASK: Create SEMANTIC BRIDGE between PREVIOUS file ({previous_file_order}/{total_files}) and CURRENT file ({current_file_order}/{total_files})
+
+- **OUTPUT LANGUAGE:** {target_language}
+- **🚨 CRITICAL TOKEN LIMIT:** {max_tokens} tokens ABSOLUTE MAXIMUM (NON-NEGOTIABLE!)
+- **LENGTH:** Maximum 1-2 paragraphs
+- **SEMANTIC PRECISION:** EXACT transition details with logical flow preservation
+
+## INPUT DATA FOR OVERLAP ANALYSIS:
+
+### ORIGINAL PAGE SUMMARY:
+{original_page_summary or "Not available"}
+
+### PREVIOUS FILE SUMMARY (File {previous_file_order}/{total_files}):
+{previous_file_summary or "Not available"}
+
+### PREVIOUS FILE CONTENT (File {previous_file_order}/{total_files}) - ANALYZE HOW IT ENDED:
+{previous_file_content}"""
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": url if url else "https://api.openrouter.ai",
+            "X-Title": f"HypeDigitaly Budget Overlap Summary (prev:{previous_file_order}->curr:{current_file_order})"
+        }
+        
+        primary_model = OPENROUTER_MODELS[0] if isinstance(OPENROUTER_MODELS, list) else OPENROUTER_MODELS
+        payload = {
+            "model": primary_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional semantic bridging specialist creating ultra-concise transition summaries between file sequences. You NEVER mention specific individual names, personal titles, or detailed information. You focus ONLY on structural boundaries, file positions, and content flow connections. Your responses are extremely brief, factual, and SMS-like in length."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens + 50,
+            "temperature": 0.0,  # Deterministic output for consistent overlap summaries
+            "top_p": OPENROUTER_TOP_P
+        }
+        
+        response = requests_retry_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT * 2
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        log_openrouter_token_usage(data, f"BUDGET_OVERLAP_SUMMARY_{previous_file_order}_TO_{current_file_order}_{max_tokens}T", url)
+        
+        if "choices" in data and len(data["choices"]) > 0:
+            message = data["choices"][0]["message"]
+            overlap_summary = message.get("content", "").strip()
+            
+            if not overlap_summary and message.get("reasoning"):
+                overlap_summary = message.get("reasoning", "").strip()
+            
+            if overlap_summary and overlap_summary.strip():
+                result_tokens = count_tokens_approximate(overlap_summary)
+                
+                # CRITICAL: Enforce budget limit
+                if result_tokens > max_tokens:
+                    logger.warning(f"🚨 OVERLAP SUMMARY EXCEEDS BUDGET: {result_tokens} > {max_tokens} tokens - TRUNCATING")
+                    estimated_chars = max_tokens * 4
+                    overlap_summary = overlap_summary[:estimated_chars] + "..."
+                    result_tokens = count_tokens_approximate(overlap_summary)
+                
+                logger.info(f"✅ Generated budget overlap summary: {result_tokens} tokens (budget: {max_tokens})")
+                return overlap_summary
+            else:
+                logger.error("❌ Generated overlap summary is empty")
+                return None
+        else:
+            logger.error("❌ No choices returned from OpenRouter API")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Error generating budget overlap summary: {str(e)}")
+        return None
+
+
+def generate_budget_constrained_question_section(url, title, target_language="Czech", page_summary=None, rss_metadata=None, max_tokens=200):
+    """
+    Generate question section with strict token budget constraints.
+    
+    Args:
+        url (str): Source URL
+        title (str): Page title
+        target_language (str): Target language for output
+        page_summary (str, optional): Source page summary for enhanced context
+        rss_metadata (dict, optional): RSS metadata for enhanced context
+        max_tokens (int): Maximum tokens allowed for question section
+    
+    Returns:
+        str: Budget-constrained question section or fallback string
+    """
+    logger.info(f"Generating budget-constrained question section (max: {max_tokens} tokens) for URL: {url}")
+    
+    # Check if this is an Events RSS URL with rich metadata
+    is_events_rss = (rss_metadata and
+                    rss_metadata.get('event_metadata') and
+                    'eventId=' in url)
+    
+    if not OPENROUTER_API_KEY:
+        logger.info(f"OpenRouter API key not configured, using fallback for question section")
+        # Create fallback based on available context
+        if is_events_rss:
+            event_data = rss_metadata.get('event_metadata', {})
+            event_name = event_data.get('event_name', title)
+            fallback = f"{event_name} | akce | událost | Co je {event_name}? | Kdy se koná {event_name}? | Kdo organizuje {event_name}?"
+        else:
+            fallback = f"{title} | informace | kontakt | Co je {title}? | Informace o {title} | Kontakt na {title}"
+        return fallback[:max_tokens * 4]  # Rough character limit
+    
+    # Create budget-constrained prompt
+    summary_context = f"\nPage Summary: {page_summary[:300]}..." if page_summary else "\nPage Summary: Not available"
+    
+    if is_events_rss:
+        event_data = rss_metadata.get('event_metadata', {})
+        event_context = f"""
+Event Details:
+- Event Name: {event_data.get('event_name', 'Unknown')}
+- Event Type: {event_data.get('event_type', 'Unknown')}
+- Organizer: {event_data.get('organizer', 'Unknown')}"""
+        
+        prompt = f"""🤖 EVENT-SPECIFIC KEYWORD AND QUESTION GENERATOR: Generate event-focused search terms with STRICT TOKEN BUDGET.
+
+## 🚨 CRITICAL TOKEN LIMIT: {max_tokens} tokens MAXIMUM
+Generate: 3 event keywords | 3 RAG-optimized questions
+Output ONLY pipe-separated string.
+
+URL: {url}
+Title: {title}{event_context}{summary_context}
+Language: {target_language}"""
+    else:
+        prompt = f"""🤖 KEYWORD AND QUESTION GENERATOR: Generate search terms with STRICT TOKEN BUDGET.
+
+## 🚨 CRITICAL TOKEN LIMIT: {max_tokens} tokens MAXIMUM
+Generate: 3 keywords | 3 RAG-optimized questions
+Output ONLY pipe-separated string.
+
+URL: {url}
+Title: {title}{summary_context}
+Language: {target_language}"""
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": url,
+            "X-Title": "HypeDigitaly Budget Question Generator"
+        }
+        
+        primary_model = OPENROUTER_MODELS[0] if isinstance(OPENROUTER_MODELS, list) else OPENROUTER_MODELS
+        payload = {
+            "model": primary_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional keyword and question generator specializing in ultra-concise, RAG-optimized search terms. You create pipe-separated keywords and questions without any additional formatting or explanations. Your output is extremely brief and focused."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens + 30,
+            "temperature": 0.0,  # Deterministic output for consistent question generation
+            "top_p": OPENROUTER_TOP_P
+        }
+        
+        response = requests_retry_session().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        log_openrouter_token_usage(data, f"BUDGET_QUESTION_SECTION_{max_tokens}T", url)
+        
+        if "choices" in data and len(data["choices"]) > 0:
+            message = data["choices"][0]["message"]
+            question_text = message.get("content", "").strip()
+            
+            if not question_text and message.get("reasoning"):
+                question_text = message.get("reasoning", "").strip()
+            
+            if question_text and len(question_text) > 10:
+                result_tokens = count_tokens_approximate(question_text)
+                
+                # CRITICAL: Enforce budget limit
+                if result_tokens > max_tokens:
+                    logger.warning(f"🚨 QUESTION SECTION EXCEEDS BUDGET: {result_tokens} > {max_tokens} tokens - TRUNCATING")
+                    estimated_chars = max_tokens * 4
+                    question_text = question_text[:estimated_chars]
+                    result_tokens = count_tokens_approximate(question_text)
+                
+                logger.info(f"✅ Generated budget question section: {result_tokens} tokens (budget: {max_tokens})")
+                return question_text
+            else:
+                logger.warning("API response too short, using fallback")
+                fallback = f"{title} | informace | kontakt | Co je {title}? | Informace o {title} | Kontakt na {title}"
+                return fallback[:max_tokens * 4]
+        else:
+            logger.warning("No choices from API, using fallback")
+            fallback = f"{title} | informace | kontakt | Co je {title}? | Informace o {title} | Kontakt na {title}"
+            return fallback[:max_tokens * 4]
+            
+    except Exception as e:
+        logger.error(f"Error generating budget question section: {str(e)}, using fallback")
+        fallback = f"{title} | informace | kontakt | Co je {title}? | Informace o {title} | Kontakt na {title}"
+        return fallback[:max_tokens * 4]
+
+
+def create_budget_constrained_metadata_header(url, title, last_modified=None, path=None, rss_metadata=None, source_page_summary=None, file_order=None, total_files=None, current_file_summary=None, overlap_summary=None):
+    """
+    Create metadata header with ONLY essential static information (no provider info, no script version).
+    This creates the minimal static metadata as requested by user.
+    
+    Args:
+        url (str): Source URL of the content
+        title (str): Page title
+        last_modified (datetime, optional): Last modification date from sitemap
+        path (str, optional): Navigation path from sitemap
+        rss_metadata (dict, optional): RSS-specific metadata
+        source_page_summary (str, optional): Source page summary
+        file_order (int, optional): Current file position in sequence
+        total_files (int, optional): Total number of files in sequence
+        current_file_summary (str, optional): Summary of current file
+        overlap_summary (str, optional): Overlap summary
+    
+    Returns:
+        str: Minimal static metadata header
+    """
+    # Format last modified date
+    last_mod_str = "Unknown"
+    if last_modified:
+        if hasattr(last_modified, 'strftime'):
+            last_mod_str = last_modified.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            last_mod_str = str(last_modified)
+    
+    # Create minimal static metadata (no provider info, no script version as requested)
+    metadata_lines = [
+        f"## 🔗 **ZDROJOVÁ URL:**",
+        f"### **{url}**",
+        "",
+        f"## 📝 **TITULEK:**",
+        f"### **{title or 'N/A'}**",
+        "",
+        f"## 📅 **DATUM POSLEDNÍ MODIFIKACE:**",
+        f"### **{last_mod_str}**",
+        ""
+    ]
+    
+    # Add file order information if this is a chunked file
+    if file_order is not None and total_files is not None:
+        metadata_lines.extend([
+            f"## 🗂️ **FILE ORDER:**",
+            f"### **File {file_order} of {total_files}**",
+            ""
+        ])
+    
+    # Add SOURCE PAGE SUMMARY if available
+    if source_page_summary and source_page_summary.strip():
+        metadata_lines.extend([
+            f"## 📊 **SOURCE PAGE SUMMARY:**",
+            f"### **{source_page_summary.strip()}**",
+            ""
+        ])
+    
+    # Add CURRENT FILE SUMMARY if available
+    if current_file_summary and current_file_summary.strip():
+        metadata_lines.extend([
+            f"## 📋 **CURRENT FILE SUMMARY:**",
+            f"### **{current_file_summary.strip()}**",
+            ""
+        ])
+    
+    # Add OVERLAP SUMMARY if available
+    if overlap_summary and overlap_summary.strip():
+        metadata_lines.extend([
+            f"## 🔄 **PREVIOUS FILE OVERLAP SUMMARY:**",
+            f"### **{overlap_summary.strip()}**",
+            ""
+        ])
+    
+    metadata_lines.extend([
+        "---",
+        "",
+        ""  # Empty line before content
+    ])
+    
+    return "\n".join(metadata_lines)
+
+
+def process_and_save_chunks_with_metadata_budget(chunks, base_title, url, target_language="Czech", upload_to_vector_store=False, vector_store_id=None, enable_deduplication=True, chunking_strategy=None, vector_store_cache=None, last_modified=None, path=None, provider_used=None, rss_metadata=None):
+    """
+    Process chunks with metadata budget management and save complete files immediately.
+    This function generates metadata within budget and creates complete files.
+    
+    Args:
+        chunks (list): List of content chunks from chunk_content_with_metadata_budget()
+        base_title (str): Base title for filename generation
+        url (str): Source URL
+        target_language (str): Target language for metadata generation
+        ... (other parameters for save_markdown_to_file)
+    
+    Returns:
+        list: List of saved file paths
+    """
+    logger.info(f"📋 PROCESSING CHUNKS WITH METADATA BUDGET: {len(chunks)} chunks to process")
+    
+    if not chunks:
+        logger.error("❌ No chunks provided for processing")
+        return []
+    
+    total_chunks = len(chunks)
+    saved_files = []
+    previous_file_content = None
+    previous_file_summary = None
+    
+    # Generate page summary for the entire content (within budget)
+    original_content = '\n'.join(chunk['content'] for chunk in chunks)
+    metadata_budget = chunks[0].get('metadata_budget', 2048)  # Get from first chunk
+    
+    # Calculate metadata token allocation
+    allocation = calculate_metadata_token_allocation(metadata_budget)
+    
+    # Generate page summary once for all chunks
+    page_summary = generate_budget_constrained_page_summary(
+        original_content, base_title, url, target_language,
+        max_tokens=allocation['source_page_summary']
+    )
+    
+    logger.info(f"🔄 PROCESSING {total_chunks} CHUNKS WITH BUDGET-CONSTRAINED METADATA...")
+    
+    for i, chunk in enumerate(chunks):
+        chunk_order = chunk['chunk_number']
+        is_last_chunk = (chunk_order == total_chunks)
+        chunk_content = chunk['content']
+        content_budget = chunk.get('content_budget', 2048)
+        
+        logger.info(f"📄 Processing chunk {chunk_order}/{total_chunks} (postfix: {chunk['chunk_postfix']})")
+        
+        # Generate current file summary
+        current_file_summary = generate_budget_constrained_current_file_summary(
+            chunk_content, chunk_order, total_chunks, base_title, url, target_language,
+            max_tokens=allocation['current_file_summary']
+        )
+        
+        # Generate overlap summary (for ALL chunks B-Z, INCLUDING the last one)
+        overlap_summary = None
+        if chunk_order > 1 and previous_file_content:  # All files except the first (A) should have overlap summary
+            overlap_summary = generate_budget_constrained_overlap_summary(
+                page_summary, previous_file_summary, previous_file_content,
+                chunk_order - 1, chunk_order, total_chunks, base_title, url, target_language,
+                max_tokens=allocation['overlap_summary']
+            )
+        
+        # Generate question section
+        question_text = generate_budget_constrained_question_section(
+            url, base_title, target_language, page_summary, rss_metadata,
+            max_tokens=allocation['question_section']
+        )
+        
+        # Create budget-constrained metadata header
+        metadata_header = create_budget_constrained_metadata_header(
+            url, base_title, last_modified, path, rss_metadata,
+            source_page_summary=page_summary,
+            file_order=chunk_order,
+            total_files=total_chunks,
+            current_file_summary=current_file_summary,
+            overlap_summary=overlap_summary
+        )
+        
+        # Assemble complete file content: METADATA + QUESTION + CONTENT
+        question_section = f"# **QUESTION:**\n\n{question_text}\n\n# **ANSWER:**\n\n" if question_text else ""
+        complete_file_content = metadata_header + question_section + chunk_content
+        
+        # Validate total file size before saving
+        total_file_tokens = count_tokens_approximate(complete_file_content)
+        vector_store_limit = DEFAULT_MAX_CHUNK_SIZE # The absolute limit is always max_chunk_size
+        
+        if total_file_tokens > vector_store_limit:
+            logger.error(f"🚨 CRITICAL: Complete file exceeds vector store limit!")
+            logger.error(f"   📊 File tokens: {total_file_tokens:,}")
+            logger.error(f"   🎯 Vector store limit: {vector_store_limit:,}")
+            logger.error(f"   ⚠️ EMERGENCY: Truncating metadata as user specified")
+            
+            # EMERGENCY: User specified that ONLY metadata can be truncated, NEVER content
+            metadata_tokens = count_tokens_approximate(metadata_header + question_section)
+            content_tokens = count_tokens_approximate(chunk_content)
+            overflow = total_file_tokens - vector_store_limit
+            
+            logger.error(f"   📋 Metadata tokens: {metadata_tokens:,}")
+            logger.error(f"   📄 Content tokens: {content_tokens:,} (NEVER TRUNCATED)")
+            logger.error(f"   ❌ Overflow: {overflow:,} tokens - REDUCING METADATA ONLY")
+            
+            # Calculate maximum allowed metadata size
+            max_metadata_tokens = vector_store_limit - content_tokens
+            if max_metadata_tokens > 0:
+                # Truncate metadata to fit
+                estimated_chars = max_metadata_tokens * 4
+                truncated_metadata_and_question = (metadata_header + question_section)[:estimated_chars] + "..."
+                complete_file_content = truncated_metadata_and_question + chunk_content
+                
+                final_tokens = count_tokens_approximate(complete_file_content)
+                logger.warning(f"⚠️ EMERGENCY METADATA TRUNCATION: Reduced to {final_tokens:,} tokens")
+            else:
+                logger.error(f"❌ CRITICAL ERROR: Content alone exceeds vector store limit!")
+                # This should not happen with proper budget allocation
+                continue
+        
+        # Create filename from URL with chunk postfix
+        base_filename = create_filename_from_url(url, base_title, rss_metadata)
+        
+        # Extract pagination info if applicable
+        is_paginated = False
+        page_number = None
+        if "_PAGE" in base_title:
+            is_paginated = True
+            try:
+                page_part = base_title.split("_PAGE")[-1]
+                page_number = int(page_part) if page_part.isdigit() else None
+            except (ValueError, IndexError):
+                page_number = None
+        
+        # Construct complete filename with chunk postfix
+        chunk_filename = construct_final_filename(
+            base_filename=base_filename,
+            is_paginated=is_paginated,
+            page_number=page_number,
+            chunk_postfix=chunk['chunk_postfix'],
+            dedup_counter=None
+        )
+        
+        # Create unique lookup URL for vector store deduplication
+        if "_PAGE" in base_title:
+            page_info = base_title.split("_PAGE")[-1]
+            chunk_lookup_url = f"{url}#PAGE{page_info}chunk{chunk['chunk_postfix']}"
+        else:
+            chunk_lookup_url = f"{url}#chunk{chunk['chunk_postfix']}"
+        
+        logger.info(f"💾 SAVING COMPLETE FILE: {chunk_filename}")
+        logger.info(f"   📊 Total file tokens: {count_tokens_approximate(complete_file_content):,}")
+        logger.info(f"   📄 Content tokens: {count_tokens_approximate(chunk_content):,} (Target: {content_budget:,})")
+        logger.info(f"   📋 Metadata tokens: {count_tokens_approximate(metadata_header + question_section):,} (Target: {metadata_budget + DEFAULT_CONTENT_TOKEN_OFFSET:,})")
+        
+        # Save complete file directly (bypassing normal save_markdown_to_file content assembly)
+        try:
+            filepath = os.path.join(OUTPUT_DIR, f"{chunk_filename}.txt")
+            
+            # Check for file collision and add versioning if needed
+            version_counter = 1
+            original_filepath = filepath
+            while os.path.exists(filepath):
+                name, ext = os.path.splitext(original_filepath)
+                filepath = f"{name}_V{version_counter}{ext}"
+                version_counter += 1
+            
+            # Save complete file content
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(complete_file_content)
+            
+            logger.info(f"✅ Saved complete chunk file: {filepath}")
+            print(f"✅ Saved: {filepath}")
+            
+            # Upload to Vector Store if requested
+            if upload_to_vector_store and vector_store_id:
+                upload_success = upload_and_add_to_vector_store(
+                    filepath, vector_store_id, chunk_lookup_url, base_title,
+                    enable_deduplication, chunking_strategy, vector_store_cache
+                )
+                if not upload_success:
+                    logger.warning(f"Failed to upload {filepath} to vector store, but file was saved locally")
+            
+            saved_files.append(filepath)
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving chunk file {chunk_filename}: {str(e)}")
+            continue
+        
+        # Store data for next iteration
+        previous_file_content = chunk_content
+        previous_file_summary = current_file_summary
+    
+    logger.info(f"✅ BUDGET-CONSTRAINED PROCESSING COMPLETE: {len(saved_files)}/{total_chunks} chunks saved")
+    return saved_files
+
 
 def process_and_save_chunk_immediately(chunk, base_title, url, target_tokens, total_chunks, target_language, **globals_dict):
     """
@@ -2629,34 +3658,6 @@ def detect_pagination_in_html(html_content, url=""):
                             "additionalProperties": False
                         }
                     },
-                    "suburls": {
-                        "type": "array",
-                        "description": "Array of direct descendant/suburl URLs found that extend the current URL path (e.g., current_url/something)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "relative_url": {
-                                    "type": "string",
-                                    "description": "RELATIVE URL compatible with urljoin() - examples: '/additional-path', '/subdirectory', '/document.pdf'"
-                                },
-                                "link_text": {
-                                    "type": "string",
-                                    "description": "Visible text content of the suburl link"
-                                },
-                                "url_type": {
-                                    "type": "string",
-                                    "enum": ["subdirectory", "document", "detail_page", "file", "other"],
-                                    "description": "Type of suburl identified based on content"
-                                },
-                                "is_direct_descendant": {
-                                    "type": "boolean",
-                                    "description": "True if this URL is a direct descendant of current URL (current_url/something pattern)"
-                                }
-                            },
-                            "required": ["relative_url", "link_text", "url_type", "is_direct_descendant"],
-                            "additionalProperties": False
-                        }
-                    },
                     "pagination_indicators": {
                         "type": "array",
                         "description": "List of pagination indicators found during analysis",
@@ -2665,19 +3666,18 @@ def detect_pagination_in_html(html_content, url=""):
                         }
                     }
                 },
-                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "suburls", "pagination_indicators"],
+                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "pagination_indicators"],
                 "additionalProperties": False
             }
         }
         
         # SYSTEM PROMPT: Instructions, methodology, and examples
-        system_prompt = """🤖 EXPERT CONTENT-AWARE PAGINATION & SUBURLS ANALYST: You are a specialist who analyzes HTML content to detect both pagination patterns and direct descendant suburls with CONTENT RELEVANCE VALIDATION using STRUCTURED OUTPUTS.
+        system_prompt = """🤖 EXPERT CONTENT-AWARE PAGINATION ANALYST: You are a specialist who analyzes HTML content to detect pagination patterns and extrapolate the full sequence of numbered pages with CONTENT RELEVANCE VALIDATION using STRUCTURED OUTPUTS.
 
-## 🎯 DUAL TASK:
-1. Analyze HTML content and return VALIDATED JSON identifying pagination elements ONLY when they paginate the SAME content type as the current page
-2. Extract direct descendant suburls that follow the pattern [CURRENT_URL]/[SOMETHING] for related content exploration
+## 🎯 TASK:
+Analyze HTML content and return VALIDATED JSON identifying pagination elements ONLY when they paginate the SAME content type as the current page.
 
-## 🚨 CRITICAL CONTENT RELEVANCE RULES:
+## 🚨 CRITICAL PAGINATION REQUIREMENTS:
 
 **✅ DETECT PAGINATION ONLY FOR:**
 - Lists/collections that match the current page content type
@@ -2689,18 +3689,6 @@ def detect_pagination_in_html(html_content, url=""):
 - Unrelated content pagination (e.g., if on news page but find pagination for products)
 - Base domain navigation/menu
 - Cross-section pagination (different content types)
-
-**✅ DETECT SUBURLS FOR:**
-- Links that extend the current URL path as direct descendants
-- Related content within the same section/category
-- Subsections, documents, or detail pages under current URL
-- Content that follows [CURRENT_URL]/[ADDITIONAL_PATH] pattern
-
-**❌ DO NOT DETECT SUBURLS FOR:**
-- Links to completely different sections
-- External domains
-- Parent or sibling paths (not descendants)
-- Unrelated navigation links
 
 ## 🧠 ENHANCED ANALYSIS METHODOLOGY:
 
@@ -2722,58 +3710,25 @@ Only detect pagination if it's for MORE of the SAME content type:
 - If page shows documents → pagination should be for more documents
 - If page shows grants/funding → pagination should be for more grants
 
-**STEP 3: EXTRACT RELEVANT PAGINATION URLS**
+**STEP 3: EXTRACT AND EXTRAPOLATE RELEVANT PAGINATION URLS**
 For each validated pagination element:
 - Extract href attribute AS-IS (relative format like "?page=1")
 - Determine page number from link text or URL parameter
 - Classify link type (numbered, navigation, etc.)
-- Ensure URLs lead to MORE of the SAME content
-
-**STEP 4: EXTRACT DIRECT DESCENDANT SUBURLS**
-Identify links that are direct descendants of the current URL:
-- Look for links where href starts with current URL path + additional segments
-- Examples: if current URL is "/kraj/zastupitelstvo/usneseni-zastupitelstva", find links like "/kraj/zastupitelstvo/usneseni-zastupitelstva/2024", "/kraj/zastupitelstvo/usneseni-zastupitelstva/archiv"
-- Classify URL type (subdirectory, document, detail_page, file, other)
-- Extract relative path that can be joined with current URL
+- **CRITICAL EXTRAPOLATION:** If a numbered sequence is detected (e.g., 1, 2, 3, ..., 9), you MUST extrapolate and include ALL missing numbered pages (e.g., 6, 7, 8) using the detected URL pattern.
 
 ## 🚨 URL FORMAT REQUIREMENTS:
 - **ALWAYS return RELATIVE URLs** compatible with urljoin()
 - Examples for pagination: "?page=1", "?stranka=2", "/aktuality?page=3"
-- Examples for suburls: "/additional-path", "/subdirectory", "/document.pdf", "/detail-page"
 - **NEVER** include domain/protocol
 
 ## 🔍 EXAMPLE ANALYSIS:
 
-**SCENARIO 1: Council Resolutions Page with Pagination and Suburls**
+**SCENARIO 1: Contact List Page with Pagination (1, 2, 3, 4, 5, ..., 9)**
 ```html
-<h1>Usnesení zastupitelstva</h1>
-<div class="resolutions-list">
-    <article>Resolution 1...</article>
-    <article>Resolution 2...</article>
-</div>
-<div class="links">
-    <a href="/kraj/zastupitelstvo/usneseni-zastupitelstva/2024">Usnesení 2024</a>
-    <a href="/kraj/zastupitelstvo/usneseni-zastupitelstva/archiv">Archiv usnesení</a>
-</div>
-<div class="gov-pagination">
-    <a href="?page=0" class="gov-pagination__item--active">1</a>
-    <a href="?page=1" class="gov-pagination__item">2</a>
-</div>
+<div class="strlistovani"><strong>-1-</strong> <a href="?stranka=2">2</a> <a href="?stranka=3">3</a> ... <a href="?stranka=9">9</a></div>
 ```
-**RESULT: ✅ DETECT BOTH** - Pagination for more resolutions + suburls for related resolution content
-
-**SCENARIO 2: News Page with Only Suburls**
-```html
-<h1>Aktuality</h1>
-<div class="news-content">
-    <article>Latest news...</article>
-</div>
-<div class="related-links">
-    <a href="/aktuality/tiskove-zpravy">Tiskové zprávy</a>
-    <a href="/aktuality/archiv">Archiv aktualit</a>
-</div>
-```
-**RESULT: ✅ DETECT SUBURLS** - Direct descendants for related news content, no pagination
+**RESULT: ✅ EXTRAPOLATE ALL 9 PAGES** - Return relative URLs for pages 1 through 9, using the detected pattern (e.g., `?stranka=N`).
 
 ## 📋 CONFIDENCE SCORING:
 - High (80-100): Clear content match + strong pagination indicators
@@ -2782,21 +3737,20 @@ Identify links that are direct descendants of the current URL:
 - None (0-39): No content match or no legitimate pagination"""
 
         # USER PROMPT: Current context and HTML content to analyze
-        user_prompt = f"""Analyze this HTML content for CONTENT-RELEVANT pagination patterns AND direct descendant suburls.
-
+        user_prompt = f"""Analyze this HTML content for CONTENT-RELEVANT pagination patterns and EXTRAPOLATE the full numbered sequence.
+ 
 Current URL: {url}
-
+ 
 Instructions:
-1. First identify what type of content this page displays
-2. Then look for pagination that provides MORE of that SAME content type
-3. Also extract direct descendant suburls that extend the current URL path
-4. Ignore general navigation or unrelated pagination
-5. Return RELATIVE URLs only (compatible with urljoin)
-
-DUAL ANALYSIS REQUIRED:
-- **PAGINATION**: Look for links that provide more of the same content (page 2, page 3, etc.)
-- **SUBURLS**: Look for links that are direct descendants of current URL path (e.g., if current URL is "/kraj/zastupitelstvo/usneseni-zastupitelstva", find links like "/kraj/zastupitelstvo/usneseni-zastupitelstva/2024")
-
+1. First identify what type of content this page displays (e.g., 'contact list').
+2. Then look for pagination that provides MORE of that SAME content type.
+3. **CRITICAL:** If a numbered sequence is detected (e.g., 1, 2, 3, ..., 9), extrapolate and include ALL missing numbered pages (e.g., 6, 7, 8) using the detected URL pattern.
+4. Ignore general navigation, unrelated pagination, and all detail/sub-page links (e.g., links to individual contacts).
+5. Return RELATIVE URLs only (compatible with urljoin).
+ 
+PAGINATION ANALYSIS REQUIRED:
+- **PAGINATION**: Extract and extrapolate all numbered pages (e.g., page 1 to page 9) and navigation links (next/previous).
+ 
 HTML content to analyze:
 {html_content}"""
 
@@ -2816,7 +3770,7 @@ HTML content to analyze:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 2000,  # Increased for suburls responses which can be large
+            "max_tokens": 20000,  # Increased significantly to prevent JSON truncation due to large suburls list
             "temperature": 0.1,  # Low temperature for consistent analysis
             "top_p": 0.9,
             "response_format": {
@@ -3619,14 +4573,22 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
         print(f"📄 Total additional URLs: {total_additional_urls} ({len(pagination_urls)} pagination + {len(suburls)} suburls)")
         
         # Step 4: Process the original URL first (page 1 or main page)
-        logger.info(f"📄 Step 4: Processing original URL (main page): {url}")
-        main_result = process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
-                                                local_files_cache, enable_resume, vector_store_id,
-                                                deduplication_enabled, chunking_strategy, vector_store_cache,
-                                                remove_selectors, rss_metadata)
         
-        success_count += main_result[0]
-        total_processed += main_result[1]
+        # CRITICAL CHECK: Re-check the main URL against last modified date and resume cache
+        main_url_last_modified = find_url_last_modified(url, url_last_modified_map)
+        
+        if should_process_url_with_resume(url, main_url_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+            logger.info(f"📄 Step 4: Processing original URL (main page): {url}")
+            main_result = process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
+                                                    local_files_cache, enable_resume, vector_store_id,
+                                                    deduplication_enabled, chunking_strategy, vector_store_cache,
+                                                    remove_selectors, rss_metadata)
+            
+            success_count += main_result[0]
+            total_processed += main_result[1]
+        else:
+            logger.info(f"⏭️ Skipping original URL {url} (timestamp check or already processed locally). Continuing to check for pagination/suburls.")
+            total_processed += 1 # Count the main URL as processed/checked
         
         # Step 5: Process all pagination URLs (subpages)
         if pagination_urls:
@@ -3688,6 +4650,14 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
                     logger.info(f"🏷️ Suburl type: {suburl_type}")
                     logger.info(f"📊 Recursion depth: {current_depth+1}/{max_recursive_level}")
                     
+                    # CRITICAL: Check if the suburl should be processed based on last modified date and resume cache
+                    suburl_last_modified = find_url_last_modified(suburl_url, url_last_modified_map)
+                    
+                    if not should_process_url_with_resume(suburl_url, suburl_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+                        logger.info(f"⏭️ Skipping recursive suburl {suburl_url} (timestamp check or already processed locally).")
+                        total_processed += 1
+                        continue
+                        
                     # Process the suburl with all existing functionality (including potential recursive pagination)
                     # CRITICAL: Pass current_depth + 1 to track recursion depth
                     suburl_result = process_paginated_url(suburl_url, suburl_title, suburl_path,
@@ -3727,6 +4697,23 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
 def process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
                                local_files_cache, enable_resume, vector_store_id, deduplication_enabled,
                                chunking_strategy, vector_store_cache, remove_selectors, rss_metadata=None):
+    
+    # CRITICAL FIX: Override chunking strategy for upload to force maximum chunk size (4096/0 overlap)
+    # This prevents OpenAI's internal chunking from breaking logical units (like contact entries).
+    # This ensures the entire pre-chunked file is treated as a single unit by the Vector Store indexer.
+    upload_chunking_strategy = chunking_strategy
+    if vector_store_id:
+        try:
+            # Use max size (4096) and zero overlap to force single chunk indexing by OpenAI
+            upload_chunking_strategy = create_chunking_strategy(
+                strategy_type="static",
+                max_chunk_size=4096,
+                chunk_overlap=0
+            )
+            logger.info("✅ Overriding upload chunking strategy to STATIC 4096/0 to prevent internal OpenAI chunking.")
+        except Exception as e:
+            logger.error(f"❌ Failed to create override chunking strategy: {str(e)}. Using default.")
+            upload_chunking_strategy = chunking_strategy
     """
     Process a single URL with the existing normal functionality.
     This is extracted from the main function to be reusable for both regular and pagination processing.
@@ -3774,102 +4761,51 @@ def process_single_url_normally(url, title, path, url_last_modified_map, last_ru
             content_tokens = count_tokens_approximate(content)
             logger.info(f"Content size: {content_tokens:,} tokens")
             
-            # Account for metadata overhead
-            metadata_overhead = 1000
-            safe_chunk_size = DEFAULT_MAX_CHUNK_SIZE - metadata_overhead
+            # Check if content needs chunking based on configured content budget
+            working_space = DEFAULT_MAX_CHUNK_SIZE - DEFAULT_CONTENT_TOKEN_OFFSET
+            content_budget = int(working_space * DEFAULT_CONTENT_RATIO)
+            dynamic_metadata_budget = working_space - content_budget
             
-            if content_tokens > safe_chunk_size:
-                # Use existing chunking logic
-                enhanced_metadata_overhead = 1500
-                enhanced_safe_chunk_size = DEFAULT_MAX_CHUNK_SIZE - enhanced_metadata_overhead
+            if content_tokens > content_budget:
+                # NEW CONTENT SPLITTING SYSTEM: Use dynamic ratio token budget allocation
+                logger.info(f"🔀 TRIGGERING NEW CONTENT SPLITTING SYSTEM")
+                logger.info(f"📊 Content tokens: {content_tokens:,} > Content budget: {content_budget:,}")
+                logger.info(f"🎯 Using dynamic ratio: {content_budget} content + {dynamic_metadata_budget} dynamic metadata + {DEFAULT_CONTENT_TOKEN_OFFSET} offset = {DEFAULT_MAX_CHUNK_SIZE} total")
                 
-                chunks = chunk_large_content_simple(content, enhanced_safe_chunk_size, final_title, url)
-                total_chunks = len(chunks)
+                # Split content using new system with exact 50/50 budget allocation
+                chunks = chunk_content_with_metadata_budget(
+                    content,
+                    DEFAULT_MAX_CHUNK_SIZE,  # Vector store limit from config
+                    final_title,
+                    url,
+                    OPENROUTER_TARGET_LANGUAGE
+                )
                 
-                saved_files = []
-                previous_overlap_summary = None
+                logger.info(f"📄 NEW SPLITTING SYSTEM: Created {len(chunks)} chunks with metadata budget management")
                 
-                for i, chunk in enumerate(chunks):
-                    chunk_order = chunk['chunk_number']
-                    is_last_chunk = (chunk_order == total_chunks)
-                    
-                    # NEW URL-BASED CHUNKING: Enhanced filename generation using URL path
-                    base_filename = create_filename_from_url(url, final_title, rss_metadata)
-                    
-                    # Extract pagination info if this is a paginated URL
-                    is_paginated = False
-                    page_number = None
-                    if "_PAGE" in final_title:
-                        is_paginated = True
-                        try:
-                            page_part = final_title.split("_PAGE")[-1]
-                            page_number = int(page_part) if page_part.isdigit() else None
-                        except (ValueError, IndexError):
-                            logger.warning(f"⚠️ Could not extract page number from title: {final_title}")
-                            page_number = None
-                    
-                    # Construct filename with proper postfixes
-                    chunk_filename = construct_final_filename(
-                        base_filename=base_filename,
-                        is_paginated=is_paginated,
-                        page_number=page_number,
-                        chunk_postfix=chunk['filename_postfix'],
-                        dedup_counter=None
-                    )
-                    
-                    if is_paginated:
-                        logger.info(f"📄 PAGINATED + CHUNKED: Creating {chunk_filename} (URL-based + page + chunk)")
-                    else:
-                        logger.info(f"📄 URL-BASED CHUNKED: Creating {chunk_filename} (URL-based + chunk)")
-                    
-                    full_chunk_content = chunk['content']
-                    
-                    # Generate summaries for chunked files
-                    current_file_summary = generate_current_file_summary_via_openrouter(
-                        full_chunk_content, chunk_order, total_chunks, final_title, url, OPENROUTER_TARGET_LANGUAGE
-                    )
-                    
-                    overlap_summary_for_next = None
-                    if not is_last_chunk:
-                        overlap_summary_for_next = generate_overlap_summary_via_openrouter(
-                            page_summary, current_file_summary, full_chunk_content, chunk_order,
-                            chunk_order + 1, total_chunks, final_title, url, OPENROUTER_TARGET_LANGUAGE
-                        )
-                    
-                    # PAGINATION-AWARE DEDUPLICATION: Enhanced URL generation for vector store
-                    chunk_question_text = generate_question_section(url, final_title, OPENROUTER_TARGET_LANGUAGE, rss_metadata=rss_metadata)
-                    
-                    # Create unique lookup URL for vector store that distinguishes paginated chunks
-                    if "_PAGE" in final_title:
-                        # For paginated content: url#PAGE2chunkA, url#PAGE3chunkB, etc.
-                        page_info = final_title.split("_PAGE")[-1]  # Extract page info
-                        chunk_url = f"{url}#PAGE{page_info}chunk{chunk['filename_postfix']}"
-                        logger.debug(f"🔗 PAGINATED CHUNK LOOKUP URL: {chunk_url}")
-                    else:
-                        # Regular chunked content: url#chunkA, url#chunkB, etc.
-                        chunk_url = f"{url}#chunk{chunk['filename_postfix']}"
-                    
-                    chunk_filepath = save_markdown_to_file(
-                        full_chunk_content, final_title, url, question_text=chunk_question_text,
-                        upload_to_vector_store=bool(vector_store_id), vector_store_id=vector_store_id,
-                        enable_deduplication=deduplication_enabled, chunking_strategy=chunking_strategy,
-                        vector_store_cache=vector_store_cache, last_modified=last_modified, path=path,
-                        provider_used=provider_used, rss_metadata=rss_metadata, lookup_url=chunk_url,
-                        source_page_summary=page_summary, file_order=chunk_order, total_files=total_chunks,
-                        current_file_summary=current_file_summary, overlap_summary=previous_overlap_summary,
-                        filename=chunk_filename  # Pass pre-constructed filename
-                    )
-                    
-                    if chunk_filepath:
-                        saved_files.append(chunk_filepath)
-                    
-                    previous_overlap_summary = overlap_summary_for_next
+                # Process and save chunks with budget-constrained metadata
+                saved_files = process_and_save_chunks_with_metadata_budget(
+                    chunks,
+                    final_title,
+                    url,
+                    target_language=OPENROUTER_TARGET_LANGUAGE,
+                    upload_to_vector_store=bool(vector_store_id),
+                    vector_store_id=vector_store_id,
+                    enable_deduplication=deduplication_enabled,
+                    chunking_strategy=upload_chunking_strategy,
+                    vector_store_cache=vector_store_cache,
+                    last_modified=last_modified,
+                    path=path,
+                    provider_used=provider_used,
+                    rss_metadata=rss_metadata
+                )
                 
                 if saved_files:
-                    logger.info(f"✅ Successfully processed chunked URL: {url}")
+                    logger.info(f"✅ Successfully processed chunked URL with NEW SYSTEM: {url}")
+                    logger.info(f"📁 Created {len(saved_files)} files with 50/50 token budget allocation")
                     return (len(saved_files), 1)  # Multiple files saved, 1 URL processed
                 else:
-                    logger.error(f"❌ Failed to save chunked files for: {url}")
+                    logger.error(f"❌ Failed to save chunked files with NEW SYSTEM for: {url}")
                     return (0, 1)
             else:
                 # Single file processing (ONLY for content that doesn't need chunking)
@@ -3878,7 +4814,7 @@ def process_single_url_normally(url, title, path, url_last_modified_map, last_ru
                 saved_file = save_markdown_to_file(
                     final_content, final_title, url, question_text=question_text,
                     upload_to_vector_store=bool(vector_store_id), vector_store_id=vector_store_id,
-                    enable_deduplication=deduplication_enabled, chunking_strategy=chunking_strategy,
+                    enable_deduplication=deduplication_enabled, chunking_strategy=upload_chunking_strategy,
                     vector_store_cache=vector_store_cache, last_modified=last_modified, path=path,
                     provider_used=provider_used, rss_metadata=rss_metadata, source_page_summary=page_summary
                 )
@@ -4083,6 +5019,11 @@ def _fetch_jina_markdown(url, api_key, remove_selectors=None):
     if selectors and selectors.strip():
         headers["X-Remove-Selector"] = selectors
         logger.debug(f"Using remove selectors: {selectors}")
+    
+    # Přidání CSS selektorů pro cílení na konkrétní obsah stránky (pro markdown)
+    if JINA_TARGET_SELECTORS and JINA_TARGET_SELECTORS.strip():
+        headers["X-Target-Selector"] = JINA_TARGET_SELECTORS
+        logger.debug(f"Using target selectors: {JINA_TARGET_SELECTORS}")
     
     response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
@@ -5558,11 +6499,14 @@ def parse_generic_feed(soup, rss_url):
     logger.info(f"Found {len(extracted_urls)} URLs in generic feed parsing")
     return extracted_urls
 
-def process_rss_feeds(url_last_modified_map, last_run_timestamp, local_files_cache=None, enable_resume=False):
+def process_rss_feeds(url_last_modified_map, rss_last_run_timestamp, local_files_cache=None, enable_resume=False):
     """Process all configured RSS feeds and extract URLs."""
     logger.info(f"Processing {len(RSS_FEEDS)} RSS feeds")
     
     all_rss_urls = []
+    
+    # Fetch the sitemap last run timestamp for the secondary check
+    sitemap_last_run_timestamp = get_last_run_timestamp("sitemap")
     
     for rss_url in RSS_FEEDS:
         logger.info(f"Processing RSS feed: {rss_url}")
@@ -5583,8 +6527,19 @@ def process_rss_feeds(url_last_modified_map, last_run_timestamp, local_files_cac
             # Get RSS published date from the feed item
             rss_published_date = url_info.get('published')
             
+            # Look up XML sitemap last modified date for this URL
+            xml_last_modified = find_url_last_modified(url, url_last_modified_map)
+            
             # Use RSS-specific processing logic instead of XML sitemap matching
-            if should_process_url_with_resume(url, None, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=rss_published_date):
+            if should_process_url_with_resume(
+                url,
+                xml_last_modified,
+                rss_last_run_timestamp,
+                local_files_cache,
+                enable_resume,
+                rss_published_date=rss_published_date,
+                sitemap_last_run_timestamp=sitemap_last_run_timestamp
+            ):
                 filtered_urls.append(url_info)
             else:
                 logger.info(f"Skipping RSS URL {url} (timestamp check or already processed locally).")
@@ -5960,31 +6915,18 @@ def should_process_url(url, last_modified, last_run_timestamp):
         
     return is_modified
 
-def should_process_rss_url(url, rss_published_date, last_run_timestamp):
-    """Decide whether an RSS URL should be processed based on its RSS publication date."""
+def should_process_rss_url(url, rss_published_date, rss_last_run_timestamp, xml_last_modified, sitemap_last_run_timestamp):
+    """
+    Decide whether an RSS URL should be processed based on:
+    1. RSS Date Threshold (if set)
+    2. RSS publication date vs RSS last run timestamp
+    3. XML sitemap last modified date vs Sitemap last run timestamp (if available)
+    """
     logger.debug(f"Checking if RSS URL should be processed: {url}")
     
-    # If checking is disabled, always process
-    if not CHECK_LAST_MODIFIED:
-        logger.info(f"CHECK_LAST_MODIFIED is False. Processing RSS URL {url}")
-        print(f"\n=== RSS URL PROCESSING STATUS ===")
-        print(f"URL: {url}")
-        print(f"CHECK_LAST_MODIFIED is disabled")
-        print(f"Processing: WILL PROCEED")
-        print("=================================\n")
-        return True
+    global RSS_DATE_THRESHOLD
     
-    # If it's the first run, always process
-    if not last_run_timestamp:
-        logger.info(f"No last run timestamp. Processing RSS URL {url}")
-        print(f"\n=== RSS URL PROCESSING STATUS ===")
-        print(f"URL: {url}")
-        print(f"Last Run Timestamp: None (first run)")
-        print(f"Processing: WILL PROCEED")
-        print("=================================\n")
-        return True
-    
-    # Parse RSS published date if it's a string
+    # --- Step 1: Parse RSS published date ---
     published_date = None
     if rss_published_date:
         if isinstance(rss_published_date, str):
@@ -6016,7 +6958,7 @@ def should_process_rss_url(url, rss_published_date, last_run_timestamp):
         print(f"\n=== RSS URL PROCESSING STATUS ===")
         print(f"URL: {url}")
         print(f"RSS Published: Unknown")
-        print(f"Last Run: {last_run_timestamp}")
+        print(f"Last Run: {rss_last_run_timestamp}")
         print(f"Processing: WILL PROCEED (safety)")
         print("=================================\n")
         return True
@@ -6027,22 +6969,86 @@ def should_process_rss_url(url, rss_published_date, last_run_timestamp):
     else:
         published_date_utc = published_date.astimezone(timezone.utc)
         
-    is_newer = published_date_utc > last_run_timestamp
+    # --- Step 2: Check against RSS_DATE_THRESHOLD (mandatory filter if set) ---
+    if RSS_DATE_THRESHOLD:
+        if published_date_utc < RSS_DATE_THRESHOLD:
+            logger.info(f"RSS URL {url} published date {published_date_utc} is BEFORE RSS Date Threshold {RSS_DATE_THRESHOLD}. Skipping.")
+            print(f"\n=== RSS URL PROCESSING STATUS (THRESHOLD) ===")
+            print(f"URL: {url}")
+            print(f"RSS Published: {published_date}")
+            print(f"Date Threshold: {RSS_DATE_THRESHOLD.strftime('%d-%m-%Y %H:%M:%S UTC')}")
+            print(f"Processing: SKIPPED (BELOW THRESHOLD)")
+            print("=============================================\n")
+            return False
+        else:
+            logger.info(f"RSS URL {url} passed RSS Date Threshold check.")
+            
+    # --- Step 3: Check against RSS last run timestamp (only if CHECK_LAST_MODIFIED is True) ---
     
-    print(f"\n=== RSS URL PROCESSING STATUS ===")
-    print(f"URL: {url}")
-    print(f"RSS Published: {published_date}")
-    print(f"Last Run: {last_run_timestamp}")
-    print(f"Is Published Since Last Run: {'YES' if is_newer else 'NO'}")
-    print(f"Processing: {'WILL PROCEED' if is_newer else 'SKIPPED'}")
-    print("=================================\n")
+    # If checking is disabled, and we passed the threshold check, always process
+    if not CHECK_LAST_MODIFIED:
+        logger.info(f"CHECK_LAST_MODIFIED is False. Processing RSS URL {url}")
+        print(f"\n=== RSS URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"CHECK_LAST_MODIFIED is disabled")
+        print(f"Processing: WILL PROCEED")
+        print("=================================\n")
+        return True
     
-    if is_newer:
-        logger.info(f"RSS URL {url} was published after last run. Processing.")
-    else:
-        logger.info(f"RSS URL {url} was published before last run. Skipping.")
+    # If CHECK_LAST_MODIFIED is True, check RSS last run timestamp
+    if rss_last_run_timestamp:
+        is_newer_rss = published_date_utc > rss_last_run_timestamp
         
-    return is_newer
+        print(f"\n=== RSS URL PROCESSING STATUS (RSS LAST RUN) ===")
+        print(f"URL: {url}")
+        print(f"RSS Published: {published_date}")
+        print(f"RSS Last Run: {rss_last_run_timestamp}")
+        print(f"Is Published Since RSS Last Run: {'YES' if is_newer_rss else 'NO'}")
+        
+        if not is_newer_rss:
+            logger.info(f"RSS URL {url} was published before RSS last run. Skipping.")
+            print(f"Processing: SKIPPED (RSS TIMESTAMP)")
+            print("============================================\n")
+            return False
+        else:
+            logger.info(f"RSS URL {url} was published after RSS last run. Proceeding to XML check.")
+            print(f"Processing: PASSED RSS TIMESTAMP CHECK")
+            print("============================================\n")
+    else:
+        logger.info(f"No RSS last run timestamp found. Proceeding to XML check.")
+        
+    # --- Step 4: Check against XML sitemap last modified date (if available) ---
+    
+    if xml_last_modified is None:
+        logger.info(f"No XML last modified date found for {url}. Processing based on RSS checks only.")
+        return True # Process if it passed RSS checks
+        
+    if sitemap_last_run_timestamp is None:
+        logger.info(f"No Sitemap last run timestamp found. Processing based on RSS checks only.")
+        return True # Process if it passed RSS checks
+
+    # Convert XML last modified date to UTC for comparison
+    if xml_last_modified.tzinfo is None:
+        xml_last_modified_utc = xml_last_modified.replace(tzinfo=timezone.utc)
+    else:
+        xml_last_modified_utc = xml_last_modified.astimezone(timezone.utc)
+        
+    is_modified_xml = xml_last_modified_utc > sitemap_last_run_timestamp
+    
+    print(f"\n=== RSS URL PROCESSING STATUS (XML LAST MOD) ===")
+    print(f"URL: {url}")
+    print(f"XML Last Modified: {xml_last_modified}")
+    print(f"Sitemap Last Run: {sitemap_last_run_timestamp}")
+    print(f"Is Modified Since Sitemap Last Run: {'YES' if is_modified_xml else 'NO'}")
+    print(f"Processing: {'WILL PROCEED' if is_modified_xml else 'SKIPPED'}")
+    print("================================================\n")
+    
+    if is_modified_xml:
+        logger.info(f"RSS URL {url} XML last modified date is newer than Sitemap last run. Processing.")
+        return True
+    else:
+        logger.info(f"RSS URL {url} XML last modified date is NOT newer than Sitemap last run. Skipping.")
+        return False
 
 def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
     """Extract URLs from XML sitemap data for processing."""
@@ -6256,7 +7262,7 @@ def is_url_from_test_urls(url):
     
     return False
 
-def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None):
+def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None, sitemap_last_run_timestamp=None):
     """Enhanced version of should_process_url that supports resume functionality and RSS-specific handling."""
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
     
@@ -6301,7 +7307,8 @@ def should_process_url_with_resume(url, last_modified, last_run_timestamp, local
     
     # Step 2: Special handling for RSS URLs with published dates
     if rss_published_date is not None:
-        return should_process_rss_url(url, rss_published_date, last_run_timestamp)
+        # Pass the XML sitemap last_modified date and the sitemap last run timestamp for the secondary check
+        return should_process_rss_url(url, rss_published_date, last_run_timestamp, last_modified, sitemap_last_run_timestamp)
     
     # Step 3: Fall back to original timestamp-based logic for regular URLs
     return should_process_url(url, last_modified, last_run_timestamp)

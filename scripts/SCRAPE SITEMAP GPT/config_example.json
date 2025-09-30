@@ -11,17 +11,39 @@
       "https://example.com/rss",
       "https://example.com/feed.xml",
       "https://example.com/news.rss"
-    ]
+    ],
+    "recursive_urls": [
+      {
+        "url": "https://example.com/documents/",
+        "recursive_level": 2
+      },
+      "https://example.com/news/"
+    ],
+    "test_urls": []
   },
   "api_keys": {
     "jina_ai": "your_jina_api_key_here",
     "firecrawl": "your_firecrawl_api_key_here",
-    "openai": "your_openai_api_key_here"
+    "openai": "your_openai_api_key_here",
+    "openrouter": "your_openrouter_api_key_here"
+  },
+  "openrouter": {
+    "max_tokens": 64000,
+    "target_language": "Czech",
+    "models": [
+      "google/gemini-2.5-flash-preview-09-2025",
+      "anthropic/claude-sonnet-4"
+    ],
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "fallback_enabled": true,
+    "timeout_seconds": 120
   },
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "#header, .sidebar, .ads, footer, .comments"
+      "remove_selectors": "#header, .sidebar, .ads, footer, .comments",
+      "target_selectors": ""
     },
     "firecrawl": {
       "name": "firecrawl"
@@ -33,7 +55,9 @@
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 1200,
-    "chunk_overlap": 200
+    "chunk_overlap": 200,
+    "content_token_offset": 500,
+    "content_ratio": 0.5
   },
   "http_settings": {
     "request_timeout": 120,
@@ -43,10 +67,11 @@
   },
   "processing": {
     "check_last_modified": true,
-    "max_filename_length": 150
+    "max_filename_length": 150,
+    "RSSDateThreshold": "01-01-2025"
   },
   "script_info": {
     "name": "example_scraper",
     "version": "1.0.0"
   }
-} 
+}

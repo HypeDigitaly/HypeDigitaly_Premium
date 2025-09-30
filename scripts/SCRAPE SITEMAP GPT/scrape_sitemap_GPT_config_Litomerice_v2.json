@@ -9,7 +9,8 @@
     ],
     "test_urls": [
      
-    ]
+    ],
+    "recursive_urls": []
   },
   "api_keys": {
     "jina_ai": "REMOVED-JINA-KEY",
@@ -21,7 +22,7 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
-      "google/gemini-2.5-flash",
+      "google/gemini-2.5-flash-preview-09-2025",
       "anthropic/claude-sonnet-4"
     ],
     "temperature": 0.1,
@@ -32,7 +33,8 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "header, footer, aside, #sp-top-bar, #sp-header, #sp-page-title, #sp-right, #sp-footer, .djacc, .offcanvas-menu"
+      "remove_selectors": "header, footer, aside",
+      "target_selectors": ""
     },
     "firecrawl": {
       "name": "firecrawl"
@@ -44,7 +46,9 @@
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
-    "chunk_overlap": 0
+    "chunk_overlap": 0,
+    "content_token_offset": 500,
+    "content_ratio": 0.5
   },
   "http_settings": {
     "request_timeout": 150,
@@ -54,7 +58,8 @@
   },
   "processing": {
     "check_last_modified": true,
-    "max_filename_length": 200
+    "max_filename_length": 200,
+    "RSSDateThreshold": "01-01-2025"
   },
   "script_info": {
     "name": "scrape_sitemap_GPT_v2",
