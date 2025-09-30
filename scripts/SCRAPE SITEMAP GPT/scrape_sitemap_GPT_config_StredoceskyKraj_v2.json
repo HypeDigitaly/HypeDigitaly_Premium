@@ -47,7 +47,7 @@
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
     "chunk_overlap": 0,
-    "content_token_offset": 0,
+    "content_token_offset": 500,
     "content_ratio": 0.5
   },
   "http_settings": {

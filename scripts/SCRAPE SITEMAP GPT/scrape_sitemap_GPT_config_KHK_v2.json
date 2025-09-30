@@ -47,12 +47,12 @@
     "provider_sequence": "jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_68cf273814ec8191ae1e1efb35e271c3",
+    "id": "vs_68dc2ba8201c8191942df1c7b44392ae",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
     "chunk_overlap": 0,
-    "content_token_offset": 0,
+    "content_token_offset": 500,
     "content_ratio": 0.5
   },
   "http_settings": {
