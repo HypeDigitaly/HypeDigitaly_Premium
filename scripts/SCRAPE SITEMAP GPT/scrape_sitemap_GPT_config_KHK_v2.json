@@ -27,7 +27,7 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
-      "google/gemini-2.5-flash",
+      "google/gemini-2.5-flash-preview-09-2025",
       "openai/gpt-4.1-mini" 
     ],
     "temperature": 0.1,
@@ -38,7 +38,8 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "header[role='banner'], footer[role='contentinfo'], aside, .chatbot-block, #voiceflow-chat, #sliding-popup, .eu-cookie-compliance-banner, #goog-gt-tt, [class*='VIpgJd-'], .skiptranslate, #google_translate_element, #drupal-live-announce"
+      "remove_selectors": "header[role='banner'], footer[role='contentinfo'], aside, .chatbot-block, #voiceflow-chat, #sliding-popup, .eu-cookie-compliance-banner, #goog-gt-tt, [class*='VIpgJd-'], .skiptranslate, #google_translate_element, #drupal-live-announce",
+      "target_selectors": ""
     },
     "firecrawl": {
       "name": "firecrawl"
@@ -50,7 +51,9 @@
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
-    "chunk_overlap": 0
+    "chunk_overlap": 0,
+    "content_token_offset": 0,
+    "content_ratio": 0.5
   },
   "http_settings": {
     "request_timeout": 150,
@@ -60,7 +63,8 @@
   },
   "processing": {
     "check_last_modified": true,
-    "max_filename_length": 200
+    "max_filename_length": 200,
+    "RSSDateThreshold": "01-01-2025"
   },
   "script_info": {
     "name": "scrape_sitemap_universal",
