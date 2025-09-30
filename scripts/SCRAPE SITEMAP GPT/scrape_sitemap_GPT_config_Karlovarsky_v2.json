@@ -5,10 +5,10 @@
     "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
     "blacklisted_urls": [],
     "rss_feeds": [
-      
+     "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml" 
     ],
     "test_urls": [
-     "https://teplice.cz/vismo/telefonni-seznam.asp?p1=22426"
+     
     ],
     "recursive_urls": []
   },

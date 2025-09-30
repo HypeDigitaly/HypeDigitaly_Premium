@@ -5,7 +5,7 @@
     "xml_sitemap_url": "https://www.khk.cz/sitemap.xml",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.khk.cz/rss.xml"
+      "https://www.khk.cz/rss.xml" 
     ],
     "recursive_urls": [
       {
