@@ -6236,53 +6236,71 @@ def parse_rss_2_0_feed(soup, rss_url):
     
     for item in items:
         try:
-            # Extract URL from link element
+            # Extract URL from link element (try multiple potential fields)
+            url = None
+            
+            # 1. Try standard <link> tag
             link_elem = item.find('link')
             if link_elem:
                 url = link_elem.text.strip() if link_elem.text else link_elem.get('href')
-                if url:
-                    # Make URL absolute
-                    absolute_url = urljoin(BASE_URL, url)
-                    
-                    # Extract title
-                    title_elem = item.find('title')
-                    title = title_elem.text.strip() if title_elem else 'No title'
-                    
-                    # Extract publication date - try multiple field names
-                    published_elem = (item.find('pubDate') or 
-                                    item.find('dc:date') or 
-                                    item.find('dcterms:created') or 
-                                    item.find('dcterms:modified') or
-                                    item.find('published') or
-                                    item.find('createdDate'))
-                    published = None
-                    if published_elem:
-                        published_text = published_elem.text.strip()
-                        # Check for nested <time datetime="..."> structure inside CDATA
-                        time_match = re.search(r'<time\s+datetime=["\']([^"\']+)["\']', published_text)
-                        if time_match:
-                            published = time_match.group(1)
-                        else:
-                            published = published_text
-                    
-                    # Extract description
-                    description_elem = item.find('description')
-                    description = description_elem.text.strip() if description_elem else None
-                    
-                    # Create navigation path for RSS items
-                    path = f"RSS: {rss_url} > {title}"
-                    
-                    extracted_urls.append({
-                        'url': absolute_url,
-                        'title': title,
-                        'path': path,
-                        'published': published,
-                        'description': description,
-                        'source_feed': rss_url
-                    })
-                    
-                    logger.debug(f"Extracted from RSS 2.0: {absolute_url} - {title}")
-                    
+            
+            # 2. Try <guid> tag if <link> failed and guid looks like a URL
+            if not url:
+                guid_elem = item.find('guid')
+                if guid_elem and guid_elem.text.strip().startswith('http'):
+                    url = guid_elem.text.strip()
+            
+            # 3. Try <id> tag if <link> and <guid> failed and id looks like a URL
+            if not url:
+                id_elem = item.find('id')
+                if id_elem and id_elem.text.strip().startswith('http'):
+                    url = id_elem.text.strip()
+
+            if not url:
+                logger.debug("Skipping RSS 2.0 item: No valid URL found in <link>, <guid>, or <id>.")
+                continue
+
+            # Make URL absolute
+            absolute_url = urljoin(BASE_URL, url)
+            
+            # Extract title
+            title_elem = item.find('title')
+            title = title_elem.text.strip() if title_elem else 'No title'
+            
+            # Extract publication date - try multiple field names
+            published_elem = (item.find('pubDate') or
+                            item.find('dc:date') or
+                            item.find('dcterms:created') or
+                            item.find('dcterms:modified') or
+                            item.find('published') or
+                            item.find('createdDate'))
+            published = None
+            if published_elem:
+                published_text = published_elem.text.strip()
+                # Check for nested <time datetime="..."> structure inside CDATA
+                time_match = re.search(r'<time\s+datetime=["\']([^"\']+)["\']', published_text)
+                if time_match:
+                    published = time_match.group(1)
+                else:
+                    published = published_text
+            
+            # Extract description
+            description_elem = item.find('description')
+            description = description_elem.text.strip() if description_elem else None
+            
+            # Create navigation path for RSS items
+            path = f"RSS: {rss_url} > {title}"
+            
+            extracted_urls.append({
+                'url': absolute_url,
+                'title': title,
+                'path': path,
+                'published': published,
+                'description': description,
+                'source_feed': rss_url
+            })
+            
+            logger.debug(f"Extracted from RSS 2.0: {absolute_url} - {title}")
         except Exception as e:
             logger.error(f"Error processing RSS 2.0 item: {str(e)}")
             continue
