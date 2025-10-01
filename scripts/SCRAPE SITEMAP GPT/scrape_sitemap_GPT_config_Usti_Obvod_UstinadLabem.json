@@ -41,7 +41,7 @@
     "max_filename_length": 200
   },
   "script_info": {
-    "name": "scrape_sitemap_universal",
+    "name": "scrape_sitemap_GPT_v2",
     "version": "1.0.0"
   }
 } 

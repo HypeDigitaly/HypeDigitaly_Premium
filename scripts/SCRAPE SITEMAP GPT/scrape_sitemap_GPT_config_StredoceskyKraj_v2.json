@@ -33,7 +33,7 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "#gov-portal-header, .gov-portal-header, #gov-footer, .gov-footer",
+      "remove_selectors": "header, footer, aside, #gov-portal-header, .gov-portal-header, #gov-footer, .gov-footer",
       "target_selectors": ""
     },
     "firecrawl": {

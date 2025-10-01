@@ -34,7 +34,7 @@
     "jina": {
       "name": "jina",
       "remove_selectors": "header, footer, aside",
-      "target_selectors": ""
+      "target_selectors": "sp-main-body, .sp-main-body, #sp-main-body"
     },
     "firecrawl": {
       "name": "firecrawl"
