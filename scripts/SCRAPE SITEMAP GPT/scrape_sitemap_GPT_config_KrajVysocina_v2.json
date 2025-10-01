@@ -40,7 +40,7 @@
     "jina": {
       "name": "jina",
       "remove_selectors": "header, footer, aside",
-      "target_selectors": ""
+      "target_selectors": "stred, .stred, #stred"
     },
     "firecrawl": {
       "name": "firecrawl"

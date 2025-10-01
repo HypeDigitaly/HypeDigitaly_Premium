@@ -37,7 +37,7 @@
     "jina": {
       "name": "jina",
       "remove_selectors": "header, footer, aside",
-      "target_selectors": ""
+      "target_selectors": "main, #main, .main"
     },
     "firecrawl": {
       "name": "firecrawl"
@@ -65,7 +65,7 @@
     "RSSDateThreshold": "01-01-2025"
   },
   "script_info": {
-    "name": "scrape_sitemap_universal",
+    "name": "scrape_sitemap_GPT_v2",
     "version": "1.0.0"
   }
 } 

@@ -67,7 +67,7 @@
     "RSSDateThreshold": "01-01-2025"
   },
   "script_info": {
-    "name": "scrape_sitemap_universal",
+    "name": "scrape_sitemap_GPT_v2",
     "version": "1.0.0"
   }
 } 
