@@ -6255,7 +6255,15 @@ def parse_rss_2_0_feed(soup, rss_url):
                                     item.find('dcterms:modified') or
                                     item.find('published') or
                                     item.find('createdDate'))
-                    published = published_elem.text.strip() if published_elem else None
+                    published = None
+                    if published_elem:
+                        published_text = published_elem.text.strip()
+                        # Check for nested <time datetime="..."> structure inside CDATA
+                        time_match = re.search(r'<time\s+datetime=["\']([^"\']+)["\']', published_text)
+                        if time_match:
+                            published = time_match.group(1)
+                        else:
+                            published = published_text
                     
                     # Extract description
                     description_elem = item.find('description')
