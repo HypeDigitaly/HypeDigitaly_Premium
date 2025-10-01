@@ -12,7 +12,9 @@
      
     ],
     "recursive_urls": [],
-    "paginated_urls": []
+    "paginated_urls": [
+	 "https://www.teplice.cz/vismo/telefonni-seznam.asp"
+	]
   },
   "api_keys": {
     "jina_ai": "REMOVED-JINA-KEY",
