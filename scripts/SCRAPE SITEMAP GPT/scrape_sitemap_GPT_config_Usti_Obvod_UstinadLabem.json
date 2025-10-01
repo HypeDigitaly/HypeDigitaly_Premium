@@ -6,7 +6,9 @@
     "blacklisted_urls": [],
     "rss_feeds": [
       "https://www.mesto-ul.cz/cz/rss-kanal.html"
-    ]
+    ],
+    "paginated_urls": [],
+    "recursive_urls": []
   },
   "api_keys": {
     "jina_ai": "REMOVED-JINA-KEY",

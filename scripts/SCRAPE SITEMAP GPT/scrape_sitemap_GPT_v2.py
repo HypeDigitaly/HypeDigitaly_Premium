@@ -293,7 +293,7 @@ def load_configuration(config_file="config.json"):
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
     global BLACKLISTED_URLS, RSS_FEEDS, RECURSIVE_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
-    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD
+    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD, PAGINATED_URLS
     
     # Load configuration
     CONFIG = load_config(config_file)
@@ -407,6 +407,17 @@ def load_configuration(config_file="config.json"):
         else:
             logger.warning(f"Invalid recursive_urls configuration item: {item}, skipping")
     
+    # Set URLs for which pagination detection is explicitly enabled (optional)
+    paginated_urls_config = CONFIG["website"].get("paginated_urls", [])
+    PAGINATED_URLS = []
+    
+    # Parse paginated URLs configuration - expect simple string array
+    for item in paginated_urls_config:
+        if isinstance(item, str):
+            PAGINATED_URLS.append(item.rstrip('/')) # Normalize by removing trailing slash
+        else:
+            logger.warning(f"Invalid paginated_urls configuration item: {item}, skipping")
+            
     # Set test URLs for testing purposes (optional)
     TEST_URLS = CONFIG["website"].get("test_urls", [])
     
@@ -465,6 +476,7 @@ def load_configuration(config_file="config.json"):
     print(f"🗺️  Sitemap last run file: {SITEMAP_LAST_RUN_FILE}")
     print(f"📡 RSS feeds: {len(RSS_FEEDS)} configured")
     print(f"🔄 Recursive URLs: {len(RECURSIVE_URLS)} configured")
+    print(f"🔗 Paginated URLs (Explicit): {len(PAGINATED_URLS)} configured")
     print(f"🧪 Test URLs: {len(TEST_URLS)} configured")
     if RSS_DATE_THRESHOLD:
         print(f"📅 RSS Date Threshold: {RSS_DATE_THRESHOLD.strftime('%d-%m-%Y')} (UTC)")
@@ -4052,6 +4064,23 @@ def is_url_recursive_enabled(url):
     logger.debug(f"URL {url} is not configured for recursive suburls processing")
     return False, 0
 
+def is_url_explicitly_paginated(url):
+    """Check if a URL is configured for explicit pagination processing."""
+    global PAGINATED_URLS
+    if not PAGINATED_URLS:
+        return False
+    
+    # Normalize URL for comparison
+    normalized_url = url.rstrip('/')
+    
+    # Check for exact match in the list of normalized URLs
+    if normalized_url in PAGINATED_URLS:
+        logger.info(f"🔗 URL {url} is explicitly enabled for pagination processing.")
+        return True
+        
+    logger.debug(f"URL {url} is not explicitly configured for pagination processing.")
+    return False
+
 def extract_suburls_from_ai_data(suburls_data, base_url, current_url=""):
     """
     Extract and process suburls from AI-detected data.
@@ -4493,25 +4522,40 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
     total_processed = 0
     
     try:
-        # Step 1: Get HTML content specifically for pagination detection
-        logger.info(f"📄 Step 1: Fetching HTML content for pagination detection")
-        html_content = get_html_content_for_pagination_via_jina(url, remove_selectors)
-        
-        if not html_content:
-            logger.warning(f"⚠️ Failed to get HTML content for pagination check, processing URL normally")
-            # Fallback: Process the URL normally without pagination
-            return process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
-                                             local_files_cache, enable_resume, vector_store_id,
-                                             deduplication_enabled, chunking_strategy, vector_store_cache,
-                                             remove_selectors, rss_metadata)
-        
-        # Step 2: Detect pagination and suburls in the HTML content
-        logger.info(f"🔍 Step 2: Analyzing HTML content for pagination indicators and suburls")
-        pagination_result = detect_pagination_in_html(html_content, url)
-        
         # Check if current URL is enabled for recursive suburls processing and get max recursion level
         url_recursive_enabled, max_recursive_level = is_url_recursive_enabled(url)
-        has_suburls = pagination_result.get('suburls', []) and url_recursive_enabled
+        
+        # Check if URL is explicitly configured for pagination
+        url_explicitly_paginated = is_url_explicitly_paginated(url)
+        
+        # Decide if we need to scrape HTML and run AI detection
+        should_run_enhanced_detection = url_recursive_enabled or url_explicitly_paginated
+        
+        html_content = None
+        pagination_result = {'has_pagination': False, 'suburls': [], 'confidence': 0, 'indicators': []}
+        has_suburls = False
+        
+        if should_run_enhanced_detection:
+            # Step 1: Get HTML content specifically for pagination detection
+            logger.info(f"📄 Step 1: Fetching HTML content for pagination detection (Explicit/Recursive mode)")
+            html_content = get_html_content_for_pagination_via_jina(url, remove_selectors)
+            
+            if not html_content:
+                logger.warning(f"⚠️ Failed to get HTML content for pagination check, processing URL normally")
+                # Fallback: Process the URL normally without pagination
+                return process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
+                                                 local_files_cache, enable_resume, vector_store_id,
+                                                 deduplication_enabled, chunking_strategy, vector_store_cache,
+                                                 remove_selectors, rss_metadata)
+            
+            # Step 2: Detect pagination and suburls in the HTML content
+            logger.info(f"🔍 Step 2: Analyzing HTML content for pagination indicators and suburls")
+            pagination_result = detect_pagination_in_html(html_content, url)
+            
+            has_suburls = pagination_result.get('suburls', []) and url_recursive_enabled
+        else:
+            logger.info(f"⏭️ Skipping HTML scrape/AI detection: URL not configured for explicit pagination or recursion.")
+            
         
         if not pagination_result['has_pagination'] and not has_suburls:
             logger.info(f"❌ NO PAGINATION OR SUBURLS DETECTED: Processing URL normally")

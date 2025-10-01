@@ -10,7 +10,8 @@
     "test_urls": [
      
     ],
-    "recursive_urls": []
+    "recursive_urls": [],
+    "paginated_urls": []
   },
   "api_keys": {
     "jina_ai": "REMOVED-JINA-KEY",

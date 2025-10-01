@@ -13,6 +13,7 @@
         "recursive_level": 1
       }
     ],
+    "paginated_urls": [],
     "test_urls": [
       "https://www.khk.cz/kraj/zastupitelstvo/usneseni-zastupitelstva"
     ]

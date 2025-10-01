@@ -19,7 +19,8 @@
       },
       "https://example.com/news/"
     ],
-    "test_urls": []
+    "test_urls": [],
+    "paginated_urls": []
   },
   "api_keys": {
     "jina_ai": "your_jina_api_key_here",
