@@ -1454,6 +1454,57 @@ console_handler = None
 # UTILITY FUNCTIONS
 # ============================================================================
 
+def normalize_url_query_params(url):
+    """Normalize URL by sorting query parameters."""
+    from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
+    
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    
+    # Parse query string into a dictionary (list of values per key)
+    query_params = parse_qs(parsed.query, keep_blank_values=True)
+    
+    # Sort parameters by key
+    sorted_query = urlencode(sorted(query_params.items()), doseq=True)
+    
+    # Reconstruct URL with sorted query
+    return urlunparse(parsed._replace(query=sorted_query))
+
+def is_file_url(url):
+    """
+    Check if a URL points directly to a file (e.g., PDF, DOCX, common archives, or file handlers).
+    These URLs should typically be skipped if the goal is to scrape web page content.
+    """
+    from urllib.parse import urlparse
+    
+    # Common file extensions to skip
+    FILE_EXTENSIONS_TO_SKIP = (
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz',
+        '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
+        '.mp4', '.mp3', '.avi', '.mov', '.wmv',
+        '.csv', '.xml', '.json', '.txt', '.rtf',
+        '.ashx', '.aspx', '.jsp', '.php' # Common file handlers that often serve files
+    )
+    
+    parsed_url = urlparse(url.lower())
+    path = parsed_url.path
+    query = parsed_url.query
+    
+    # Check path extension
+    if path.endswith(FILE_EXTENSIONS_TO_SKIP):
+        logger.info(f"⚠️ Skipping URL: {url} (File extension detected: {path.split('.')[-1]})")
+        return True
+    
+    # Check query parameters for file handlers (e.g., File.ashx?id=...)
+    # This handles cases like the user's example: https://www.teplice.cz/assets/File.ashx?id_org=16600&id_dokumenty=56037
+    if any(handler in path for handler in ['.ashx', '.aspx', '.jsp', '.php']) and ('id_dokumenty' in query or 'file' in query or 'download' in query):
+        logger.info(f"⚠️ Skipping URL: {url} (File handler pattern detected in path/query)")
+        return True
+        
+    return False
+
 def requests_retry_session(retries=None, backoff_factor=None):
     """Create a requests session with retry configuration."""
     # Use global config values if available, otherwise use defaults
@@ -4621,7 +4672,7 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
         # CRITICAL CHECK: Re-check the main URL against last modified date and resume cache
         main_url_last_modified = find_url_last_modified(url, url_last_modified_map)
         
-        if should_process_url_with_resume(url, main_url_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+        if should_process_url_with_resume(url, main_url_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
             logger.info(f"📄 Step 4: Processing original URL (main page): {url}")
             main_result = process_single_url_normally(url, title, path, url_last_modified_map, last_run_timestamp,
                                                     local_files_cache, enable_resume, vector_store_id,
@@ -4697,7 +4748,7 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
                     # CRITICAL: Check if the suburl should be processed based on last modified date and resume cache
                     suburl_last_modified = find_url_last_modified(suburl_url, url_last_modified_map)
                     
-                    if not should_process_url_with_resume(suburl_url, suburl_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+                    if not should_process_url_with_resume(suburl_url, suburl_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
                         logger.info(f"⏭️ Skipping recursive suburl {suburl_url} (timestamp check or already processed locally).")
                         total_processed += 1
                         continue
@@ -4877,7 +4928,7 @@ def process_single_url_normally(url, title, path, url_last_modified_map, last_ru
         logger.error(f"❌ Error processing single URL {url}: {str(e)}")
         return (0, 1)
 
-def extract_links_from_html_sitemap(html_content, url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
+def extract_links_from_html_sitemap(html_content, url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False, vector_store_id=None, vector_store_cache=None):
     """
     Extract links from HTML sitemap by parsing <a> anchor tags.
     
@@ -4947,7 +4998,7 @@ def extract_links_from_html_sitemap(html_content, url_last_modified_map={}, last
                 last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
                 
                 # Check if the URL should be processed
-                if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+                if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
                     extracted_urls.append({
                         'url': absolute_url,
                         'title': title,
@@ -5370,11 +5421,10 @@ def delete_vector_store_file(vector_store_id, file_id):
         return False
 
 
-def build_vector_store_cache(vector_store_id, timeout_seconds=300):
+def build_vector_store_cache(vector_store_id):
     """Build a fast lookup cache of all files in Vector Store with their metadata."""
     logger.info(f"Building Vector Store cache for {vector_store_id}")
     print(f"🔄 Building Vector Store cache...")
-    print(f"⏱️  Cache build timeout: {timeout_seconds}s (5 minutes)")
     start_time = time.time()
     
     # Get all files in vector store
@@ -5396,15 +5446,6 @@ def build_vector_store_cache(vector_store_id, timeout_seconds=300):
         if not file_id:
             continue
             
-        # Check timeout
-        elapsed_time = time.time() - start_time
-        if elapsed_time > timeout_seconds:
-            logger.warning(f"Vector Store cache build timed out after {elapsed_time:.1f}s")
-            print(f"⏰ Cache build timed out after {elapsed_time:.1f}s")
-            print(f"📊 Processed {i-1}/{len(files)} files before timeout")
-            print(f"💡 Using partial cache with {len(url_to_file_cache)} entries")
-            break
-            
         # Progress indicator for large Vector Stores
         if len(files) > 10 and i % max(1, len(files) // 10) == 0:
             progress = (i / len(files)) * 100
@@ -5422,7 +5463,9 @@ def build_vector_store_cache(vector_store_id, timeout_seconds=300):
         # Use lookup_source_url for deduplication cache, fallback to source_url for backward compatibility
         lookup_url = attributes.get('lookup_source_url') or attributes.get('source_url')
         if lookup_url:
-            url_to_file_cache[lookup_url] = {
+            # Normalize the URL before caching it as the key
+            normalized_lookup_url = normalize_url_query_params(lookup_url)
+            url_to_file_cache[normalized_lookup_url] = {
                 'file_id': file_id,
                 'file_info': file_info,
                 'attributes': attributes
@@ -5438,12 +5481,13 @@ def build_vector_store_cache(vector_store_id, timeout_seconds=300):
 
 def find_existing_file_by_url_cached(lookup_url, cache):
     """Find an existing file in vector store by lookup URL using pre-built cache (backward compatibility)."""
-    logger.debug(f"Searching cache for existing file with lookup URL: {lookup_url}")
+    normalized_lookup_url = normalize_url_query_params(lookup_url)
+    logger.debug(f"Searching cache for existing file with normalized lookup URL: {normalized_lookup_url}")
     
-    cached_file = cache.get(lookup_url)
+    cached_file = cache.get(normalized_lookup_url)
     if cached_file:
         file_id = cached_file['file_id']
-        logger.info(f"Found existing file {file_id} in cache for lookup URL: {lookup_url}")
+        logger.info(f"Found existing file {file_id} in cache for lookup URL: {lookup_url} (normalized: {normalized_lookup_url})")
         return cached_file['file_info']
     
     logger.debug(f"No existing file found in cache for lookup URL: {lookup_url}")
@@ -5452,14 +5496,16 @@ def find_existing_file_by_url_cached(lookup_url, cache):
 
 def find_existing_files_by_url_cached(lookup_url, cache):
     """Find ALL existing files in vector store by lookup URL using pre-built cache (including [A-Z] variants and summarized variants)."""
-    logger.debug(f"Searching cache for ALL existing files with lookup URL: {lookup_url}")
     
-    # Extract base URL without fragment for broader matching
-    base_url = lookup_url.split('#')[0] if '#' in lookup_url else lookup_url
+    # Normalize the input URL before extracting the base URL
+    normalized_input_url = normalize_url_query_params(lookup_url)
+    base_url = normalized_input_url.split('#')[0] if '#' in normalized_input_url else normalized_input_url
+    
+    logger.debug(f"Searching cache for ALL existing files with normalized base URL: {base_url}")
     
     matching_files = []
     for cached_url, cached_file in cache.items():
-        # Extract base URL from cached URL for comparison
+        # The cached_url is already normalized (Step 2)
         cached_base_url = cached_url.split('#')[0] if '#' in cached_url else cached_url
         
         # Match if base URLs are the same (covers original, #chunk[A-Z], and #summarized[A-Z] variants)
@@ -6100,7 +6146,7 @@ def parse_menu(html_content):
 
     return main_menu
 
-def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
+def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False, vector_store_id=None, vector_store_cache=None):
     """Recursively extract links from the sitemap menu structure."""
     extracted_urls = []
     
@@ -6156,7 +6202,7 @@ def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timesta
                     last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
                     
                     # Check if the URL should be processed
-                    if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+                    if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
                         extracted_urls.append({
                             'url': absolute_url,
                             'title': link_text,
@@ -6168,7 +6214,7 @@ def extract_links(menu_item, path=[], url_last_modified_map={}, last_run_timesta
             # Continue with submenu
             sub_menu = menu_item.find("ul", recursive=False)
             if sub_menu:
-                extracted_urls.extend(extract_links(sub_menu, current_path, url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume))
+                extracted_urls.extend(extract_links(sub_menu, current_path, url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id, vector_store_cache))
 
     elif menu_item.name == "ul":
         for item in menu_item.find_all("li", recursive=False):
@@ -6188,8 +6234,23 @@ def parse_rss_feed(rss_url):
         response = requests_retry_session().get(rss_url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
-        # Try to parse as XML
-        soup = BeautifulSoup(response.content, 'xml')
+        # Store raw content for potential re-parsing
+        raw_content = response.content
+        
+        # CRITICAL FIX: Remove chrome extension script tags that corrupt XML parsing
+        # These are browser-injected artifacts that break XML parsers
+        if b'chrome-extension://' in raw_content or b'<script' in raw_content:
+            # Decode to string for regex processing
+            content_str = raw_content.decode('utf-8', errors='ignore')
+            # Remove script tags (especially chrome extension injections)
+            content_str = re.sub(r'<script[^>]*>.*?</script>', '', content_str, flags=re.DOTALL | re.IGNORECASE)
+            content_str = re.sub(r'<script[^/>]*/>', '', content_str, flags=re.IGNORECASE)
+            # Re-encode to bytes
+            raw_content = content_str.encode('utf-8')
+            logger.info("Removed chrome extension script tags from XML content")
+        
+        # Try to parse as XML first (standard approach)
+        soup = BeautifulSoup(raw_content, 'xml')
         
         # Check if it's Atom feed
         if soup.find('feed') and soup.find('feed').get('xmlns') == 'http://www.w3.org/2005/Atom':
@@ -6205,6 +6266,16 @@ def parse_rss_feed(rss_url):
         elif soup.find('events') and soup.find('event'):
             logger.info(f"Detected Events XML format for: {rss_url}")
             return parse_events_feed(soup, rss_url)
+        
+        # NEW: Check for custom <response><item> format (e.g., Karlovarsky Kraj)
+        elif soup.find('response') and soup.find('item'):
+            logger.info(f"Detected Custom <response><item> feed format for: {rss_url}")
+            # CRITICAL FIX: Use HTML parser for robustness against malformed XML/script tags
+            # The URL extraction logic in parse_custom_response_feed must handle the void <link> tag behavior.
+            logger.info("Applying HTML parser for robust item detection...")
+            # Re-parse the already cleaned raw_content using html.parser
+            html_soup = BeautifulSoup(raw_content, 'html.parser')
+            return parse_custom_response_feed(html_soup, rss_url)
         
         # Try parsing as HTML/XML with generic approach
         else:
@@ -6506,6 +6577,115 @@ def parse_events_feed(soup, rss_url):
             continue
     
     logger.info(f"Successfully extracted {len(extracted_urls)} events from Events XML feed")
+    return extracted_urls
+
+def parse_custom_response_feed(soup, rss_url):
+    """Parse custom <response><item> feed format."""
+    extracted_urls = []
+    
+    items = soup.find_all('item')
+    logger.info(f"Found {len(items)} items in custom response feed")
+    
+    for i, item in enumerate(items, 1):
+        try:
+            # Extract URL from link element - TRY MULTIPLE METHODS
+            url = None
+            
+            # Method 1: Try standard find with get_text()
+            link_elem = item.find('link')
+            if link_elem:
+                url_text = link_elem.get_text(strip=True)
+                if url_text and url_text.startswith('http'):
+                    url = url_text
+                    logger.debug(f"Item {i}: Extracted URL via get_text(): {url}")
+            
+            # Method 2: Try .string attribute (sometimes works better with html.parser)
+            if not url and link_elem:
+                if link_elem.string and link_elem.string.strip().startswith('http'):
+                    url = link_elem.string.strip()
+                    logger.debug(f"Item {i}: Extracted URL via .string: {url}")
+            
+            # Method 3: Try .text property
+            if not url and link_elem:
+                try:
+                    if link_elem.text and link_elem.text.strip().startswith('http'):
+                        url = link_elem.text.strip()
+                        logger.debug(f"Item {i}: Extracted URL via .text: {url}")
+                except:
+                    pass
+            
+            # Method 4: Try navigablestring content directly
+            if not url and link_elem:
+                try:
+                    for content in link_elem.contents:
+                        if content and hasattr(content, 'strip'):
+                            content_str = str(content).strip()
+                            if content_str.startswith('http'):
+                                url = content_str
+                                logger.debug(f"Item {i}: Extracted URL via contents: {url}")
+                                break
+                except:
+                    pass
+            
+            # CRITICAL FIX: If the link element is empty, check the next sibling text node.
+            # This handles cases where the URL is immediately following the <link> tag due to html.parser treating it as void.
+            # This logic is only necessary when using html.parser (which we are now doing for this custom feed).
+            if not url and link_elem:
+                next_sibling = link_elem.next_sibling
+                if next_sibling and hasattr(next_sibling, 'strip'):
+                    sibling_text = str(next_sibling).strip()
+                    if sibling_text.startswith('http'):
+                        url = sibling_text
+                        logger.debug(f"Item {i}: Extracted URL via next_sibling: {url}")
+            
+            if not url:
+                logger.warning(f"Item {i}: No valid URL found in <link> element after trying all methods. Link element: {link_elem}")
+                continue
+
+            # Make URL absolute
+            absolute_url = urljoin(BASE_URL, url)
+            logger.debug(f"Item {i}: Converted to absolute URL: {absolute_url}")
+            
+            # Extract title
+            title_elem = item.find('title')
+            title = title_elem.get_text(strip=True) if title_elem else 'No title'
+            
+            # Extract publication date - uses the same logic as RSS 2.0 to handle CDATA <time datetime="...">
+            published_elem = item.find('published')
+            published = None
+            if published_elem:
+                published_text = published_elem.get_text(strip=True)
+                # Check for nested <time datetime="..."> structure inside CDATA
+                time_match = re.search(r'<time\s+datetime=["\']([^"\']+)["\']', published_text)
+                if time_match:
+                    published = time_match.group(1)
+                    logger.debug(f"Item {i}: Extracted datetime from CDATA: {published}")
+                else:
+                    published = published_text
+                    logger.debug(f"Item {i}: Using raw published text: {published}")
+            
+            # Extract description
+            description_elem = item.find('description')
+            description = description_elem.get_text(strip=True) if description_elem else None
+            
+            # Create navigation path for RSS items
+            path = f"RSS: {rss_url} > {title}"
+            
+            extracted_urls.append({
+                'url': absolute_url,
+                'title': title,
+                'path': path,
+                'published': published,
+                'description': description,
+                'source_feed': rss_url
+            })
+            
+            logger.info(f"✅ Item {i}/{len(items)}: Extracted from Custom Response: {absolute_url} - {title}")
+        except Exception as e:
+            logger.error(f"❌ Error processing custom response item {i}: {str(e)}")
+            continue
+    
+    logger.info(f"Successfully extracted {len(extracted_urls)} URLs from custom response feed")
     return extracted_urls
 
 def parse_generic_feed(soup, rss_url):
@@ -6927,70 +7107,14 @@ def _find_legacy_substring_match(normalized_url, url_last_modified_map):
     
     return matching_urls[0] if matching_urls else None
 
-def should_process_url(url, last_modified, last_run_timestamp):
-    """Decide whether a URL should be processed based on modification time."""
-    logger.debug(f"Checking if URL should be processed: {url}")
-    
-    # If checking is disabled, always process
-    if not CHECK_LAST_MODIFIED:
-        logger.info(f"CHECK_LAST_MODIFIED is False. Processing {url}")
-        print(f"\n=== URL PROCESSING STATUS ===")
-        print(f"URL: {url}")
-        print(f"CHECK_LAST_MODIFIED is disabled")
-        print(f"Processing: WILL PROCEED")
-        print("=============================\n")
-        return True
-    
-    # If it's the first run, always process
-    if not last_run_timestamp:
-        logger.info(f"No last run timestamp. Processing {url}")
-        print(f"\n=== URL PROCESSING STATUS ===")
-        print(f"URL: {url}")
-        print(f"Last Run Timestamp: None (first run)")
-        print(f"Processing: WILL PROCEED")
-        print("=============================\n")
-        return True
-    
-    # If no last modified date found, skip
-    if last_modified is None:
-        logger.info(f"No last modified date found for {url}. Skipping.")
-        print(f"\n=== URL PROCESSING STATUS ===")
-        print(f"URL: {url}")
-        print(f"Last Modified: Unknown")
-        print(f"Last Run: {last_run_timestamp}")
-        print(f"Processing: SKIPPED")
-        print("=============================\n")
-        return False
 
-    # Convert to UTC for comparison
-    if last_modified.tzinfo is None:
-        last_modified_utc = last_modified.replace(tzinfo=timezone.utc)
-    else:
-        last_modified_utc = last_modified.astimezone(timezone.utc)
-        
-    is_modified = last_modified_utc > last_run_timestamp
-    
-    print(f"\n=== URL PROCESSING STATUS ===")
-    print(f"URL: {url}")
-    print(f"Last Modified: {last_modified}")
-    print(f"Last Run: {last_run_timestamp}")
-    print(f"Is Modified Since Last Run: {'YES' if is_modified else 'NO'}")
-    print(f"Processing: {'WILL PROCEED' if is_modified else 'SKIPPED'}")
-    print("=============================\n")
-    
-    if is_modified:
-        logger.info(f"URL {url} has been modified. Processing.")
-    else:
-        logger.info(f"URL {url} has NOT been modified. Skipping.")
-        
-    return is_modified
-
-def should_process_rss_url(url, rss_published_date, rss_last_run_timestamp, xml_last_modified, sitemap_last_run_timestamp):
+def should_process_rss_url(url, rss_published_date, rss_last_run_timestamp, xml_last_modified, sitemap_last_run_timestamp, local_cache=None, vector_store_id=None, vector_store_cache=None):
     """
     Decide whether an RSS URL should be processed based on:
     1. RSS Date Threshold (if set)
     2. RSS publication date vs RSS last run timestamp
     3. XML sitemap last modified date vs Sitemap last run timestamp (if available)
+    4. NEW: Existence check if XML last modified date is missing.
     """
     logger.debug(f"Checking if RSS URL should be processed: {url}")
     
@@ -7090,8 +7214,37 @@ def should_process_rss_url(url, rss_published_date, rss_last_run_timestamp, xml_
     # --- Step 4: Check against XML sitemap last modified date (if available) ---
     
     if xml_last_modified is None:
-        logger.info(f"No XML last modified date found for {url}. Processing based on RSS checks only.")
-        return True # Process if it passed RSS checks
+        # --- NEW LOGIC: Handle missing XML last modified date for RSS entries ---
+        is_local_file_present = is_url_already_processed_locally(url, local_cache) if local_cache is not None else False
+        
+        is_vector_store_file_present = False
+        if vector_store_id and vector_store_cache is not None:
+            # Use find_existing_files_by_url_cached (L5452)
+            if find_existing_files_by_url_cached(url, vector_store_cache):
+                is_vector_store_file_present = True
+        
+        if is_local_file_present or is_vector_store_file_present:
+            # Exists in cache/store, and lastmod is missing -> SKIP (as requested by user)
+            logger.info(f"No XML last modified date found for {url}. Skipping because it exists locally ({is_local_file_present}) or in Vector Store ({is_vector_store_file_present}).")
+            print(f"\n=== RSS URL PROCESSING STATUS (MISSING XML LASTMOD) ===")
+            print(f"URL: {url}")
+            print(f"XML Last Modified: Unknown")
+            print(f"Sitemap Last Run: {sitemap_last_run_timestamp}")
+            print(f"Local/Vector Store Exists: YES")
+            print(f"Processing: SKIPPED (Missing XML lastmod + Exists)")
+            print("================================================\n")
+            return False
+        else:
+            # Does not exist in cache/store, and lastmod is missing -> PROCESS (as requested by user)
+            logger.info(f"No XML last modified date found for {url}. Processing because it is NEW (not found locally or in Vector Store).")
+            print(f"\n=== RSS URL PROCESSING STATUS (MISSING XML LASTMOD) ===")
+            print(f"URL: {url}")
+            print(f"XML Last Modified: Unknown")
+            print(f"Sitemap Last Run: {sitemap_last_run_timestamp}")
+            print(f"Local/Vector Store Exists: NO")
+            print(f"Processing: WILL PROCEED (Missing XML lastmod + New URL)")
+            print("================================================\n")
+            return True
         
     if sitemap_last_run_timestamp is None:
         logger.info(f"No Sitemap last run timestamp found. Processing based on RSS checks only.")
@@ -7120,7 +7273,7 @@ def should_process_rss_url(url, rss_published_date, rss_last_run_timestamp, xml_
         logger.info(f"RSS URL {url} XML last modified date is NOT newer than Sitemap last run. Skipping.")
         return False
 
-def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
+def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None, local_files_cache=None, enable_resume=False, vector_store_id=None, vector_store_cache=None):
     """Extract URLs from XML sitemap data for processing."""
     extracted_urls = []
     
@@ -7135,7 +7288,7 @@ def extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp=None
             continue
         
         # Check if the URL should be processed
-        if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+        if should_process_url_with_resume(url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
             # Extract title from URL path as fallback
             parsed_url = urlparse(url)
             path_parts = [part for part in parsed_url.path.split('/') if part]
@@ -7277,14 +7430,16 @@ def build_local_files_cache(output_dir):
                         if source_url:
                             break
                 
-                # If we found a URL, add to cache
+# If we found a URL, add to cache
                 if source_url:
-                    url_to_file_cache[source_url] = {
+                    # Normalize the URL before caching it as the key
+                    normalized_source_url = normalize_url_query_params(source_url)
+                    url_to_file_cache[normalized_source_url] = {
                         'filepath': filepath,
                         'filename': filename
                     }
                     processed_files += 1
-                    logger.debug(f"Found URL in {filename}: {source_url}")
+                    logger.debug(f"Found URL in {filename}: {source_url} (Normalized: {normalized_source_url})")
                 else:
                     format_stats["no_url_found"] += 1
                     logger.debug(f"No URL found in {filename}")
@@ -7315,7 +7470,9 @@ def build_local_files_cache(output_dir):
 
 def is_url_already_processed_locally(url, local_cache):
     """Check if URL has already been processed based on local files cache."""
-    return url in local_cache
+    # Normalize the URL before checking the cache for consistent lookup
+    normalized_url = normalize_url_query_params(url)
+    return normalized_url in local_cache
 
 def is_url_from_test_urls(url):
     """Check if a URL is from the test_urls array in config."""
@@ -7332,9 +7489,18 @@ def is_url_from_test_urls(url):
     
     return False
 
-def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None, sitemap_last_run_timestamp=None):
-    """Enhanced version of should_process_url that supports resume functionality and RSS-specific handling."""
+def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None, sitemap_last_run_timestamp=None, vector_store_id=None, vector_store_cache=None):
+    """Enhanced version of URL processing decision logic, incorporating resume, RSS, and new missing lastmod rules."""
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
+    
+    # --- NEW LOGIC: Skip if URL points to a file (PDF, DOCX, .ashx, etc.) ---
+    if is_file_url(url):
+        logger.info(f"🚫 Skipping URL {url}: Detected as file URL.")
+        print(f"\n=== URL PROCESSING STATUS (FILE URL) ===")
+        print(f"URL: {url}")
+        print(f"Processing: SKIPPED (FILE URL)")
+        print("=====================================\n")
+        return False
     
     # SPECIAL HANDLING FOR TEST URLs: Bypass last modified check for test_urls from config
     if is_url_from_test_urls(url):
@@ -7378,10 +7544,86 @@ def should_process_url_with_resume(url, last_modified, last_run_timestamp, local
     # Step 2: Special handling for RSS URLs with published dates
     if rss_published_date is not None:
         # Pass the XML sitemap last_modified date and the sitemap last run timestamp for the secondary check
-        return should_process_rss_url(url, rss_published_date, last_run_timestamp, last_modified, sitemap_last_run_timestamp)
+        return should_process_rss_url(url, rss_published_date, last_run_timestamp, last_modified, sitemap_last_run_timestamp, local_cache, vector_store_id, vector_store_cache)
     
-    # Step 3: Fall back to original timestamp-based logic for regular URLs
-    return should_process_url(url, last_modified, last_run_timestamp)
+    # Step 3: Timestamp-based logic for regular URLs (inlined from former should_process_url)
+    
+    # If checking is disabled, always process
+    if not CHECK_LAST_MODIFIED:
+        logger.info(f"CHECK_LAST_MODIFIED is False. Processing {url}")
+        print(f"\n=== URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"CHECK_LAST_MODIFIED is disabled")
+        print(f"Processing: WILL PROCEED")
+        print("=============================\n")
+        return True
+    
+    # If it's the first run, always process
+    if not last_run_timestamp:
+        logger.info(f"No last run timestamp. Processing {url}")
+        print(f"\n=== URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"Last Run Timestamp: None (first run)")
+        print(f"Processing: WILL PROCEED")
+        print("=============================\n")
+        return True
+    
+    # --- NEW LOGIC: Handle missing last_modified date (lastmod is None) ---
+    if last_modified is None:
+        # Check if the URL exists in the Vector Store or local cache
+        is_local_file_present = is_url_already_processed_locally(url, local_cache) if local_cache is not None else False
+        
+        is_vector_store_file_present = False
+        if vector_store_id and vector_store_cache is not None:
+            # Use find_existing_files_by_url_cached (L5452)
+            if find_existing_files_by_url_cached(url, vector_store_cache):
+                is_vector_store_file_present = True
+        
+        if is_local_file_present or is_vector_store_file_present:
+            # Exists in cache/store, and lastmod is missing -> SKIP (as requested by user)
+            logger.info(f"No last modified date found for {url}. Skipping because it exists locally ({is_local_file_present}) or in Vector Store ({is_vector_store_file_present}).")
+            print(f"\n=== URL PROCESSING STATUS (MISSING LASTMOD) ===")
+            print(f"URL: {url}")
+            print(f"Last Modified: Unknown")
+            print(f"Last Run: {last_run_timestamp}")
+            print(f"Local/Vector Store Exists: YES")
+            print(f"Processing: SKIPPED (Missing lastmod + Exists)")
+            print("=============================================\n")
+            return False
+        else:
+            # Does not exist in cache/store, and lastmod is missing -> PROCESS (as requested by user)
+            logger.info(f"No last modified date found for {url}. Processing because it is NEW (not found locally or in Vector Store).")
+            print(f"\n=== URL PROCESSING STATUS (MISSING LASTMOD) ===")
+            print(f"URL: {url}")
+            print(f"Last Modified: Unknown")
+            print(f"Last Run: {last_run_timestamp}")
+            print(f"Local/Vector Store Exists: NO")
+            print(f"Processing: WILL PROCEED (Missing lastmod + New URL)")
+            print("=============================================\n")
+            return True
+
+    # Convert to UTC for comparison
+    if last_modified.tzinfo is None:
+        last_modified_utc = last_modified.replace(tzinfo=timezone.utc)
+    else:
+        last_modified_utc = last_modified.astimezone(timezone.utc)
+        
+    is_modified = last_modified_utc > last_run_timestamp
+    
+    print(f"\n=== URL PROCESSING STATUS ===")
+    print(f"URL: {url}")
+    print(f"Last Modified: {last_modified}")
+    print(f"Last Run: {last_run_timestamp}")
+    print(f"Is Modified Since Last Run: {'YES' if is_modified else 'NO'}")
+    print(f"Processing: {'WILL PROCEED' if is_modified else 'SKIPPED'}")
+    print("=============================\n")
+    
+    if is_modified:
+        logger.info(f"URL {url} has been modified. Processing.")
+    else:
+        logger.info(f"URL {url} has NOT been modified. Skipping.")
+        
+    return is_modified
 
 # ============================================================================
 # FILE SAVING FUNCTIONS
@@ -7810,7 +8052,7 @@ def validate_test_urls(test_urls):
     logger.info(f"Test URL validation complete: {len(valid_urls)} valid, {len(validation_errors)} errors")
     return valid_urls, validation_errors
 
-def process_test_urls(test_urls, url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False):
+def process_test_urls(test_urls, url_last_modified_map={}, last_run_timestamp=None, local_files_cache=None, enable_resume=False, vector_store_id=None, vector_store_cache=None):
     """
     Process test URLs for testing purposes, overriding HTML sitemap processing.
     
@@ -7871,7 +8113,7 @@ def process_test_urls(test_urls, url_last_modified_map={}, last_run_timestamp=No
             last_modified = find_url_last_modified(absolute_url, url_last_modified_map)
             
             # Check if the URL should be processed
-            if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None):
+            if should_process_url_with_resume(absolute_url, last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
                 extracted_urls.append({
                     'url': absolute_url,
                     'title': title,
@@ -8049,20 +8291,35 @@ def main(args=None):
     
     if vector_store_id and deduplication_enabled and not skip_cache:
         logger.info("Building Vector Store cache for optimized deduplication...")
-        vector_store_cache = build_vector_store_cache(vector_store_id, timeout_seconds=300)  # 5 minute timeout
+        vector_store_cache = build_vector_store_cache(vector_store_id)
         print(f"🚀 Vector Store cache built with {len(vector_store_cache)} files")
     elif skip_cache and vector_store_id:
         logger.info("Skipping Vector Store cache build (--skip-vector-cache enabled)")
         print(f"⚡ Skipping Vector Store cache build for faster startup")
         print(f"⚠️  Deduplication will use slower API lookups")
     
-    # Build local files cache for resume functionality (if enabled)
+    # Build local files cache for resume functionality AND existence checks
+    # The cache is needed for:
+    # 1. Resume mode (--resume flag)
+    # 2. Existence checking for URLs with missing lastmod (RSS URLs and regular URLs)
     local_files_cache = None
     enable_resume = args.resume if args else False
-    if enable_resume:
-        logger.info("Resume mode enabled - building local files cache...")
+    
+    # Determine if cache is needed
+    cache_needed_for_existence_check = bool(vector_store_id) or bool(RSS_FEEDS)
+    
+    if enable_resume or cache_needed_for_existence_check:
+        if enable_resume:
+            logger.info("Resume mode enabled - building local files cache...")
+        else:
+            logger.info("Building local files cache for existence checks (URLs without lastmod)...")
+        
         local_files_cache = build_local_files_cache(OUTPUT_DIR)
-        print(f"🔄 Resume cache built with {len(local_files_cache)} processed URLs")
+        
+        if enable_resume:
+            print(f"🔄 Resume cache built with {len(local_files_cache)} processed URLs")
+        else:
+            print(f"📋 Local existence cache built with {len(local_files_cache)} processed URLs")
     
     # Determine processing mode
     rss_only = args.rss_only if args else False
@@ -8117,7 +8374,7 @@ def main(args=None):
                 
                 # Step 2: Process test URLs instead of HTML sitemap
                 logger.info("Step 2: Processing test URLs (overriding HTML sitemap)")
-                extracted_urls = process_test_urls(test_urls_to_use, url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
+                extracted_urls = process_test_urls(test_urls_to_use, url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                 
                 logger.info(f"🧪 TEST MODE: Found {len(extracted_urls)} test URLs to process")
             elif xml_only:
@@ -8131,7 +8388,7 @@ def main(args=None):
                 
                 # Step 4: Extract URLs from XML sitemap
                 logger.info("Step 4: Extracting URLs from XML sitemap")
-                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
+                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                 
                 logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
             elif SITEMAP_URL and SITEMAP_URL.strip():
@@ -8146,7 +8403,7 @@ def main(args=None):
                     # Fallback to XML-only processing
                     url_last_modified_map = fetch_xml_sitemap()
                     logger.info(f"Fetched last modified dates for {len(url_last_modified_map)} URLs")
-                    extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
+                    extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                     logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap (fallback)")
                 else:
                     # Step 2: Fetch XML sitemap data for last modified dates
@@ -8160,20 +8417,22 @@ def main(args=None):
                         logger.info("Step 3: Using legacy HTML sitemap parsing (as requested)")
                         main_menu = parse_menu(html_content)
                         if main_menu:
-                            extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
-                                                         last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume)
+                            extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map,
+                                                         last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                             logger.info(f"Found {len(extracted_urls)} URLs from legacy parsing")
                         else:
                             logger.error("Legacy parsing failed, falling back to XML-only")
-                            extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
+                            extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                     else:
                         # Use new HTML anchor tag extraction approach (DEFAULT)
                         logger.info("Step 3: Extracting URLs from HTML sitemap by parsing <a> anchor tags")
-                        extracted_urls = extract_links_from_html_sitemap(html_content, 
-                                                                       url_last_modified_map=url_last_modified_map, 
-                                                                       last_run_timestamp=last_run_timestamp, 
-                                                                       local_files_cache=local_files_cache, 
-                                                                       enable_resume=enable_resume)
+                        extracted_urls = extract_links_from_html_sitemap(html_content,
+                                                                       url_last_modified_map=url_last_modified_map,
+                                                                       last_run_timestamp=last_run_timestamp,
+                                                                       local_files_cache=local_files_cache,
+                                                                       enable_resume=enable_resume,
+                                                                       vector_store_id=vector_store_id,
+                                                                       vector_store_cache=vector_store_cache)
                         
                         logger.info(f"Found {len(extracted_urls)} URLs from HTML sitemap (anchor tag parsing)")
                         
@@ -8185,12 +8444,12 @@ def main(args=None):
                             logger.info("Attempting legacy HTML parsing as fallback...")
                             main_menu = parse_menu(html_content)
                             if main_menu:
-                                extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map, 
-                                                             last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume)
+                                extracted_urls = extract_links(main_menu, url_last_modified_map=url_last_modified_map,
+                                                              last_run_timestamp=last_run_timestamp, local_files_cache=local_files_cache, enable_resume=enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                                 logger.info(f"Found {len(extracted_urls)} URLs from legacy parsing")
                             else:
                                 logger.warning("Legacy parsing also failed, falling back to XML-only")
-                                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
+                                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
             else:
                 # No HTML sitemap URL provided, use XML-only processing
                 logger.info("No HTML sitemap URL provided, using XML-only processing")
@@ -8202,7 +8461,7 @@ def main(args=None):
                 
                 # Step 4: Extract URLs from XML sitemap
                 logger.info("Step 4: Extracting URLs from XML sitemap")
-                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume)
+                extracted_urls = extract_urls_from_xml_sitemap(url_last_modified_map, last_run_timestamp, local_files_cache, enable_resume, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache)
                 
                 logger.info(f"Found {len(extracted_urls)} URLs from XML sitemap")
         else:
