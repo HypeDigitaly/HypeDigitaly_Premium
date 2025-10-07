@@ -416,7 +416,7 @@ def load_configuration(config_file="config.json"):
     # Ensure BASE_URL is always included
     CANONICAL_BASE_URLS.add(BASE_URL)
     
-    logger.info(f"🌐 Calculated {len(CANONICAL_BASE_URLS)} canonical base URLs for skipping.")
+    print(f"🌐 Calculated {len(CANONICAL_BASE_URLS)} canonical base URLs for skipping.")
     
     SITEMAP_URL = CONFIG["website"]["sitemap_url"]
     XML_SITEMAP_URL = CONFIG["website"]["xml_sitemap_url"]
@@ -443,14 +443,14 @@ def load_configuration(config_file="config.json"):
             # New format: object with url and recursive_level
             recursive_level = item.get('recursive_level', 1)
             if not isinstance(recursive_level, int) or recursive_level < 1:
-                logger.warning(f"Invalid recursive_level {recursive_level} for URL {item['url']}, defaulting to 1")
+                print(f"⚠️ Invalid recursive_level {recursive_level} for URL {item['url']}, defaulting to 1")
                 recursive_level = 1
             RECURSIVE_URLS.append({
                 'url': item['url'],
                 'recursive_level': recursive_level
             })
         else:
-            logger.warning(f"Invalid recursive_urls configuration item: {item}, skipping")
+            print(f"⚠️ Invalid recursive_urls configuration item: {item}, skipping")
     
     # Set URLs for which pagination detection is explicitly enabled (optional)
     paginated_urls_config = CONFIG["website"].get("paginated_urls", [])
@@ -461,7 +461,7 @@ def load_configuration(config_file="config.json"):
         if isinstance(item, str):
             PAGINATED_URLS.append(item.rstrip('/')) # Normalize by removing trailing slash
         else:
-            logger.warning(f"Invalid paginated_urls configuration item: {item}, skipping")
+            print(f"⚠️ Invalid paginated_urls configuration item: {item}, skipping")
             
     # Set test URLs for testing purposes (optional)
     TEST_URLS = CONFIG["website"].get("test_urls", [])
