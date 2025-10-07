@@ -4,7 +4,7 @@ import logging
 import json
 import time
 import os
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 import argparse
 from datetime import datetime, timedelta, timezone
 import re
@@ -293,7 +293,7 @@ def load_configuration(config_file="config.json"):
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
     global BLACKLISTED_URLS, RSS_FEEDS, RECURSIVE_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
-    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD, PAGINATED_URLS
+    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD, PAGINATED_URLS, CANONICAL_BASE_URLS
     
     # Load configuration
     CONFIG = load_config(config_file)
@@ -372,6 +372,51 @@ def load_configuration(config_file="config.json"):
     BASE_NETLOC = PARSED_BASE_URL.netloc
     NON_WWW_BASE_NETLOC = BASE_NETLOC[4:] if BASE_NETLOC.startswith("www.") else BASE_NETLOC
     BASE_SCHEME = PARSED_BASE_URL.scheme
+    
+    # Calculate canonical base URLs for skipping
+    CANONICAL_BASE_URLS = set()
+    
+    # 1. Original BASE_URL
+    CANONICAL_BASE_URLS.add(BASE_URL)
+    
+    # 2. BASE_URL with/without trailing slash
+    normalized_base = BASE_URL.rstrip('/')
+    CANONICAL_BASE_URLS.add(normalized_base)
+    CANONICAL_BASE_URLS.add(normalized_base + '/')
+    
+    # 3. BASE_URL with/without www prefix
+    if BASE_NETLOC.startswith("www."):
+        non_www_url = BASE_URL.replace("www.", "", 1)
+        CANONICAL_BASE_URLS.add(non_www_url)
+        CANONICAL_BASE_URLS.add(non_www_url.rstrip('/'))
+        CANONICAL_BASE_URLS.add(non_www_url.rstrip('/') + '/')
+    else:
+        www_url = BASE_URL.replace(BASE_SCHEME + "://", BASE_SCHEME + "://www.", 1)
+        CANONICAL_BASE_URLS.add(www_url)
+        CANONICAL_BASE_URLS.add(www_url.rstrip('/'))
+        CANONICAL_BASE_URLS.add(www_url.rstrip('/') + '/')
+    
+    # 4. Add common default pages if they resolve to the root path
+    # This is tricky because BASE_URL might already contain a path, e.g., https://example.com/blog
+    # If BASE_URL path is just '/', we should check for default pages.
+    if PARSED_BASE_URL.path.strip('/') == '':
+        root_url_no_path = urlunparse((BASE_SCHEME, BASE_NETLOC, '', '', '', ''))
+        
+        default_pages = ['index.html', 'index.htm', 'default.aspx', 'home.html']
+        for page in default_pages:
+            CANONICAL_BASE_URLS.add(urljoin(root_url_no_path, page))
+            
+        # Repeat for non-www version if applicable
+        if BASE_NETLOC.startswith("www."):
+            non_www_netloc = BASE_NETLOC[4:]
+            root_url_no_path_non_www = urlunparse((BASE_SCHEME, non_www_netloc, '', '', '', ''))
+            for page in default_pages:
+                CANONICAL_BASE_URLS.add(urljoin(root_url_no_path_non_www, page))
+
+    # Ensure BASE_URL is always included
+    CANONICAL_BASE_URLS.add(BASE_URL)
+    
+    logger.info(f"🌐 Calculated {len(CANONICAL_BASE_URLS)} canonical base URLs for skipping.")
     
     SITEMAP_URL = CONFIG["website"]["sitemap_url"]
     XML_SITEMAP_URL = CONFIG["website"]["xml_sitemap_url"]
@@ -510,6 +555,11 @@ def get_standard_summarization_instructions(target_tokens=4000, target_language=
 
 ## 🚨 CRITICAL SUMMARIZATION REQUIREMENTS:
 {language_instruction}
+### **🔢 MANDATORY NUMERICAL DATA HANDLING (NON-NEGOTIABLE):**
+- **PRESERVATION:** You MUST preserve and use ALL exact counts, numbers, and figures that are ALREADY PRESENT in the source markdown content (e.g., "35 council members", "12 agenda items").
+- **🚨 STRICT COUNTING PROHIBITION:** You MUST NEVER count elements (e.g., contacts, list items, table rows) yourself if the exact number is NOT explicitly stated in the source text.
+- **ESTIMATES ONLY:** If an exact count is missing, you may use general estimates (e.g., "dozens", "hundreds", "thousands"), but NEVER provide an exact calculated count.
+
 ### **📏 MANDATORY SIZE REDUCTION WITH INTELLIGENCE:**
 - **STRICT TOKEN LIMIT:** {target_tokens} tokens MAXIMUM (non-negotiable)
 - **🚨 EXPANSION FORBIDDEN:** Your output MUST be at least 20% SHORTER than input
@@ -633,7 +683,7 @@ def get_page_summary_instructions(target_language="Czech", url="", title=""):
 - **PURPOSE:** Provide basic context about what type of content the page contains
 
 ### **✅ WHAT TO INCLUDE:**
-- Total number of people/items/sections (numbers only)
+- **EXPLICIT COUNTS ONLY:** Total number of people/items/sections (numbers only) IF the number is explicitly stated in the source content. NEVER count elements yourself. Use estimates (dozens/hundreds) if the count is missing.
 - Type of content (contact list, meeting documents, news, etc.)
 - Basic organizational structure (how many main sections/categories)
 - Available contact data types (phone, email, etc.)
@@ -1053,7 +1103,7 @@ def get_current_file_summary_instructions(file_order, total_files, target_langua
 {language_instruction}
 ### **📋 CURRENT FILE SUMMARY REQUIREMENTS:**
 - **LENGTH:** Maximum 1-2 extremely short sentences
-- **FACTUAL PRECISION:** EXACT counts, numbers, dates, and structural details.
+- **FACTUAL PRECISION:** EXACT counts, numbers, dates, and structural details. **CRITICAL: ONLY use counts explicitly present in the source content. NEVER count elements yourself.**
 - **❌ FORBIDDEN:** DO NOT mention specific individual names, personal titles, detailed contact information (e.g., specific phone numbers or emails), or token counts.
 - **CONTEXTUAL POSITIONING:** Clear explanation of this file's role in the {total_files}-file sequence.
 - **CONTENT DENSITY:** Maximum factual information per word.
@@ -1061,7 +1111,7 @@ def get_current_file_summary_instructions(file_order, total_files, target_langua
 ### **📊 ADAPTIVE CONTENT ANALYSIS FOR FILE {file_order}/{total_files}:**
 **For ANY content type, include these EXACT details:**
 - **📍 PRECISE POSITION:** Explicitly state "část {file_order} z {total_files}"
-- **📊 QUANTIFIED CONTENT:** Exact counts of key elements (contacts, agenda items, documents, sections, etc.)
+- **📊 QUANTIFIED CONTENT:** Exact counts of key elements (contacts, agenda items, documents, sections, etc.) **(ONLY if the count is explicitly stated in the source text)**
 - **🎯 STRUCTURAL COVERAGE:** Which specific sections, departments, topics, or categories THIS file covers
 - **🔗 SEQUENCE INTEGRATION:** How this file fits into the overall document flow
 - **📋 CONTENT BOUNDARIES:** Where this file starts and ends within the complete document structure
@@ -2626,6 +2676,9 @@ def generate_budget_constrained_page_summary(markdown_content, title="", url="",
 - **FACTUAL DENSITY:** Maximum essential information per token
 - **PURPOSE:** Provide context for understanding across chunked files
 
+### **🔢 MANDATORY NUMERICAL DATA HANDLING:**
+- **EXPLICIT COUNTS ONLY:** Only use counts explicitly stated in the source content. NEVER count elements yourself. Use estimates (dozens/hundreds) if the count is missing.
+
 ## SOURCE CONTENT TO ANALYZE:
 {markdown_content}"""
     
@@ -2732,7 +2785,7 @@ def generate_budget_constrained_current_file_summary(file_content, file_order, t
 
 ### **✅ WHAT TO INCLUDE:**
 - File position: "část {file_order} z {total_files}"
-- Total number of items/people in THIS file (numbers only)
+- Total number of items/people in THIS file (numbers only) **(ONLY if the number is explicitly stated in the source content. NEVER count elements yourself.)**
 - Basic content type and structure
 
 ### **❌ WHAT TO NEVER MENTION:**
@@ -2848,7 +2901,7 @@ def generate_budget_constrained_overlap_summary(original_page_summary, previous_
 - **OUTPUT LANGUAGE:** {target_language}
 - **🚨 CRITICAL TOKEN LIMIT:** {max_tokens} tokens ABSOLUTE MAXIMUM (NON-NEGOTIABLE!)
 - **LENGTH:** Maximum 1-2 paragraphs
-- **SEMANTIC PRECISION:** EXACT transition details with logical flow preservation
+- **SEMANTIC PRECISION:** EXACT transition details with logical flow preservation. **CRITICAL: Any numerical data used (e.g., agenda item numbers, department counts) MUST be explicitly present in the source content (PREVIOUS FILE CONTENT section). NEVER count elements yourself.**
 
 ## INPUT DATA FOR OVERLAP ANALYSIS:
 
@@ -7492,6 +7545,19 @@ def is_url_from_test_urls(url):
 def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None, sitemap_last_run_timestamp=None, vector_store_id=None, vector_store_cache=None):
     """Enhanced version of URL processing decision logic, incorporating resume, RSS, and new missing lastmod rules."""
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
+    
+    # --- NEW LOGIC: Skip if URL is the BASE_URL/domain itself ---
+    # Normalize the URL by stripping query and fragment for comparison against canonical base URLs
+    parsed_url = urlparse(url)
+    normalized_url_for_base_check = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', '', ''))
+    
+    if normalized_url_for_base_check in CANONICAL_BASE_URLS:
+        logger.info(f"🚫 Skipping URL {url}: Detected as BASE_URL/domain itself.")
+        print(f"\n=== URL PROCESSING STATUS (BASE URL) ===")
+        print(f"URL: {url}")
+        print(f"Processing: SKIPPED (BASE URL)")
+        print("=====================================\n")
+        return False
     
     # --- NEW LOGIC: Skip if URL points to a file (PDF, DOCX, .ashx, etc.) ---
     if is_file_url(url):
