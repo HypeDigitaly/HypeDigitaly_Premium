@@ -2,7 +2,7 @@
   "website": {
     "base_url": "https://www.kr-karlovarsky.cz",
     "sitemap_url": "https://www.kr-karlovarsky.cz/mapa-webu",
-    "xml_sitemap_url": "https://www.kr-karlovarsky.cz/sitemap.xml",
+    "xml_sitemap_url": "https://extranet.kr-karlovarsky.cz/sitemap/updated/sitemap.xml",
     "blacklisted_urls": [],
     "rss_feeds": [
      "https://www.kr-karlovarsky.cz/aktuality/aktuality-rocni.xml" 
@@ -43,7 +43,7 @@
     "provider_sequence": "jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_68cf39a3b8908191b7c25d2c07b59fb5",
+    "id": "vs_68e552e2be70819189de042a0ecdb01f",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
