@@ -125,7 +125,7 @@ def fetch_terminy_list():
         logger.error(f"Error fetching terminy list: {str(e)}")
         return None
 
-def create_unified_payload(data, organ_type, is_detail=False):
+def create_unified_payload(data, organ_type, is_detail=False, meeting_id=None):
     """Create unified payload structure for both general and detail records"""
     items = []
     
@@ -151,17 +151,29 @@ def create_unified_payload(data, organ_type, is_detail=False):
                             "casZverejneni": convert_date_to_int(p.get("casZverejneni"))
                         })
 
+            # Construct materialUrl if cisloJednaci exists
+            material_url = ""
+            if material.get("cisloJednaci"):
+                material_url = f"https://samosprava.kr-vysocina.cz/material/{material.get('cisloJednaci')}"
+            
             item = {
                 "Title": material.get("nazev", ""),
                 "Description": material.get("popisProblemu", ""),
                 "URL": material.get("materialPdf", ""),
                 "Category": ["Administrativa_Uredni_Zalezitosti"],
                 "SubCategory": [organ_type],
-                "id": material.get("id"),
+                "id": meeting_id if meeting_id is not None else data.get("id"),
+                "rok": data.get("rok"),
+                "cislo": data.get("cislo"),
+                "typ_organu_id": data.get("typ_organu_id"),
+                "pocetMaterialu": data.get("pocetMaterialu"),
                 "cisloJednaci": material.get("cisloJednaci"),
+                "materialUrl": material_url,
                 "neverejnost": material.get("neverejnost"),
                 "duvodNeverejnosti": material.get("duvodNeverejnosti"),
                 "zpracovatelskyOdbor": material.get("zpracovatelskyOdbor"),
+                "zpracovatele": material.get("zpracovatele", []),
+                "predkladatele": material.get("predkladatele", []),
                 "navrhReseni": material.get("navrhReseni"),
                 "pocetUsneseni": material.get("pocetUsneseni"),
                 "pocetPriloh": material.get("pocetPriloh"),
@@ -182,10 +194,17 @@ def create_unified_payload(data, organ_type, is_detail=False):
             "Category": ["Administrativa_Uredni_Zalezitosti"],
             "SubCategory": [organ_type],
             "id": data.get("id"),
+            "rok": data.get("rok"),
+            "cislo": data.get("cislo"),
+            "typ_organu_id": data.get("typ_organu_id"),
+            "pocetMaterialu": data.get("pocetMaterialu"),
             "cisloJednaci": None,
+            "materialUrl": "",
             "neverejnost": None,
             "duvodNeverejnosti": None,
             "zpracovatelskyOdbor": None,
+            "zpracovatele": [],
+            "predkladatele": [],
             "navrhReseni": None,
             "pocetUsneseni": None,
             "pocetPriloh": None,
@@ -201,10 +220,14 @@ def create_unified_payload(data, organ_type, is_detail=False):
     return {
         "data": {
             "schema": {
-                "searchableFields": ["Title", "Description", "URL"],
+                "searchableFields": [
+                    "Title", "Description", "URL", "cisloJednaci",
+                    "navrhReseni", "zpracovatelskyOdbor", "duvodNeverejnosti"
+                ],
                 "metadataFields": [
-                    "Category", "SubCategory", "id", "cisloJednaci",
-                    "neverejnost", "duvodNeverejnosti", "zpracovatelskyOdbor",
+                    "Category", "SubCategory", "id", "rok", "cislo",
+                    "typ_organu_id", "pocetMaterialu", "materialUrl",
+                    "neverejnost", "zpracovatele", "predkladatele",
                     "pocetUsneseni", "pocetPriloh", "terminKonani",
                     "casZverejneniPozvanky", "casZverejneniMaterialu",
                     "casZverejneniZapisu", "usneseni", "prilohy"
@@ -277,22 +300,38 @@ def main():
             organ_code = ORGAN_TYPE_MAPPING[organ_type_id]
             all_items = []
             
-            # Process general records
+            # Process only detailed material records (skip empty parent records)
             for termin in terminy:
-                payload = create_unified_payload(termin, organ_code, is_detail=False)
-                all_items.extend(payload["data"]["items"])
-                
-                # Fetch and process detail record
                 meeting_id = termin.get('id')
                 meeting_data = fetch_meeting_data(meeting_id)
                 if meeting_data:
-                    detail_payload = create_unified_payload(meeting_data, organ_code, is_detail=True)
-                    all_items.extend(detail_payload["data"]["items"])
+                    # Check if meeting has materials
+                    if meeting_data.get("materialy") and len(meeting_data.get("materialy", [])) > 0:
+                        # Only add detailed material records - they contain the parent id for traceability
+                        detail_payload = create_unified_payload(meeting_data, organ_code, is_detail=True, meeting_id=meeting_id)
+                        all_items.extend(detail_payload["data"]["items"])
+                    else:
+                        # Meeting has no materials - create a header record for it
+                        header_payload = create_unified_payload(meeting_data, organ_code, is_detail=False, meeting_id=meeting_id)
+                        all_items.extend(header_payload["data"]["items"])
             
-            # Create combined payload
+            # Create combined payload with schema
             combined_payload = {
                 "data": {
-                    "schema": payload["data"]["schema"],
+                    "schema": {
+                        "searchableFields": [
+                            "Title", "Description", "URL", "cisloJednaci",
+                            "navrhReseni", "zpracovatelskyOdbor", "duvodNeverejnosti"
+                        ],
+                        "metadataFields": [
+                            "Category", "SubCategory", "id", "rok", "cislo",
+                            "typ_organu_id", "pocetMaterialu", "materialUrl",
+                            "neverejnost", "zpracovatele", "predkladatele",
+                            "pocetUsneseni", "pocetPriloh", "terminKonani",
+                            "casZverejneniPozvanky", "casZverejneniMaterialu",
+                            "casZverejneniZapisu", "usneseni", "prilohy"
+                        ]
+                    },
                     "name": f"usneseni_{organ_code.lower()}_table",
                     "items": all_items
                 }
