@@ -3281,8 +3281,7 @@ def process_and_save_chunks_with_metadata_budget(chunks, base_title, url, target
         
         # Assemble complete file content: METADATA + QUESTION + CONTENT
         question_section = f"# **QUESTION:**\n\n{question_text}\n\n# **ANSWER:**\n\n" if question_text else ""
-        content_delimiter = "\n\n<!-- START CORE CONTENT -->\n\n"
-        complete_file_content = metadata_header + question_section + content_delimiter + chunk_content
+        complete_file_content = metadata_header + question_section + chunk_content
         
         # Validate total file size before saving
         total_file_tokens = count_tokens_approximate(complete_file_content)
@@ -8032,8 +8031,7 @@ def save_markdown_to_file(content, title, url, question_text=None, upload_to_vec
             question_section = f"# **QUESTION:**\n\n{question_text}\n\n# **ANSWER:**\n\n"
         
         # Combine metadata header + QUESTION + content
-        content_delimiter = "\n\n<!-- START CORE CONTENT -->\n\n"
-        full_content = metadata_header + question_section + content_delimiter + content
+        full_content = metadata_header + question_section + content
         
         # Save content to file
         with open(filepath, 'w', encoding='utf-8') as f:
