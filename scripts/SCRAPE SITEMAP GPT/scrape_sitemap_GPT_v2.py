@@ -3676,6 +3676,11 @@ def get_html_content_for_pagination_via_jina(url, remove_selectors=None):
         response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
+        # NOVÉ: Logování celé HTML response pro kontrolu pagination API odpovědi
+        logger.info("=== CELÁ HTML RESPONSE Z JINA AI API PRO PAGINATION DETECTION ===")
+        logger.info(f"Full HTML Response (complete): {response.text}")
+        logger.info("=== KONEC HTML RESPONSE ===")
+        
         if response.status_code == 200 and response.text:
             html_content = response.text
             logger.info(f"✅ Successfully fetched HTML content for pagination check from {url}")
@@ -3685,7 +3690,7 @@ def get_html_content_for_pagination_via_jina(url, remove_selectors=None):
         else:
             logger.error(f"❌ Jina API error for pagination check {url}: HTTP Status {response.status_code}")
             return None
-            
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Request error when fetching HTML for pagination from {url}: {str(e)}")
         return None
@@ -5175,6 +5180,11 @@ def _fetch_jina_markdown(url, api_key, remove_selectors=None):
     
     response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
+    
+    # NOVÉ: Logování celé Jina AI response pro kontrolu markdown API odpovědi
+    logger.info("=== CELÁ JINA AI RESPONSE PRO MARKDOWN ===")
+    logger.info(f"Full Jina Response (complete): {response.text}")
+    logger.info("=== KONEC JINA AI RESPONSE ===")
     
     data = response.json()
     if response.status_code == 200 and data.get("data"):
