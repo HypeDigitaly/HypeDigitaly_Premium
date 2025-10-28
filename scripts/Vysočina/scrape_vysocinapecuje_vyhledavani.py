@@ -127,32 +127,51 @@ def transform_data_for_voiceflow(records):
             source_url = urls_in_popis[0]  # Take the first URL found
         else:
             # Fallback to other potential URL fields
-            source_url = record.get('www', record.get('url', record.get('web', record.get('website', ''))))
+            source_url = record.get('org_www', record.get('www', record.get('url', record.get('web', record.get('website', '')))))
 
-        # Extract unique municipalities and districts
+        # Extract unique municipalities, districts, ORPs, and ZUJ codes
         mista_pusobnosti = record.get('misto_pusobnosti', [])
         obce = sorted(list(set(m.get('obec', '') for m in mista_pusobnosti if m.get('obec'))))
         okresy = sorted(list(set(m.get('okres', '') for m in mista_pusobnosti if m.get('okres'))))
+        orps = sorted(list(set(m.get('orp', '') for m in mista_pusobnosti if m.get('orp'))))
+        zujs = sorted(list(set(m.get('zuj', '') for m in mista_pusobnosti if m.get('zuj'))))
 
-        # --- Searchable Content ---
-        # All relevant text is combined into a single 'content' field for effective semantic search.
-        searchable_content = [
-            f"Název organizace: {record.get('org_nazev', '')}",
-            f"Popis služby: {clean_popis}" if clean_popis else "",
-            f"Druh služby: {record.get('druh_sluzby_nazev', '')}",
-            f"Cílová skupina: {', '.join(record.get('cilova_skupina', []))}" if record.get('cilova_skupina') else "",
-            f"Životní situace: {', '.join(record.get('zivotni_situace', []))}" if record.get('zivotni_situace') else "",
-            f"Klíčová slova: {', '.join(record.get('klicova_slova', []))}" if record.get('klicova_slova') else ""
-        ]
+        # --- Prepare data for content field ---
+        # Using only the service description for Description field
+        # Fallback to organization name if description is empty to ensure non-null searchable content
+        description_content = clean_popis if clean_popis else record.get('org_nazev', 'Bez popisu')
+        
+        # Get field values for content concatenation
+        druh_sluzby = record.get('druh_sluzby_nazev', '')
+        cilova_skupina_list = record.get('cilova_skupina', [])
+        zivotni_situace_list = record.get('zivotni_situace', [])
+        klicova_slova_list = record.get('klicova_slova', [])
+        
+        # Convert lists to pipe-delimited strings (using " | " as delimiter)
+        cilova_skupina_str = ' | '.join(cilova_skupina_list) if cilova_skupina_list else ''
+        zivotni_situace_str = ' | '.join(zivotni_situace_list) if zivotni_situace_list else ''
+        klicova_slova_str = ', '.join(klicova_slova_list) if klicova_slova_list else ''
+        
+        # Create searchable content field by concatenating specific fields
+        content = f"""SLUŽBA: {druh_sluzby}
 
-        # Filter out empty content parts
-        searchable_content = [part for part in searchable_content if part.strip()]
+POPIS SLUŽBY:
+{description_content}
 
+CÍLOVÁ SKUPINA:
+{cilova_skupina_str}
+
+ŽIVOTNÍ SITUACE:
+{zivotni_situace_str}
+
+KLÍČOVÁ SLOVA: {klicova_slova_str}"""
+        
         # Create flat item structure (not nested)
         item = {
-            # Searchable field
-            "content": "\n".join(searchable_content),
-            # Metadata fields
+            # Searchable field - concatenated content for full-text search
+            "content": content,
+            # Metadata fields - all fields for exact filtering
+            "Description": description_content,
             "ID_organizace": record.get('ID_organizace'),
             "nazev_organizace": record.get('org_nazev'),
             "druh_sluzby": record.get('druh_sluzby_nazev'),
@@ -164,7 +183,15 @@ def transform_data_for_voiceflow(records):
             "typ_pece_pobytova": record.get('pobytova') == '1',
             "typ_pece_ambulantni": record.get('ambulantni') == '1',
             "typ_pece_terenni": record.get('terenni') == '1',
-            "source_url": source_url
+            "source_url": source_url,
+            "pobocky": record.get('pobocky', []),
+            "org_www": record.get('org_www'),
+            "druh_sluzby_id": record.get('druh_sluzby_id'),
+            "odborna": record.get('odborna'),
+            "druh_org": record.get('druh_org'),
+            "dwh_identifikator_sluzby": record.get('dwh_identifikator_sluzby'),
+            "dwh_nazev": record.get('dwh_nazev'),
+            "orp_pusobnosti": orps
         }
 
         items.append(item)
@@ -178,11 +205,13 @@ def create_voiceflow_payload(items):
             "schema": {
                 "searchableFields": ["content"],
                 "metadataFields": [
-                    "ID_organizace", "nazev_organizace", "druh_sluzby",
+                    "Description", "ID_organizace", "nazev_organizace", "druh_sluzby",
                     "cilova_skupina", "zivotni_situace", "klicova_slova",
                     "obce_pusobnosti", "okresy_pusobnosti",
                     "typ_pece_pobytova", "typ_pece_ambulantni", "typ_pece_terenni",
-                    "source_url"
+                    "source_url",
+                    "pobocky", "org_www", "druh_sluzby_id", "odborna", "druh_org",
+                    "dwh_identifikator_sluzby", "dwh_nazev", "orp_pusobnosti"
                 ]
             },
             "name": "VysocinaPecuje_Vyhledavani",
@@ -204,11 +233,13 @@ def create_unique_value_files(transformed_items, output_dir):
     Uses sets to automatically ensure NO DUPLICATES - each value appears only once
     to serve as lookup combobox values from the original data source."""
     metadata_fields = [
-        "ID_organizace", "nazev_organizace", "druh_sluzby",
+        "content", "Description", "ID_organizace", "nazev_organizace", "druh_sluzby",
         "cilova_skupina", "zivotni_situace", "klicova_slova",
         "obce_pusobnosti", "okresy_pusobnosti",
         "typ_pece_pobytova", "typ_pece_ambulantni", "typ_pece_terenni",
-        "source_url"
+        "source_url",
+        "org_www", "druh_sluzby_id", "odborna", "druh_org",
+        "dwh_identifikator_sluzby", "dwh_nazev", "orp_pusobnosti"
     ]
     # Using sets ensures absolute uniqueness - no duplicate values will be stored
     unique_values = {field: set() for field in metadata_fields}
