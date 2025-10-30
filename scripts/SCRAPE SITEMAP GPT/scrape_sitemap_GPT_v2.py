@@ -4885,6 +4885,17 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
                 logger.info(f"🔄 Step 5b: Processing {len(suburls)} suburls (recursive mode enabled, depth {current_depth+1}/{max_recursive_level})")
                 print(f"🔄 Processing suburls at depth {current_depth+1}/{max_recursive_level}")
                 
+                # CRITICAL FIX: Check if current parent URL is in TEST_URLS
+                # If yes, ALL suburls discovered from this parent should bypass timestamp checks
+                # This handles FLAT URL structures where suburls are semantic children (linked from parent)
+                # but not path descendants (don't share parent's URL path)
+                parent_url_is_test = is_url_from_test_urls(url)
+                if parent_url_is_test:
+                    logger.info(f"🎯 CONTEXT-AWARE BYPASS: Parent URL {url} is in TEST_URLS")
+                    logger.info(f"   ✅ ALL {len(suburls)} suburls discovered from this parent will BYPASS timestamp checks")
+                    logger.info(f"   📊 This handles FLAT URL structures (semantic children, not path descendants)")
+                    print(f"🎯 Parent in TEST_URLS: {len(suburls)} suburls will bypass timestamp checks")
+                
                 for i, suburl_info in enumerate(suburls, 1):
                     suburl_url = suburl_info['url']
                     suburl_text = suburl_info.get('link_text', '')
@@ -4899,10 +4910,35 @@ def process_paginated_url(url, title, path, url_last_modified_map, last_run_time
                     logger.info(f"🏷️ Suburl type: {suburl_type}")
                     logger.info(f"📊 Recursion depth: {current_depth+1}/{max_recursive_level}")
                     
-                    # CRITICAL: Check if the suburl should be processed based on last modified date and resume cache
-                    suburl_last_modified = find_url_last_modified(suburl_url, url_last_modified_map)
+                    # CRITICAL FIX: Context-aware bypass logic
+                    # If parent URL is in TEST_URLS, bypass timestamp checks for this suburl
+                    # (regardless of URL path structure - handles flat/sibling URLs)
+                    should_process = False
                     
-                    if not should_process_url_with_resume(suburl_url, suburl_last_modified, last_run_timestamp, local_files_cache, enable_resume, rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache):
+                    if parent_url_is_test:
+                        # Parent is TEST URL - bypass timestamp checks for this suburl
+                        logger.info(f"🎯 SUBURL BYPASS: {suburl_url} discovered from TEST URL parent - bypassing timestamp check")
+                        
+                        # Still check local resume cache if enabled
+                        if enable_resume and local_files_cache is not None:
+                            if is_url_already_processed_locally(suburl_url, local_files_cache):
+                                logger.info(f"⏭️ Skipping suburl {suburl_url} (found in local cache - RESUME mode)")
+                                total_processed += 1
+                                continue
+                        
+                        # Bypass timestamp check - process this suburl
+                        should_process = True
+                    else:
+                        # Normal processing for suburls from non-TEST parent URLs
+                        suburl_last_modified = find_url_last_modified(suburl_url, url_last_modified_map)
+                        
+                        should_process = should_process_url_with_resume(
+                            suburl_url, suburl_last_modified, last_run_timestamp,
+                            local_files_cache, enable_resume, rss_published_date=None,
+                            vector_store_id=vector_store_id, vector_store_cache=vector_store_cache
+                        )
+                    
+                    if not should_process:
                         logger.info(f"⏭️ Skipping recursive suburl {suburl_url} (timestamp check or already processed locally).")
                         total_processed += 1
                         continue
