@@ -3785,9 +3785,36 @@ def detect_pagination_in_html(html_content, url=""):
                         "items": {
                             "type": "string"
                         }
+                    },
+                    "suburls": {
+                        "type": "array",
+                        "description": "Array of direct descendant/child page URLs found (e.g., individual member profiles, detail pages, document pages)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "relative_url": {
+                                    "type": "string",
+                                    "description": "RELATIVE URL compatible with urljoin() - examples: '/person-name', '/detail/123', '../category/item'"
+                                },
+                                "link_text": {
+                                    "type": "string",
+                                    "description": "Visible text content of the suburl link"
+                                },
+                                "url_type": {
+                                    "type": "string",
+                                    "description": "Type of suburl (e.g., 'profile', 'detail', 'document', 'member', 'article')"
+                                },
+                                "is_direct_descendant": {
+                                    "type": "boolean",
+                                    "description": "Whether this is a direct child page of the current URL"
+                                }
+                            },
+                            "required": ["relative_url", "link_text", "url_type", "is_direct_descendant"],
+                            "additionalProperties": False
+                        }
                     }
                 },
-                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "pagination_indicators"],
+                "required": ["has_pagination", "confidence_score", "content_type_detected", "pagination_urls", "pagination_indicators", "suburls"],
                 "additionalProperties": False
             }
         }
@@ -3858,20 +3885,42 @@ For each validated pagination element:
 - None (0-39): No content match or no legitimate pagination"""
 
         # USER PROMPT: Current context and HTML content to analyze
-        user_prompt = f"""Analyze this HTML content for CONTENT-RELEVANT pagination patterns and EXTRAPOLATE the full numbered sequence.
- 
+        user_prompt = f"""**CRITICAL: Return ONLY valid JSON matching the schema. NO markdown, NO explanations, NO code blocks.**
+
+Analyze this HTML for pagination AND suburls, then return PURE JSON.
+
 Current URL: {url}
- 
-Instructions:
-1. First identify what type of content this page displays (e.g., 'contact list').
-2. Then look for pagination that provides MORE of that SAME content type.
-3. **CRITICAL:** If a numbered sequence is detected (e.g., 1, 2, 3, ..., 9), extrapolate and include ALL missing numbered pages (e.g., 6, 7, 8) using the detected URL pattern.
-4. Ignore general navigation, unrelated pagination, and all detail/sub-page links (e.g., links to individual contacts).
-5. Return RELATIVE URLs only (compatible with urljoin).
- 
-PAGINATION ANALYSIS REQUIRED:
-- **PAGINATION**: Extract and extrapolate all numbered pages (e.g., page 1 to page 9) and navigation links (next/previous).
- 
+
+## PAGINATION DETECTION:
+1. Identify content type (e.g., 'contact list', 'news articles')
+2. Find pagination for MORE of SAME content type
+3. Extrapolate full numbered sequence if detected (e.g., 1,2,3...9)
+4. Extract RELATIVE URLs (e.g., "?page=2")
+
+## SUBURLS DETECTION (CRITICAL):
+1. Find links to DETAIL/PROFILE pages of items shown on current page
+2. Example: If page lists 55 council members, extract all 55 member profile links
+3. Look for patterns: `/person-name`, `/member/123`, `/detail/abc`
+4. Include ONLY direct children (detail pages), NOT navigation links
+5. Extract RELATIVE URLs (e.g., "/mgr-richard-brabec")
+
+## IMPORTANT DISTINCTIONS:
+- **PAGINATION** = More items of same type (page 2, page 3)
+- **SUBURLS** = Detail pages for current items (member profiles, document details)
+
+Return ONLY valid JSON. Example for page with 11 council members and no pagination:
+{{
+  "has_pagination": false,
+  "confidence_score": 0,
+  "content_type_detected": "council_members_directory",
+  "pagination_urls": [],
+  "pagination_indicators": [],
+  "suburls": [
+    {{"relative_url": "/mgr-richard-brabec", "link_text": "Mgr. Richard Brabec", "url_type": "profile", "is_direct_descendant": true}},
+    {{"relative_url": "/ing-jindra-zalabakova", "link_text": "Ing. Jindra Zalabáková", "url_type": "profile", "is_direct_descendant": true}}
+  ]
+}}
+
 HTML content to analyze:
 {html_content}"""
 
@@ -5157,9 +5206,12 @@ def get_markdown_content(url, remove_selectors=None):
 
 
 def _fetch_jina_markdown(url, api_key, remove_selectors=None):
-    """Fetch markdown content using Jina AI API."""
+    """Fetch markdown content using Jina AI API with intelligent fallback for 422 errors."""
     api_url = MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
-    headers = {
+    
+    # STRATEGY 1: Try markdown with selectors (standard approach)
+    logger.info(f"🔄 STRATEGY 1: Attempting markdown fetch with selectors for {url}")
+    headers_with_selectors = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
         "X-Return-Format": "markdown",
@@ -5167,37 +5219,146 @@ def _fetch_jina_markdown(url, api_key, remove_selectors=None):
         "X-Proxy": "auto"
     }
     
-    # Přidání CSS selektorů pro odstranění nežádoucích částí stránky
+    # Add CSS selectors for removing unwanted page parts
     selectors = remove_selectors or JINA_REMOVE_SELECTORS
     if selectors and selectors.strip():
-        headers["X-Remove-Selector"] = selectors
+        headers_with_selectors["X-Remove-Selector"] = selectors
         logger.debug(f"Using remove selectors: {selectors}")
     
-    # Přidání CSS selektorů pro cílení na konkrétní obsah stránky (pro markdown)
+    # Add CSS selectors for targeting specific page content
     if JINA_TARGET_SELECTORS and JINA_TARGET_SELECTORS.strip():
-        headers["X-Target-Selector"] = JINA_TARGET_SELECTORS
+        headers_with_selectors["X-Target-Selector"] = JINA_TARGET_SELECTORS
         logger.debug(f"Using target selectors: {JINA_TARGET_SELECTORS}")
     
-    response = requests_retry_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    
-    # NOVÉ: Logování celé Jina AI response pro kontrolu markdown API odpovědi
-    logger.info("=== CELÁ JINA AI RESPONSE PRO MARKDOWN ===")
-    logger.info(f"Full Jina Response (complete): {response.text}")
-    logger.info("=== KONEC JINA AI RESPONSE ===")
-    
-    data = response.json()
-    if response.status_code == 200 and data.get("data"):
-        content = data["data"].get("content", "")
-        title = data["data"].get("title", "")
-        if content:
-            return content, title, data["data"]
+    try:
+        response = requests_retry_session().get(api_url, headers=headers_with_selectors, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        
+        # Log response for debugging
+        logger.info("=== JINA AI MARKDOWN RESPONSE (WITH SELECTORS) ===")
+        logger.info(f"Full Jina Response (complete): {response.text}")
+        logger.info("=== END JINA AI RESPONSE ===")
+        
+        data = response.json()
+        if response.status_code == 200 and data.get("data"):
+            content = data["data"].get("content", "")
+            title = data["data"].get("title", "")
+            if content:
+                logger.info(f"✅ STRATEGY 1 SUCCESS: Fetched markdown with selectors")
+                return content, title, data["data"]
+            else:
+                logger.warning("⚠️ STRATEGY 1: Jina returned success but content is missing")
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 422:
+            logger.warning(f"⚠️ STRATEGY 1 FAILED: 422 Unprocessable Entity with selectors - trying without selectors")
         else:
-            logger.error("Jina API returned successful status but content is missing")
+            logger.error(f"❌ STRATEGY 1 FAILED: HTTP {e.response.status_code} - {str(e)}")
+            raise  # Re-raise non-422 errors
+    except Exception as e:
+        logger.error(f"❌ STRATEGY 1 FAILED: {str(e)}")
+        raise  # Re-raise for outer handler
+    
+    # STRATEGY 2: Try markdown WITHOUT selectors (selectors may cause 422)
+    logger.info(f"🔄 STRATEGY 2: Attempting markdown fetch WITHOUT selectors for {url}")
+    headers_no_selectors = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "X-Return-Format": "markdown",
+        "X-Engine": "browser",
+        "X-Proxy": "auto"
+    }
+    
+    try:
+        response = requests_retry_session().get(api_url, headers=headers_no_selectors, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        
+        logger.info("=== JINA AI MARKDOWN RESPONSE (WITHOUT SELECTORS) ===")
+        logger.info(f"Full Jina Response (complete): {response.text}")
+        logger.info("=== END JINA AI RESPONSE ===")
+        
+        data = response.json()
+        if response.status_code == 200 and data.get("data"):
+            content = data["data"].get("content", "")
+            title = data["data"].get("title", "")
+            if content:
+                logger.info(f"✅ STRATEGY 2 SUCCESS: Fetched markdown without selectors")
+                return content, title, data["data"]
+            else:
+                logger.warning("⚠️ STRATEGY 2: Jina returned success but content is missing")
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 422:
+            logger.warning(f"⚠️ STRATEGY 2 FAILED: 422 Unprocessable Entity without selectors - trying HTML fallback")
+        else:
+            logger.error(f"❌ STRATEGY 2 FAILED: HTTP {e.response.status_code} - {str(e)}")
+            raise
+    except Exception as e:
+        logger.error(f"❌ STRATEGY 2 FAILED: {str(e)}")
+        raise
+    
+    # STRATEGY 3: Fallback to HTML and extract text content
+    logger.info(f"🔄 STRATEGY 3: Fetching HTML and extracting text content for {url}")
+    headers_html = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "X-Return-Format": "html",
+        "X-Engine": "browser",
+        "X-Proxy": "auto"
+    }
+    
+    try:
+        response = requests_retry_session().get(api_url, headers=headers_html, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        
+        logger.info("=== JINA AI HTML FALLBACK RESPONSE ===")
+        logger.info(f"Response status: {response.status_code}")
+        logger.info(f"Response length: {len(response.text)} characters")
+        logger.info("=== END JINA AI HTML FALLBACK ===")
+        
+        data = response.json()
+        if response.status_code == 200 and data.get("data"):
+            html_content = data["data"].get("html", "")
+            title = data["data"].get("title", "")
+            
+            if html_content:
+                # Convert HTML to basic markdown/text
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    # Remove script, style, and other non-content tags
+                    for tag in soup(['script', 'style', 'meta', 'link', 'noscript']):
+                        tag.decompose()
+                    
+                    # Extract text content
+                    text_content = soup.get_text(separator='\n', strip=True)
+                    
+                    # Basic cleanup
+                    lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+                    cleaned_content = '\n\n'.join(lines)
+                    
+                    if cleaned_content:
+                        logger.info(f"✅ STRATEGY 3 SUCCESS: Converted HTML to text ({len(cleaned_content)} chars)")
+                        logger.warning(f"⚠️ NOTE: Using HTML-to-text conversion fallback (not true markdown)")
+                        return cleaned_content, title, data["data"]
+                    else:
+                        logger.error("❌ STRATEGY 3: HTML conversion resulted in empty content")
+                        return None, None, None
+                        
+                except Exception as e:
+                    logger.error(f"❌ STRATEGY 3: HTML-to-text conversion failed: {str(e)}")
+                    return None, None, None
+            else:
+                logger.error("❌ STRATEGY 3: Jina returned HTML response but content is missing")
+                return None, None, None
+        else:
+            error_message = data.get("error", {}).get("message", f"HTTP Status {response.status_code}")
+            logger.error(f"❌ STRATEGY 3 FAILED: Jina HTML error: {error_message}")
             return None, None, None
-    else:
-        error_message = data.get("error", {}).get("message", f"HTTP Status {response.status_code}")
-        logger.error(f"Jina API error: {error_message}")
+            
+    except Exception as e:
+        logger.error(f"❌ STRATEGY 3 FAILED: {str(e)}")
         return None, None, None
 
 
