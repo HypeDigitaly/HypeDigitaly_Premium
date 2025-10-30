@@ -238,6 +238,49 @@ def log_openrouter_token_usage(response_data, api_call_name, url=""):
         logger.error(f"❌ Error logging token usage for {api_call_name}: {str(e)}")
 
 # ============================================================================
+# JSON SANITIZATION HELPER
+# ============================================================================
+
+def sanitize_json_response(json_text):
+    """
+    Sanitize JSON response that might be wrapped in markdown code blocks.
+    
+    Handles cases where LLM accidentally outputs:
+    - ```json ... ```
+    - ``` ... ```
+    - Plain JSON
+    
+    Args:
+        json_text (str): Raw text that should contain JSON
+        
+    Returns:
+        str: Clean JSON text ready for parsing
+    """
+    if not json_text or not isinstance(json_text, str):
+        return json_text
+    
+    # Remove leading/trailing whitespace
+    json_text = json_text.strip()
+    
+    # Check for markdown code block wrapper
+    if json_text.startswith('```'):
+        # Remove opening fence
+        lines = json_text.split('\n')
+        
+        # Remove first line (```json or ```)
+        if lines and lines[0].startswith('```'):
+            lines = lines[1:]
+        
+        # Remove last line if it's closing fence (```)
+        if lines and lines[-1].strip() == '```':
+            lines = lines[:-1]
+        
+        # Rejoin
+        json_text = '\n'.join(lines).strip()
+    
+    return json_text
+
+# ============================================================================
 # SCRIPT IDENTIFICATION
 # ============================================================================
 
@@ -3979,6 +4022,10 @@ HTML content to analyze:
             
             if ai_response:
                 try:
+                    # CRITICAL: Sanitize potential markdown-wrapped JSON before parsing
+                    # Even with JSON schema, LLMs may accidentally wrap output in markdown
+                    ai_response = sanitize_json_response(ai_response)
+                    
                     # Parse structured JSON response (guaranteed valid by OpenRouter schema validation)
                     import json
                     pagination_data = json.loads(ai_response)
@@ -7735,6 +7782,53 @@ def is_url_from_test_urls(url):
     
     return False
 
+def is_url_suburl_of_test_recursive_url(url):
+    """
+    Check if a URL is a suburl (child/descendant) of a URL that is BOTH in TEST_URLS AND in RECURSIVE_URLS.
+    This allows suburls of test recursive URLs to inherit the TEST_URL bypass behavior.
+    
+    Args:
+        url (str): URL to check
+    
+    Returns:
+        bool: True if URL is a suburl of a TEST_URL+RECURSIVE_URL combo, False otherwise
+    """
+    if not TEST_URLS or not RECURSIVE_URLS:
+        return False
+    
+    # Normalize URL for comparison
+    normalized_url = url.rstrip('/')
+    
+    # Find URLs that are in BOTH TEST_URLS and RECURSIVE_URLS
+    test_recursive_urls = []
+    for test_url in TEST_URLS:
+        normalized_test_url = test_url.rstrip('/')
+        
+        # Check if this TEST_URL is also in RECURSIVE_URLS
+        for recursive_config in RECURSIVE_URLS:
+            if isinstance(recursive_config, str):
+                recursive_url = recursive_config
+            else:
+                recursive_url = recursive_config.get('url', '')
+            
+            normalized_recursive_url = recursive_url.rstrip('/')
+            
+            # If TEST_URL matches RECURSIVE_URL, add to our list
+            if normalized_test_url == normalized_recursive_url:
+                test_recursive_urls.append(normalized_test_url)
+                break
+    
+    # Now check if the current URL is a suburl (descendant) of any test_recursive_url
+    for test_recursive_url in test_recursive_urls:
+        # A suburl starts with the parent URL followed by '/'
+        # e.g., parent: "https://example.com/council", suburl: "https://example.com/council/member-profile"
+        if normalized_url.startswith(test_recursive_url + '/'):
+            logger.info(f"🎯 SUBURL OF TEST+RECURSIVE URL: {url} is a suburl of {test_recursive_url}")
+            logger.info(f"   ✅ This suburl will BYPASS last modified check (inherited from TEST_URL parent)")
+            return True
+    
+    return False
+
 def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None, sitemap_last_run_timestamp=None, vector_store_id=None, vector_store_cache=None):
     """Enhanced version of URL processing decision logic, incorporating resume, RSS, and new missing lastmod rules."""
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
@@ -7785,6 +7879,33 @@ def should_process_url_with_resume(url, last_modified, last_run_timestamp, local
                 logger.info(f"Test URL {url} not found in local cache. Will process.")
         
         # For test URLs, always process (bypass last modified check)
+        return True
+    
+    # SPECIAL HANDLING FOR SUBURLS OF TEST+RECURSIVE URLs: Bypass last modified check for suburls
+    # of URLs that are BOTH in test_urls AND in recursive_urls
+    if is_url_suburl_of_test_recursive_url(url):
+        logger.info(f"🎯 SUBURL OF TEST+RECURSIVE URL DETECTED: {url} - BYPASSING last modified check")
+        print(f"\n=== SUBURL OF TEST+RECURSIVE URL PROCESSING STATUS ===")
+        print(f"URL: {url}")
+        print(f"Source: Suburl of TEST+RECURSIVE URL")
+        print(f"Last modified check: BYPASSED (inherited from parent)")
+        print(f"Processing: WILL PROCEED (TEST+RECURSIVE SUBURL)")
+        print("======================================================\n")
+        
+        # Still check local resume cache if enabled
+        if enable_resume and local_cache is not None:
+            if is_url_already_processed_locally(url, local_cache):
+                logger.info(f"URL {url} already processed locally. Skipping (RESUME).")
+                print(f"\n=== SUBURL PROCESSING STATUS (RESUME) ===")
+                print(f"URL: {url}")
+                print(f"Local file exists: YES")
+                print(f"Processing: SKIPPED (RESUME)")
+                print("==========================================\n")
+                return False
+            else:
+                logger.info(f"Suburl of test+recursive URL {url} not found in local cache. Will process.")
+        
+        # For suburls of test+recursive URLs, always process (bypass last modified check)
         return True
     
     # Step 1: Check local resume cache first (if enabled)
