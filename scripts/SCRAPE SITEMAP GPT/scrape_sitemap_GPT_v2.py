@@ -5540,7 +5540,7 @@ def list_vector_store_files(vector_store_id, limit=100):
 
 
 def get_vector_store_file_attributes(vector_store_id, file_id):
-    """Get attributes of a specific file in the vector store."""
+    """Get attributes of a specific file in the vector store with graceful 404 handling."""
     logger.debug(f"Getting attributes for file {file_id} in vector store {vector_store_id}")
     
     headers = {
@@ -5560,6 +5560,15 @@ def get_vector_store_file_attributes(vector_store_id, file_id):
         data = response.json()
         return data.get('attributes', {})
         
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            # 404 is expected for files that were deleted or are being processed
+            # This is not an error - just eventual consistency in OpenAI's API
+            logger.debug(f"File {file_id} not found (404) - likely deleted or still processing")
+            return None  # Return None to signal "skip this file" vs {} for "no attributes"
+        else:
+            logger.error(f"HTTP error getting file attributes: {str(e)}")
+            return {}
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error getting file attributes: {str(e)}")
         return {}
@@ -5664,6 +5673,7 @@ def build_vector_store_cache(vector_store_id):
     # Build URL lookup cache
     url_to_file_cache = {}
     metadata_fetch_count = 0
+    skipped_404_count = 0
     
     for i, file_info in enumerate(files, 1):
         file_id = file_info.get('id')
@@ -5680,6 +5690,13 @@ def build_vector_store_cache(vector_store_id):
         try:
             attributes = get_vector_store_file_attributes(vector_store_id, file_id)
             metadata_fetch_count += 1
+            
+            # Handle 404 responses (file deleted or still processing)
+            if attributes is None:
+                skipped_404_count += 1
+                logger.debug(f"Skipping file {file_id} (404 Not Found - deleted or processing)")
+                continue
+                
         except Exception as e:
             logger.error(f"Failed to get attributes for file {file_id}: {str(e)}")
             continue
@@ -5698,6 +5715,11 @@ def build_vector_store_cache(vector_store_id):
     elapsed_time = time.time() - start_time
     logger.info(f"Built Vector Store cache in {elapsed_time:.2f}s with {metadata_fetch_count} metadata fetches")
     logger.info(f"Cache contains {len(url_to_file_cache)} files with source URLs")
+    
+    if skipped_404_count > 0:
+        logger.info(f"Skipped {skipped_404_count} files with 404 errors (deleted or processing)")
+        print(f"⚠️  Skipped {skipped_404_count} files (404 - deleted or processing)")
+    
     print(f"✅ Cache built: {len(url_to_file_cache)} files indexed in {elapsed_time:.1f}s")
     
     return url_to_file_cache
