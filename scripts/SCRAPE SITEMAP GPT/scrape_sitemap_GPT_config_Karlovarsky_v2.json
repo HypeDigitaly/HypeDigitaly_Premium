@@ -23,6 +23,7 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
+	  "x-ai/grok-4.1-fast",
       "google/gemini-2.5-flash-preview-09-2025",
       "anthropic/claude-sonnet-4"
     ],
@@ -43,7 +44,7 @@
     "provider_sequence": "jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_68e552e2be70819189de042a0ecdb01f",
+    "id": "vs_692046cca99881918b9423fe14419d62",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,

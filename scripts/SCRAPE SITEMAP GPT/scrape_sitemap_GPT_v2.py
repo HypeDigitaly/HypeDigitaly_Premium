@@ -336,7 +336,7 @@ def load_configuration(config_file="config.json"):
     global SITEMAP_URL, XML_SITEMAP_URL, MARKDOWN_PROVIDERS, MARKDOWN_PROVIDER_SEQUENCE
     global BLACKLISTED_URLS, RSS_FEEDS, RECURSIVE_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
-    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD, PAGINATED_URLS, CANONICAL_BASE_URLS
+    global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD, PAGINATED_URLS, CANONICAL_BASE_URLS, BLACKLISTED_RELATIVE_PATHS
     
     # Load configuration
     CONFIG = load_config(config_file)
@@ -466,6 +466,7 @@ def load_configuration(config_file="config.json"):
     
     # Set blacklisted URLs
     BLACKLISTED_URLS = CONFIG["website"]["blacklisted_urls"]
+    BLACKLISTED_RELATIVE_PATHS = CONFIG["website"].get("blacklisted_relative_url_paths", [])
     
     # Set RSS feeds
     RSS_FEEDS = CONFIG["website"].get("rss_feeds", [])
@@ -506,6 +507,9 @@ def load_configuration(config_file="config.json"):
         else:
             print(f"⚠️ Invalid paginated_urls configuration item: {item}, skipping")
             
+    # Set blacklisted relative paths
+    BLACKLISTED_RELATIVE_PATHS = CONFIG["website"].get("blacklisted_relative_url_paths", [])
+    
     # Set test URLs for testing purposes (optional)
     TEST_URLS = CONFIG["website"].get("test_urls", [])
     
@@ -1597,6 +1601,19 @@ def is_file_url(url):
         return True
         
     return False
+
+
+def is_url_blacklisted_by_path(url, blacklisted_paths):
+    """Check if URL matches any blacklisted relative path."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    url_path = parsed.path
+    for bl_path in blacklisted_paths:
+        if url_path.startswith(bl_path):
+            logger.info(f"Skipping URL {url}: Matches blacklisted relative path {bl_path}")
+            return True
+    return False
+
 
 def requests_retry_session(retries=None, backoff_factor=None):
     """Create a requests session with retry configuration."""
@@ -5170,7 +5187,7 @@ def extract_links_from_html_sitemap(html_content, url_last_modified_map={}, last
                     continue
                 
                 # Check if URL is blacklisted
-                if absolute_url in BLACKLISTED_URLS:
+                if absolute_url in BLACKLISTED_URLS or is_url_blacklisted_by_path(absolute_url, BLACKLISTED_RELATIVE_PATHS):
                     logger.info(f"URL {absolute_url} is blacklisted. Skipping.")
                     continue
                 
@@ -5551,6 +5568,8 @@ def add_file_to_vector_store(file_id, vector_store_id, attributes=None, chunking
         logger.info(f"Using chunking strategy: {chunking_strategy}")
     
     try:
+        logger.info(f"📤 Sending file to Vector Store with payload: {json.dumps(payload, indent=2)}")
+        
         response = requests_retry_session().post(
             f"{OPENAI_API_BASE_URL}/vector_stores/{vector_store_id}/files",
             headers=headers,
@@ -5560,6 +5579,17 @@ def add_file_to_vector_store(file_id, vector_store_id, attributes=None, chunking
         response.raise_for_status()
         
         data = response.json()
+        
+        # ENHANCED LOGGING: Show full API response to verify attributes handling
+        logger.info(f"📥 Vector Store API Response: {json.dumps(data, indent=2)}")
+        
+        # Check if attributes were accepted and returned
+        if 'attributes' in data:
+            logger.info(f"✅ Attributes confirmed in API response: {data.get('attributes')}")
+        else:
+            logger.warning(f"⚠️ NO attributes field in API response! Attributes may not have been saved.")
+            logger.warning(f"   This will cause deduplication failure and file accumulation!")
+        
         if data.get('status') in ['completed', 'in_progress']:
             logger.info(f"Successfully added file to vector store. Status: {data.get('status')}")
             return data
@@ -5633,6 +5663,8 @@ def get_vector_store_file_attributes(vector_store_id, file_id):
     }
     
     try:
+        # Use the basic vector store file endpoint to get metadata including attributes
+        # Per OpenAI docs: GET /vector_stores/{id}/files/{id} returns file info WITH attributes
         response = requests_retry_session().get(
             f"{OPENAI_API_BASE_URL}/vector_stores/{vector_store_id}/files/{file_id}",
             headers=headers,
@@ -5641,7 +5673,16 @@ def get_vector_store_file_attributes(vector_store_id, file_id):
         response.raise_for_status()
         
         data = response.json()
-        return data.get('attributes', {})
+        
+        # ENHANCED LOGGING: Show what we got back
+        retrieved_attributes = data.get('attributes', {})
+        if retrieved_attributes:
+            logger.debug(f"✅ Retrieved attributes for file {file_id}: {list(retrieved_attributes.keys())}")
+        else:
+            logger.warning(f"⚠️ File {file_id} has NO attributes or empty attributes dict!")
+            logger.debug(f"   Full API response: {json.dumps(data, indent=2)[:500]}...")
+        
+        return retrieved_attributes
         
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
@@ -5794,6 +5835,11 @@ def build_vector_store_cache(vector_store_id):
                 'file_info': file_info,
                 'attributes': attributes
             }
+            logger.debug(f"✅ Cached file {file_id}: {normalized_lookup_url}")
+        else:
+            logger.warning(f"⚠️ File {file_id} has NO lookup URL in attributes - cannot cache for deduplication!")
+            logger.warning(f"   Attributes received: {attributes}")
+            logger.warning(f"   This file will NOT be deduplicated and may accumulate!")
     
     elapsed_time = time.time() - start_time
     logger.info(f"Built Vector Store cache in {elapsed_time:.2f}s with {metadata_fetch_count} metadata fetches")
@@ -6020,9 +6066,27 @@ def upload_and_add_to_vector_store(filepath, vector_store_id, url=None, title=No
     attributes['upload_timestamp'] = datetime.now().isoformat()[:512]
     attributes['script_name'] = SCRIPT_NAME[:512]
     
+    # ENHANCED LOGGING: Show exactly what attributes are being sent
+    logger.info(f"📋 Preparing attributes for Vector Store file:")
+    logger.info(f"   source_url: {attributes.get('source_url', 'N/A')}")
+    logger.info(f"   lookup_source_url: {attributes.get('lookup_source_url', 'N/A')}")
+    logger.info(f"   title: {attributes.get('title', 'N/A')[:50]}...")
+    logger.info(f"   upload_timestamp: {attributes.get('upload_timestamp', 'N/A')}")
+    logger.info(f"   script_name: {attributes.get('script_name', 'N/A')}")
+    
     # Step 4: Add file to vector store
     result = add_file_to_vector_store(file_id, vector_store_id, attributes, chunking_strategy)
     if result:
+        # CRITICAL FIX: Update cache with newly uploaded file to prevent re-upload during same run
+        if vector_store_cache is not None:
+            normalized_lookup_url = normalize_url_query_params(lookup_url)
+            vector_store_cache[normalized_lookup_url] = {
+                'file_id': file_id,
+                'file_info': {'id': file_id, 'status': result.get('status', 'unknown')},
+                'attributes': attributes
+            }
+            logger.info(f"✅ Updated Vector Store cache with new file: {normalized_lookup_url} → {file_id}")
+        
         action = "Replaced" if existing_files else "Uploaded"
         logger.info(f"Successfully processed file {filepath} to vector store")
         print(f"✅ {action} in Vector Store: {filepath} (File ID: {file_id})")
@@ -7099,7 +7163,7 @@ def process_rss_feeds(url_last_modified_map, rss_last_run_timestamp, local_files
             url = url_info['url']
             
             # Check if URL is blacklisted
-            if url in BLACKLISTED_URLS:
+            if url in BLACKLISTED_URLS or is_url_blacklisted_by_path(url, BLACKLISTED_RELATIVE_PATHS):
                 logger.info(f"RSS URL {url} is blacklisted. Skipping.")
                 continue
             
@@ -7215,8 +7279,8 @@ def fetch_xml_sitemap():
                                     if lastmod_elem and lastmod_elem.text:
                                         last_modified = parse_lastmod_date(lastmod_elem.text)
                                     
-                                    if last_modified:
-                                        url_last_modified[url] = last_modified
+                                    # CRITICAL FIX: Add ALL URLs to map, even those without lastmod (store None)
+                                    url_last_modified[url] = last_modified
                     break
                 
                 # Try direct URL entries
@@ -7233,8 +7297,9 @@ def fetch_xml_sitemap():
                             if lastmod_elem and lastmod_elem.text:
                                 last_modified = parse_lastmod_date(lastmod_elem.text)
                             
-                            if last_modified:
-                                url_last_modified[url] = last_modified
+                            # CRITICAL FIX: Add ALL URLs to map, even those without lastmod (store None)
+                            # This allows should_process_url_with_resume() to handle missing dates properly
+                            url_last_modified[url] = last_modified
                     break
                     
             except Exception as e:
@@ -8450,7 +8515,7 @@ def validate_test_urls(test_urls):
                     # Don't add to validation_errors - allow cross-domain testing
                 
                 # Check if URL is blacklisted
-                if url in BLACKLISTED_URLS:
+                if url in BLACKLISTED_URLS or is_url_blacklisted_by_path(url, BLACKLISTED_RELATIVE_PATHS):
                     validation_errors.append(f"URL {i}: URL is blacklisted: {url}")
                     continue
                 
@@ -8898,6 +8963,62 @@ def main(args=None):
         else:
             logger.info("Step 4.5: No RSS feeds configured, skipping RSS processing")
         
+        # Step 4.6: DEDUPLICATE URLs before processing (keep only the most recent entry for each URL)
+        original_count = len(extracted_urls)
+        if original_count > 0:
+            logger.info(f"Step 4.6: Deduplicating URLs (found {original_count} URLs before deduplication)")
+            print(f"🔍 Checking for duplicate URLs in sitemap...")
+            
+            # Group URLs by the URL itself
+            url_groups = {}
+            for url_info in extracted_urls:
+                url = url_info['url']
+                if url not in url_groups:
+                    url_groups[url] = []
+                url_groups[url].append(url_info)
+            
+            # Keep only the most recent entry for each URL (by last_modified date, or last in HTML if no date)
+            deduped_urls = []
+            duplicate_count = 0
+            for url, url_infos in url_groups.items():
+                if len(url_infos) > 1:
+                    duplicate_count += len(url_infos) - 1
+                    logger.warning(f"⚠️ DUPLICATE URL FOUND: {url}")
+                    logger.warning(f"   Found {len(url_infos)} entries with titles:")
+                    for i, info in enumerate(url_infos, 1):
+                        last_mod_str = info.get('last_modified', 'No date')
+                        logger.warning(f"   {i}. '{info['title']}' (last_modified: {last_mod_str})")
+                    
+                    # Sort by last_modified date (most recent first)
+                    # Entries without last_modified will use HTML order (position in list)
+                    sorted_infos = sorted(
+                        enumerate(url_infos),
+                        key=lambda x: (x[1].get('last_modified') or '', x[0]),
+                        reverse=True
+                    )
+                    # Extract just the url_info dict (index 1 of the tuple)
+                    sorted_infos = [info for idx, info in sorted_infos]
+                    
+                    selected_entry = sorted_infos[0]
+                    selected_date = selected_entry.get('last_modified', 'No date')
+                    logger.warning(f"   → Keeping MOST RECENT: '{selected_entry['title']}' (last_modified: {selected_date})")
+                    print(f"⚠️  Duplicate: {url} ({len(url_infos)} entries, keeping most recent)")
+                    deduped_urls.append(selected_entry)
+                else:
+                    # No duplicates, just add the single entry
+                    deduped_urls.append(url_infos[0])
+            
+            extracted_urls = deduped_urls
+            
+            if duplicate_count > 0:
+                logger.warning(f"🗑️  Removed {duplicate_count} duplicate URL entries")
+                print(f"🗑️  Removed {duplicate_count} duplicate URLs from sitemap")
+            else:
+                logger.info(f"✅ No duplicate URLs found")
+                print(f"✅ No duplicate URLs found")
+            
+            logger.info(f"After deduplication: {len(extracted_urls)} unique URLs to process")
+        
         logger.info(f"Total URLs to process: {len(extracted_urls)}")
         
         # Step 5: Process each URL with ENHANCED PAGINATION SUPPORT
@@ -8905,10 +9026,26 @@ def main(args=None):
         processed_count = 0
         success_count = 0
         
+        # SAFETY NET: Track URLs processed in this run to prevent duplicate processing
+        processed_urls_in_run = set()
+        skipped_duplicate_count = 0
+        logger.info("🛡️  Safety net enabled: Tracking processed URLs to prevent duplicates within same run")
+        
         for url_info in extracted_urls:
             url = url_info['url']
             title = url_info['title']
             path = url_info['path']
+            
+            # SAFETY CHECK: Has this exact URL already been processed in this run?
+            if url in processed_urls_in_run:
+                skipped_duplicate_count += 1
+                logger.error(f"🚨 DUPLICATE PROCESSING DETECTED: URL already processed in this run!")
+                logger.error(f"   URL: {url}")
+                logger.error(f"   Title: {title}")
+                logger.error(f"   This should NOT happen - deduplication may have failed!")
+                logger.error(f"   SKIPPING to prevent duplicate upload to vector store")
+                print(f"🚨 SKIPPED DUPLICATE: {url} (already processed in this run)")
+                continue  # Skip this URL entirely
             
             logger.info(f"\n--- Processing URL {processed_count + 1}/{len(extracted_urls)} ---")
             logger.info(f"URL: {url}")
@@ -8949,6 +9086,10 @@ def main(args=None):
                 
                 if url_success_count > 0:
                     logger.info(f"✅ Successfully processed URL with potential pagination: {url} ({url_success_count} files/pages)")
+                    
+                    # SAFETY NET: Mark URL as processed to prevent duplicate processing in same run
+                    processed_urls_in_run.add(url)
+                    logger.debug(f"🛡️  Added to processed set: {url}")
                 else:
                     logger.error(f"❌ Failed to process URL: {url}")
                     
@@ -8959,6 +9100,15 @@ def main(args=None):
             
             # Small delay between URL requests
             time.sleep(1)
+        
+        # SAFETY NET SUMMARY: Report if any duplicates were caught
+        if skipped_duplicate_count > 0:
+            logger.error(f"\n🚨 SAFETY NET TRIGGERED: Prevented {skipped_duplicate_count} duplicate URL processing!")
+            logger.error(f"   This indicates a problem with deduplication logic that needs investigation")
+            print(f"\n🚨 SAFETY NET: Prevented {skipped_duplicate_count} duplicate URLs from being processed")
+        else:
+            logger.info(f"\n🛡️  SAFETY NET: No duplicate processing detected ({len(processed_urls_in_run)} unique URLs processed)")
+            print(f"✅ Safety net: All {len(processed_urls_in_run)} URLs processed only once")
         
         # Save timestamp of this run
         if rss_only:
