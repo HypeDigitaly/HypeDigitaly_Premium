@@ -44,7 +44,7 @@
     "provider_sequence": "jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_692046cca99881918b9423fe14419d62",
+    "id": "vs_69208e98a348819194a858a3a797c7de",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,

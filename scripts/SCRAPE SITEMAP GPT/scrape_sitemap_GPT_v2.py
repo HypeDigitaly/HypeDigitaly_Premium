@@ -5703,21 +5703,23 @@ def get_vector_store_file_attributes(vector_store_id, file_id):
 
 def find_existing_file_by_url(vector_store_id, lookup_url):
     """
-    Find an existing file in vector store by lookup URL.
+    Find an existing file in vector store by EXACT lookup URL match.
     
     ⚠️ WARNING: This is the SLOW legacy method!
     Use find_existing_file_by_url_cached() with pre-built cache instead.
     This method is O(n*m) complexity and makes many API calls.
-    """
-    logger.warning(f"Using SLOW legacy lookup for lookup URL: {lookup_url} (consider using cache)")
     
-    # Extract base URL without fragment for broader matching
-    base_url = lookup_url.split('#')[0] if '#' in lookup_url else lookup_url
+    CRITICAL: Only matches files with the EXACT same lookup_source_url (including #chunk fragments).
+    This prevents different chunks (A, B, C) from being treated as duplicates of each other.
+    """
+    logger.warning(f"Using SLOW legacy lookup for EXACT lookup URL: {lookup_url} (consider using cache)")
+    
+    # Normalize the lookup URL (including fragment) for EXACT matching
+    normalized_lookup_url = normalize_url_query_params(lookup_url)
     
     # Get all files in the vector store
     files = list_vector_store_files(vector_store_id)
     
-    matching_files = []
     for file_info in files:
         file_id = file_info.get('id')
         if not file_id:
@@ -5729,19 +5731,15 @@ def find_existing_file_by_url(vector_store_id, lookup_url):
         file_lookup_url = attributes.get('lookup_source_url') or attributes.get('source_url')
         
         if file_lookup_url:
-            # Extract base URL from file's lookup URL
-            file_base_url = file_lookup_url.split('#')[0] if '#' in file_lookup_url else file_lookup_url
+            # CRITICAL FIX: Match EXACT normalized URL (including #chunk fragment)
+            normalized_file_lookup_url = normalize_url_query_params(file_lookup_url)
             
-            if file_base_url == base_url:
-                logger.info(f"Found existing file {file_id} with matching base URL: {base_url}")
-                matching_files.append(file_info)
+            if normalized_file_lookup_url == normalized_lookup_url:
+                logger.info(f"Found existing file {file_id} with EXACT URL match: {normalized_lookup_url}")
+                return file_info  # Return immediately on exact match
     
-    if not matching_files:
-        logger.info(f"No existing files found with base URL: {base_url}")
-        return None
-    else:
-        logger.info(f"Found {len(matching_files)} existing files with base URL: {base_url}")
-        return matching_files[0]  # Return first match for backward compatibility
+    logger.info(f"No existing file found with EXACT URL: {normalized_lookup_url}")
+    return None
 
 
 def delete_vector_store_file(vector_store_id, file_id):
@@ -5870,29 +5868,29 @@ def find_existing_file_by_url_cached(lookup_url, cache):
 
 
 def find_existing_files_by_url_cached(lookup_url, cache):
-    """Find ALL existing files in vector store by lookup URL using pre-built cache (including [A-Z] variants and summarized variants)."""
+    """Find existing file in vector store by EXACT lookup URL using pre-built cache.
     
-    # Normalize the input URL before extracting the base URL
+    CRITICAL: Only matches files with the EXACT same lookup_source_url (including #chunk fragments).
+    This prevents different chunks (A, B, C) from being treated as duplicates of each other.
+    """
+    
+    # Normalize the input URL (including fragment)
     normalized_input_url = normalize_url_query_params(lookup_url)
-    base_url = normalized_input_url.split('#')[0] if '#' in normalized_input_url else normalized_input_url
     
-    logger.debug(f"Searching cache for ALL existing files with normalized base URL: {base_url}")
+    logger.debug(f"Searching cache for EXACT match of lookup_source_url: {normalized_input_url}")
     
     matching_files = []
     for cached_url, cached_file in cache.items():
-        # The cached_url is already normalized (Step 2)
-        cached_base_url = cached_url.split('#')[0] if '#' in cached_url else cached_url
-        
-        # Match if base URLs are the same (covers original, #chunk[A-Z], and #summarized[A-Z] variants)
-        if cached_base_url == base_url:
+        # CRITICAL FIX: Match EXACT normalized URL (including #chunk fragment)
+        # This ensures chunkA, chunkB, chunkC are treated as separate entities
+        if cached_url == normalized_input_url:
             file_id = cached_file['file_id']
-            logger.info(f"Found existing file {file_id} in cache for base URL: {base_url} (cached as: {cached_url})")
+            logger.info(f"Found existing file {file_id} in cache for EXACT URL match: {normalized_input_url}")
             matching_files.append(cached_file['file_info'])
+            break  # Only one exact match possible
     
     if not matching_files:
-        logger.debug(f"No existing files found in cache for base URL: {base_url}")
-    else:
-        logger.info(f"Found {len(matching_files)} existing files in cache for base URL: {base_url} (including all variants)")
+        logger.debug(f"No existing file found in cache for EXACT URL: {normalized_input_url}")
     
     return matching_files
 
@@ -6006,45 +6004,46 @@ def upload_and_add_to_vector_store(filepath, vector_store_id, url=None, title=No
     base_url = url.split('#')[0] if url and '#' in url else url
     lookup_url = url  # This will be used for deduplication (can include #chunkA, #summarizedB etc.)
     
-    # Step 1: Check for existing files if deduplication is enabled (includes all variants: original, #chunk[A-Z], #summarized[A-Z])
+    # Step 1: Check for existing file if deduplication is enabled (EXACT lookup_source_url match only)
+    # CRITICAL: Only matches files with the EXACT same lookup_source_url (including #chunk fragments)
+    # This ensures different chunks (A, B, C) are NOT treated as duplicates of each other
     existing_files = []
     if enable_deduplication and lookup_url:
         if vector_store_cache is not None:
-            # Use fast cache lookup to find ALL files for this URL (including all variants)
+            # Use fast cache lookup to find EXACT matching file (preserves other chunks)
             existing_files = find_existing_files_by_url_cached(lookup_url, vector_store_cache)
         else:
-            # Fallback to slow API lookup - now updated to handle variants
+            # Fallback to slow API lookup - EXACT match only
             existing_file = find_existing_file_by_url(vector_store_id, lookup_url)
             if existing_file:
                 existing_files = [existing_file]
             
         if existing_files:
-            logger.info(f"Found {len(existing_files)} existing file(s) for base URL: {base_url} (including all chunk variants)")
-            print(f"🔄 Found {len(existing_files)} existing file(s) for base URL: {base_url}")
+            logger.info(f"Found {len(existing_files)} existing file(s) with EXACT lookup_source_url: {lookup_url}")
+            print(f"🔄 Found {len(existing_files)} existing file(s) with EXACT match for: {lookup_url}")
             
-            # Delete ALL old files from vector store (including original, #chunk[A-Z], and #summarized[A-Z] variants)
+            # Delete ONLY the exact matching file from vector store (preserves other chunks)
+            # CRITICAL: This only deletes files with the EXACT same lookup_source_url
             deleted_count = 0
             for existing_file_item in existing_files:
                 existing_file_id = existing_file_item.get('id')
                 if delete_vector_store_file(vector_store_id, existing_file_id):
-                    logger.info(f"Deleted old file {existing_file_id} from vector store")
+                    logger.info(f"✅ Deleted old file {existing_file_id} with EXACT URL match: {lookup_url}")
                     deleted_count += 1
                 else:
                     logger.warning(f"Failed to delete old file {existing_file_id}, continuing with upload")
             
-            print(f"🗑️  Deleted {deleted_count}/{len(existing_files)} old files (all variants)")
+            print(f"🗑️  Deleted {deleted_count}/{len(existing_files)} old file(s)")
             
-            # Remove ALL variants from cache to keep it accurate
+            # CRITICAL FIX: Remove ONLY the exact matching URL from cache (not all variants)
+            # This preserves other chunks (A, B, C) which are separate entities
             if vector_store_cache is not None:
-                urls_to_remove = []
-                for cached_url in vector_store_cache.keys():
-                    cached_base_url = cached_url.split('#')[0] if '#' in cached_url else cached_url
-                    if cached_base_url == base_url:
-                        urls_to_remove.append(cached_url)
-                
-                for url_to_remove in urls_to_remove:
-                    del vector_store_cache[url_to_remove]
-                    logger.debug(f"Removed {url_to_remove} from Vector Store cache")
+                normalized_lookup_url = normalize_url_query_params(lookup_url)
+                if normalized_lookup_url in vector_store_cache:
+                    del vector_store_cache[normalized_lookup_url]
+                    logger.debug(f"✅ Removed EXACT URL from cache: {normalized_lookup_url}")
+                else:
+                    logger.debug(f"URL not found in cache for removal: {normalized_lookup_url}")
     
     # Step 2: Upload file to OpenAI
     file_id = upload_file_to_openai(filepath)
