@@ -11,7 +11,8 @@
      
     ],
     "recursive_urls": [],
-    "paginated_urls": []
+    "paginated_urls": [],
+    "IncludeBaseURL": 1
   },
   "api_keys": {
     "jina_ai": "REMOVED-JINA-KEY",

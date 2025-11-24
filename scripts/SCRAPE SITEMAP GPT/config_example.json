@@ -20,7 +20,8 @@
       "https://example.com/news/"
     ],
     "test_urls": [],
-    "paginated_urls": []
+    "paginated_urls": [],
+    "IncludeBaseURL": 1
   },
   "api_keys": {
     "jina_ai": "your_jina_api_key_here",

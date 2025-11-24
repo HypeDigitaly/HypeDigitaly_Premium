@@ -180,6 +180,10 @@ def parse_rss_date_threshold(date_str):
 # This will be populated by load_configuration() function
 CONFIG = None
 
+# IncludeBaseURL handling (configurable)
+PROCESS_BASE_URL_ONCE = False  # True when config IncludeBaseURL == 1
+BASE_URL_PROCESSED_IN_RUN = False  # Tracks whether a base URL variant was already allowed
+
 # ============================================================================
 # GLOBAL TOKEN USAGE TRACKING
 # ============================================================================
@@ -337,6 +341,7 @@ def load_configuration(config_file="config.json"):
     global BLACKLISTED_URLS, RSS_FEEDS, RECURSIVE_URLS, REQUEST_TIMEOUT, REQUEST_RETRY_CODES, REQUEST_RETRY_COUNT
     global REQUEST_BACKOFF_FACTOR, CHECK_LAST_MODIFIED, MAX_FILENAME_LENGTH, LAST_RUN_FILE
     global VERBOSE_URL_MATCHING, TEST_URLS, RSS_DATE_THRESHOLD, PAGINATED_URLS, CANONICAL_BASE_URLS, BLACKLISTED_RELATIVE_PATHS
+    global PROCESS_BASE_URL_ONCE, BASE_URL_PROCESSED_IN_RUN
     
     # Load configuration
     CONFIG = load_config(config_file)
@@ -459,7 +464,19 @@ def load_configuration(config_file="config.json"):
     # Ensure BASE_URL is always included
     CANONICAL_BASE_URLS.add(BASE_URL)
     
+    # IncludeBaseURL flag (1 enables processing once, 0 or missing skips)
+    include_base_url_raw = CONFIG["website"].get("IncludeBaseURL", 0)
+    try:
+        include_base_url_raw = int(include_base_url_raw)
+    except (ValueError, TypeError):
+        include_base_url_raw = 0
+    
+    PROCESS_BASE_URL_ONCE = (include_base_url_raw == 1)
+    BASE_URL_PROCESSED_IN_RUN = False
+    
+    status_label = "aktivní" if PROCESS_BASE_URL_ONCE else "vypnutý"
     print(f"🌐 Calculated {len(CANONICAL_BASE_URLS)} canonical base URLs for skipping.")
+    print(f"🔁 IncludeBaseURL režim: {include_base_url_raw} ({status_label})")
     
     SITEMAP_URL = CONFIG["website"]["sitemap_url"]
     XML_SITEMAP_URL = CONFIG["website"]["xml_sitemap_url"]
@@ -728,7 +745,6 @@ def get_page_summary_instructions(target_language="Czech", url="", title=""):
 - **🚨 ABSOLUTELY FORBIDDEN:** DO NOT mention any specific individual names, personal titles, specific department names, or any detailed information
 - **FOCUS:** Only overall counts, content type, and general structure
 - **PURPOSE:** Provide basic context about what type of content the page contains
-
 ### **✅ WHAT TO INCLUDE:**
 - **EXPLICIT COUNTS ONLY:** Total number of people/items/sections (numbers only) IF the number is explicitly stated in the source content. NEVER count elements yourself. Use estimates (dozens/hundreds) if the count is missing.
 - Type of content (contact list, meeting documents, news, etc.)
@@ -1507,7 +1523,6 @@ def generate_overlap_summary_via_openrouter(original_page_summary, previous_file
     except Exception as e:
         logger.error(f"❌ Unexpected error with OpenRouter API for overlap summary: {str(e)}")
         return None
-
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -2266,7 +2281,6 @@ def _chunk_by_size_only(content, min_section_tokens):
     logger.info(f"📋 Preserved complete content as single section: {total_tokens:,} tokens")
     
     return chunks
-
 def chunk_content_with_metadata_budget(content, vector_store_max_chunk_size, base_title="", url="", target_language="Czech"):
     """
     NEW CONTENT SPLITTING SYSTEM: Split content into A-Z files with exact 50/50 token budget allocation.
@@ -3040,8 +3054,6 @@ def generate_budget_constrained_overlap_summary(original_page_summary, previous_
     except Exception as e:
         logger.error(f"❌ Error generating budget overlap summary: {str(e)}")
         return None
-
-
 def generate_budget_constrained_question_section(url, title, target_language="Czech", page_summary=None, rss_metadata=None, max_tokens=200):
     """
     Generate question section with strict token budget constraints.
@@ -3757,7 +3769,6 @@ def get_html_content_for_pagination_via_jina(url, remove_selectors=None):
     except Exception as e:
         logger.error(f"❌ Unexpected error fetching HTML for pagination from {url}: {str(e)}")
         return None
-
 def detect_pagination_in_html(html_content, url=""):
     """
     AI-POWERED PAGINATION DETECTION: Use OpenRouter API with Structured Outputs to intelligently
@@ -4433,7 +4444,6 @@ def _construct_pagination_url(current_url, page_number):
     except Exception as e:
         logger.error(f"❌ Error constructing pagination URL: {str(e)}")
         return None
-
 def extract_pagination_urls(html_content, base_url, url="", ai_pagination_data=None):
     """
     Extract all pagination URLs from HTML content with AI-POWERED or legacy detection.
@@ -5225,7 +5235,6 @@ def extract_links_from_html_sitemap(html_content, url_last_modified_map={}, last
     except Exception as e:
         logger.error(f"Error parsing HTML sitemap: {str(e)}")
         return extracted_urls
-
 def get_markdown_content(url, remove_selectors=None):
     """
     Fetches markdown content from a URL using configured providers.
@@ -5963,8 +5972,6 @@ def create_chunking_strategy(strategy_type="auto", max_chunk_size=800, chunk_ove
         return {
             "type": "auto"
         }
-
-
 def upload_and_add_to_vector_store(filepath, vector_store_id, url=None, title=None, enable_deduplication=True, chunking_strategy=None, vector_store_cache=None):
     """Complete process to upload file to OpenAI and add to vector store with deduplication."""
     logger.info(f"Starting upload and vector store process for: {filepath}")
@@ -6733,7 +6740,6 @@ def parse_atom_feed(soup, rss_url):
             continue
     
     return extracted_urls
-
 def parse_rss_2_0_feed(soup, rss_url):
     """Parse RSS 2.0 feed format."""
     extracted_urls = []
@@ -7499,8 +7505,6 @@ def _find_legacy_substring_match(normalized_url, url_last_modified_map):
                      if normalized_url in sitemap_url or sitemap_url in normalized_url]
     
     return matching_urls[0] if matching_urls else None
-
-
 def should_process_rss_url(url, rss_published_date, rss_last_run_timestamp, xml_last_modified, sitemap_last_run_timestamp, local_cache=None, vector_store_id=None, vector_store_cache=None):
     """
     Decide whether an RSS URL should be processed based on:
@@ -7931,6 +7935,7 @@ def is_url_suburl_of_test_recursive_url(url):
 
 def should_process_url_with_resume(url, last_modified, last_run_timestamp, local_cache=None, enable_resume=False, rss_published_date=None, sitemap_last_run_timestamp=None, vector_store_id=None, vector_store_cache=None):
     """Enhanced version of URL processing decision logic, incorporating resume, RSS, and new missing lastmod rules."""
+    global PROCESS_BASE_URL_ONCE, BASE_URL_PROCESSED_IN_RUN
     logger.debug(f"Checking if URL should be processed (with resume): {url}")
     
     # --- NEW LOGIC: Skip if URL is the BASE_URL/domain itself ---
@@ -7939,12 +7944,29 @@ def should_process_url_with_resume(url, last_modified, last_run_timestamp, local
     normalized_url_for_base_check = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', '', ''))
     
     if normalized_url_for_base_check in CANONICAL_BASE_URLS:
-        logger.info(f"🚫 Skipping URL {url}: Detected as BASE_URL/domain itself.")
-        print(f"\n=== URL PROCESSING STATUS (BASE URL) ===")
-        print(f"URL: {url}")
-        print(f"Processing: SKIPPED (BASE URL)")
-        print("=====================================\n")
-        return False
+        if PROCESS_BASE_URL_ONCE:
+            if BASE_URL_PROCESSED_IN_RUN:
+                logger.info(f"🚫 Skipping URL {url}: Base URL variant already processed once in this run.")
+                print(f"\n=== URL PROCESSING STATUS (BASE URL) ===")
+                print(f"URL: {url}")
+                print(f"Processing: SKIPPED (BASE URL ALREADY PROCESSED)")
+                print("=====================================\n")
+                return False
+            
+            BASE_URL_PROCESSED_IN_RUN = True
+            logger.info(f"✅ IncludeBaseURL=1 - allowing BASE URL processing once: {url}")
+            print(f"\n=== URL PROCESSING STATUS (BASE URL) ===")
+            print(f"URL: {url}")
+            print(f"IncludeBaseURL: ENABLED (processing once)")
+            print(f"Processing: CONTINUES (BASE URL ALLOWED)")
+            print("=====================================\n")
+        else:
+            logger.info(f"🚫 Skipping URL {url}: Detected as BASE_URL/domain itself.")
+            print(f"\n=== URL PROCESSING STATUS (BASE URL) ===")
+            print(f"URL: {url}")
+            print(f"Processing: SKIPPED (BASE URL)")
+            print("=====================================\n")
+            return False
     
     # --- NEW LOGIC: Skip if URL points to a file (PDF, DOCX, .ashx, etc.) ---
     if is_file_url(url):
@@ -8104,7 +8126,6 @@ def should_process_url_with_resume(url, last_modified, last_run_timestamp, local
         logger.info(f"URL {url} has NOT been modified. Skipping.")
         
     return is_modified
-
 # ============================================================================
 # FILE SAVING FUNCTIONS
 # ============================================================================
@@ -8613,7 +8634,6 @@ def process_test_urls(test_urls, url_last_modified_map={}, last_run_timestamp=No
     print(f"🧪 Test URL preparation complete: {len(extracted_urls)} URLs ready for processing")
     
     return extracted_urls
-
 # ============================================================================
 # MAIN FUNCTION
 # ============================================================================
@@ -9283,4 +9303,3 @@ if __name__ == "__main__":
     
     # Run main function (config loading and logging setup happens inside main)
     main(args)
-

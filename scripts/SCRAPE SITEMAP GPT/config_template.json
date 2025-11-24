@@ -6,7 +6,8 @@
     "blacklisted_urls": [],
     "rss_feeds": [],
     "recursive_urls": [],
-    "test_urls": []
+    "test_urls": [],
+    "IncludeBaseURL": 1
   },
   "api_keys": {
     "jina_ai": "your_jina_api_key_here",
