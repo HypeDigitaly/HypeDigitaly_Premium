@@ -1,0 +1,50 @@
+# 📄 Metadata souboru
+
+## 🔗 **ZDROJOVÁ URL:**
+### **https://stredoceskykraj.cz/web/urad/veda_vyzkum**
+
+## 📝 **TITULEK:**
+### **Věda a výzkum - Webový portál Středočeského kraje**
+
+## 🧭 **CESTA/NAVIGACE KE ZDROJOVÉ URL NA WEBU:**
+### **HTML Sitemap > Věda a výzkum**
+
+## 📅 **DATUM POSLEDNÍ MODIFIKACE URL NA WEBU:**
+### **2024-04-04 12:52:30**
+
+## 📊 **SOURCE PAGE SUMMARY:**
+### **Stránka obsahuje přehled dotačních titulů v oblasti vědy a výzkumu rozdělený do několika tematických sekcí. K dispozici jsou odkazy na konkrétní programy a související dokumentaci.**
+
+## 📊 **TYP ZDROJE:**
+### **🗺️ Sitemap**
+
+---
+
+# **QUESTION:**
+
+Věda a výzkum | Dotační tituly | Středočeský kraj | Jaké konkrétní dotační tituly a programy v oblasti vědy a výzkumu nabízí Středočeský kraj? | Kde lze nalézt související dokumentaci a podmínky pro granty na vědu a výzkum ve Středočeském kraji? | Jak jsou tematicky rozděleny sekce podpory pro vědu, výzkum a inovace na portálu Středočeského kraje?
+
+# **ANSWER:**
+
+Věda a výzkum - Webový portál Středočeského kraje
+
+
+[Skip to Main Content](#main-content)
+
+## Drobečková navigace
+
+[Hlavní stránka](/web/urad)
+
+[Dotace](https://stredoceskykraj.cz/web/urad/dotace)
+
+[Přehled dotací poskytovaných Středočeským krajem](https://stredoceskykraj.cz/web/urad/prehled-dotaci)
+
+[Věda a výzkum](https://stredoceskykraj.cz/web/urad/veda_vyzkum)
+
+[Zpět na seznam dotačních oblastí](/web/urad/dotace)
+
+### Dotační tituly
+
+[Program Smart Akcelerátor III – Věda v praxi obcí pro poskytování dotací z rozpočtu Středočeského kraje na podporu inovačního prostředí ve Středočeském kraji](/web/dotace/program-smart-akcelerator-iii-veda-v-praxi-obci-pro-poskytovani-dotaci-z-rozpoctu-stredoceskeho-kraje-na-podporu-inovacniho-prostredi-ve-stredoceskem-kraji)
+
+Skrytá

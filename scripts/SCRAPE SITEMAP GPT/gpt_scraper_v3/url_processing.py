@@ -317,6 +317,7 @@ def should_process_url_with_resume(
     local_cache: Optional[Dict[str, Any] | Set[str]] = None, enable_resume: bool = False,
     rss_published_date: Any = None, sitemap_last_run_timestamp: Optional[datetime] = None,
     vector_store_id: Optional[str] = None, vector_store_cache: Optional[Dict[str, Any]] = None,
+    previous_known_urls: Optional[Set[str]] = None,
 ) -> bool:
     """Decide whether *url* should be scraped (main eligibility entry point)."""
     cfg = get_config()
@@ -409,6 +410,18 @@ def should_process_url_with_resume(
             f"URL: {url}", "Last Run Timestamp: None (first run)", "Processing: WILL PROCEED"])
         return True
 
+    # New-URL detection: if URL wasn't in the previous sitemap snapshot,
+    # process it regardless of lastmod date
+    if previous_known_urls is not None and last_run_timestamp:
+        normalized_check = normalize_url_query_params(url)
+        if normalized_check not in previous_known_urls:
+            logger.info("NEW URL DETECTED (not in previous sitemap snapshot): %s", url)
+            _status("URL PROCESSING STATUS (NEW URL)", [
+                f"URL: {url}",
+                "Previous snapshot: NOT PRESENT",
+                "Processing: WILL PROCEED (new URL in sitemap)"])
+            return True
+
     # Handle missing last_modified
     if last_modified is None:
         # Mode 2 (partial): always process URLs without lastmod
@@ -487,6 +500,7 @@ def process_test_urls(
     local_files_cache: Optional[Dict[str, Any] | Set[str]] = None,
     enable_resume: bool = False, vector_store_id: Optional[str] = None,
     vector_store_cache: Optional[Dict[str, Any]] = None,
+    previous_known_urls: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Process test URLs for testing purposes, overriding HTML sitemap processing."""
     cfg = get_config()
@@ -522,6 +536,7 @@ def process_test_urls(
             if should_process_url_with_resume(
                 abs_url, lm, last_run_timestamp, local_files_cache, enable_resume,
                 rss_published_date=None, vector_store_id=vector_store_id, vector_store_cache=vector_store_cache,
+                previous_known_urls=previous_known_urls,
             ):
                 extracted.append({"url": abs_url, "title": title, "path": path, "last_modified": lm, "test_url": True})
                 logger.info(f"Added test URL: {abs_url}")

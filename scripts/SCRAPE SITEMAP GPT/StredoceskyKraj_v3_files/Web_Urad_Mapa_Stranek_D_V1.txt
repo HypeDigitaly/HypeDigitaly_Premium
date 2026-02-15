@@ -1,0 +1,93 @@
+## ZDROJOVA URL:
+### **https://stredoceskykraj.cz/web/urad/mapa-stranek**
+
+## TITULEK:
+### **Mapa stránek - Webový portál Středočeského kraje**
+
+## DATUM POSLEDNI MODIFIKACE:
+### **2023-09-25 11:41:32**
+
+## FILE ORDER:
+### **File 4 of 4**
+
+## SOURCE PAGE SUMMARY:
+### **Mapa stránek portálu Středočeského kraje poskytuje strukturovaný přehled odkazů rozdělený do osmi hlavních sekcí: Hlavní témata, Naše služby, Dotace, Kraj, Vaši politici, Vaši úředníci, Média a Kontakty. Obsah pokrývá agendy dopravy, školství, zdravotnictví, sociálních věcí, životního prostředí a regionálního rozvoje.
+
+Struktura zahrnuje detailní navigaci k orgánům kraje (Rada, Zastupitelstvo, výbory a komise), úřední desce, dotačním programům a povinným informacím. Sekce médií nabízí aktuality, periodika a multimediální obsah. Kontaktní část obsahuje telefonní seznam, úřední hodiny a přístup k ePodatelně.**
+
+## CURRENT FILE SUMMARY:
+### **Tato část 4 z 4 obsahuje strukturovaný seznam odkazů na úřední informace, mediální sekci s periodiky a kontaktní údaje úřadu. Soubor zahrnuje organizační strukturu, multimediální galerii a sekci pro kariéru a volná místa.**
+
+## PREVIOUS FILE OVERLAP SUMMARY:
+### **Předchozí část (3/4) uzavřela sekci „Povinné informace“ položkou Sazebník úhrad za poskytnuté informace podle 106/1999 Sb. Obsah zahrnoval také strategické dokumenty, odměny zastupitelů a komplexní přehled informací o kraji včetně symbolů a územního členění.
+
+Aktuální část (4/4) navazuje na zbývající strukturu mapy stránek, která podle úvodního shrnutí směřuje k sekcím Vaši politici, Vaši úředníci, Média a Kontakty. Přechod zachovává logickou linii od legislativních náležitostí k personálnímu složení úřadu a komunikačním kanálům.**
+
+---
+
+# **QUESTION:**
+
+Středočeský kraj mapa stránek|struktura portálu Středočeského kraje|agendy krajského úřadu|Jaké jsou hlavní sekce a témata webového portálu Středočeského kraje?|Kde najdu strukturovaný přehled služeb a dotací Středočeského kraje?|Jaké kontaktní informace a politické agendy jsou dostupné v mapě stránek?
+
+# **ANSWER:**
+
+- [Výroční zpráva podle zákona 106/1999 Sb.](https://stredoceskykraj.cz/web/urad/vyrocni-zprava-podle-zakona-106/1999-sb)
+  - [Vaši úředníci](https://stredoceskykraj.cz/web/urad/vasi-urednici)
+    - [Ředitel krajského úřadu](https://stredoceskykraj.cz/web/urad/reditel-krajskeho-uradu)
+    - [Organizační struktura](https://stredoceskykraj.cz/web/urad/organizacni-struktura)
+    - [Úřední deska](https://stredoceskykraj.cz/web/urad/uredni-deska)
+    - [Odbory](https://stredoceskykraj.cz/web/urad/odbory)
+    - [Kontrola a stížnosti](https://stredoceskykraj.cz/web/urad/kontrola-a-stiznosti)
+    - [Odměňování](https://stredoceskykraj.cz/web/odbor-personalni/menu-odmenovani)
+    - [Rejstřík svazků obcí](https://stredoceskykraj.cz/web/urad/rejstrik-svazku-obci)
+    - [Strategie krajského úřadu](https://stredoceskykraj.cz/web/urad/strategie-krajskeho-uradu)
+- [Média](https://stredoceskykraj.cz/web/urad/pro-media)
+  - [Aktuality](https://stredoceskykraj.cz/web/urad/aktuality)
+  - [Tiskové oddělení](https://stredoceskykraj.cz/web/urad/tiskovy-mluvci)
+  - [Vydávaná periodika](https://stredoceskykraj.cz/web/urad/vydavana-periodika)
+    - [Zpravodaj pro obce](https://stredoceskykraj.cz/web/urad/zpravodaj-pro-obce)
+      - [Zpravodaj pro obce - ročník 2022](https://stredoceskykraj.cz/web/urad/zpravodaj-pro-obce-rocnik-2022)
+      - [Zpravodaj pro obce - ročník 2023](https://stredoceskykraj.cz/web/urad/zpravodaj-pro-obce-rocnik-2023)
+      - [Zpravodaj pro obce - ročník 2024](https://stredoceskykraj.cz/web/urad/zpravodaj-pro-obce-rocnik-2024)
+      - [Zpravodaj pro obce - ročník 2025](https://stredoceskykraj.cz/web/urad/zpravodaj-pro-obce-rocnik-2025)
+      - [Zpravodaj pro obce - ročník 2026](https://stredoceskykraj.cz/web/urad/zpravodaj-pro-obce-rocnik-2026)
+    - [Metodika obcím](https://stredoceskykraj.cz/web/urad/metodika-obcim)
+      - [Metodika obcím - rok 2022](https://stredoceskykraj.cz/web/urad/metodika_obcim_rok_2022)
+      - [Metodika obcím - rok 2023](https://stredoceskykraj.cz/web/urad/metodika_obcim_rok_2023)
+      - [Metodika obcím - rok 2024](https://stredoceskykraj.cz/web/urad/metodika_obcim_rok_2024)
+      - [Metodika obcím - rok 2025](https://stredoceskykraj.cz/web/urad/metodika_obcim_rok_2025)
+      - [Metodika obcím - rok 2026](https://stredoceskykraj.cz/web/urad/metodika-obcim-rok-2026)
+    - [Výroční zpráva Středočeského kraje](https://stredoceskykraj.cz/web/urad/vyrocni-zpravy-stredoceskeho-kraje)
+    - [Středočech](https://www.appsisto.com/ctvrtletnikstredocech)
+  - [Multimédia](https://stredoceskykraj.cz/web/urad/multimedia)
+    - [Loga a symboly](https://stredoceskykraj.cz/web/urad/loga-a-symboly)
+    - [Videa](https://stredoceskykraj.cz/web/urad/videa)
+    - [Webináře](https://stredoceskykraj.cz/web/urad/webinare)
+    - [Prezentace](https://stredoceskykraj.cz/web/urad/prezentace)
+    - [Memoranda](https://stredoceskykraj.cz/web/urad/memoranda)
+    - [Cena hejtmanky](https://stredoceskykraj.cz/web/urad/cena-hejtmanky)
+    - [Dokumenty](https://stredoceskykraj.cz/web/urad/dokumenty)
+    - [Fotogalerie](https://stredoceskykraj.cz/web/urad/fotogalerie)
+      - [První miminko Středočeského kraje](https://stredoceskykraj.cz/web/urad/prvni-miminko-stredoceskeho-kraje)
+      - [Prezident Petr Pavel na dvoudenní návštěvě Středočeského kraje](https://stredoceskykraj.cz/web/urad/prezident-petr-pavel-na-dvoudenni-navsteve-stredoceskeho-kraje1)
+      - [Nové sanitky pro naší ZZS ST kraje](https://stredoceskykraj.cz/web/urad/nove-sanitky-pro-nasi-zzs-st-kraje)
+      - [Hvězdy v Nehvizdech](https://stredoceskykraj.cz/web/urad/hvezdy-v-nehvizdech)
+      - [Vernisáž DISEGNO INTERNO - Eva a Jan Švankmajerovi v GASK!](https://stredoceskykraj.cz/web/urad/vernisaz-disegno-interno-eva-a-jan-Svankmajerovi-v-gask-)
+      - [Virtuální realita v praxi](https://stredoceskykraj.cz/web/urad/virtualni-realita-v-praxi)
+      - [K6\_šest pater prevence](https://stredoceskykraj.cz/web/urad/k6_sest-pater-prevence)
+      - [ODM\_2025](https://stredoceskykraj.cz/web/urad/odm_2025)
+      - [A-Film Teens Festival – Slavnostní předávání cen vítězným snímkům](https://stredoceskykraj.cz/web/urad/a-film-teens-festival-slavnostni-predavani-cen-viteznym-snimkum)
+      - [ON Příbram pavilon D2](https://stredoceskykraj.cz/web/urad/on-pribram-pavilon-d2)
+- [Kariéra](https://stredoceskykraj.cz/web/urad/volne-pracovni-pozice)
+- [Kontakty](https://stredoceskykraj.cz/web/urad/kontakty)
+  - [Kontakty na nás](https://stredoceskykraj.cz/web/urad/kontakty-na-nas)
+    - [Jak se k nám dostanete](https://stredoceskykraj.cz/web/urad/jak-se-k-nam-dostanete)
+    - [Telefonní seznam](https://stredoceskykraj.cz/web/urad/telefonni-seznam)
+    - [Úřední hodiny](https://stredoceskykraj.cz/web/urad/uredni-hodiny)
+  - [Kontakty na příspěvkové organizace](https://stredoceskykraj.cz/web/urad/kontakty-na-prispevkove-organizace)
+  - [Kontakty na obchodní společnosti](https://stredoceskykraj.cz/web/urad/kontakty-na-obchodni-spolecnosti)
+  - [Prohlášení o přístupnosti](https://stredoceskykraj.cz/web/urad/prohlaseni-o-pristupnosti)
+  - [Infolinka pro neslyšící](https://stredoceskykraj.cz/web/urad/infolinka-pro-neslysici)
+  - [ePodatelna](https://stredoceskykraj.cz/web/urad/epodatelna)
+
+Skrytá

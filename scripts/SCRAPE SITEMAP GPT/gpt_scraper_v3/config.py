@@ -16,6 +16,29 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
+_SENSITIVE_FIELDS: frozenset = frozenset({
+    "JINA_AI_API_KEY", "FIRECRAWL_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+})
+
+_SENSITIVE_KEY_PATTERNS: frozenset = frozenset({
+    "api_key", "apikey", "_key", "secret", "token", "password",
+})
+
+
+def _deep_redact(obj: Any) -> Any:
+    """Recursively walk dicts/lists and redact string values whose key matches a sensitive pattern."""
+    if isinstance(obj, dict):
+        result: Dict[str, Any] = {}
+        for k, v in obj.items():
+            if isinstance(k, str) and any(pat in k.lower() for pat in _SENSITIVE_KEY_PATTERNS) and isinstance(v, str) and v:
+                result[k] = "***REDACTED***"
+            else:
+                result[k] = _deep_redact(v)
+        return result
+    if isinstance(obj, list):
+        return [_deep_redact(item) for item in obj]
+    return obj
+
 
 @dataclass
 class ScraperConfig:
@@ -87,6 +110,7 @@ class ScraperConfig:
     LAST_RUN_FILE: str = ""
     RSS_LAST_RUN_FILE: str = ""
     SITEMAP_LAST_RUN_FILE: str = ""
+    KNOWN_URLS_FILE: str = ""
     # Constants
     OPENAI_API_BASE_URL: str = "https://api.openai.com/v1"
 
@@ -95,8 +119,29 @@ class ScraperConfig:
         return (
             f"ScraperConfig(BASE_URL={self.BASE_URL!r}, "
             f"OUTPUT_DIR={self.OUTPUT_DIR!r}, "
-            f"SCRIPT_NAME={self.SCRIPT_NAME!r}, ...)"
+            f"SCRIPT_NAME={self.SCRIPT_NAME!r}, "
+            f"MARKDOWN_PROVIDER_SEQUENCE={self.MARKDOWN_PROVIDER_SEQUENCE!r}, "
+            f"API_KEYS=REDACTED)"
         )
+
+    def __str__(self) -> str:
+        """Human-readable string with API keys redacted."""
+        safe = self.to_safe_dict()
+        return f"ScraperConfig({safe})"
+
+    def to_safe_dict(self) -> Dict[str, Any]:
+        """Return a dict representation with sensitive fields redacted."""
+        from dataclasses import fields as dc_fields
+        result: Dict[str, Any] = {}
+        for f in dc_fields(self):
+            val = getattr(self, f.name)
+            if f.name in _SENSITIVE_FIELDS and val:
+                result[f.name] = "***REDACTED***"
+            elif isinstance(val, (dict, list)):
+                result[f.name] = _deep_redact(val)
+            else:
+                result[f.name] = val
+        return result
 
 
 # -- Singleton access ---------------------------------------------------------
@@ -280,9 +325,9 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
 
     # Script identification
     cfg.SCRIPT_NAME = raw["script_info"]["name"]
-    cfg.LOG_DIR = unique_paths["log_directory"]
+    cfg.LOG_DIR = os.path.realpath(unique_paths["log_directory"])
     cfg.LOG_FILE = os.path.join(cfg.LOG_DIR, f"{cfg.SCRIPT_NAME}_detailed.log")
-    cfg.OUTPUT_DIR = unique_paths["files_directory"]
+    cfg.OUTPUT_DIR = os.path.realpath(unique_paths["files_directory"])
 
     # API keys
     cfg.JINA_AI_API_KEY = raw.get("api_keys", {}).get("jina_ai", "")
@@ -441,6 +486,7 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
     identifier = extract_config_identifier(config_file)
     cfg.RSS_LAST_RUN_FILE = f"{identifier}_rss_last_run_time.txt"
     cfg.SITEMAP_LAST_RUN_FILE = f"{identifier}_sitemap_last_run_time.txt"
+    cfg.KNOWN_URLS_FILE = f"{identifier}_known_urls.json"
 
     # Markdown providers
     cfg.MARKDOWN_PROVIDERS = {
@@ -487,17 +533,12 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
             "name": "playwright",
             "requires_api_key": False,
         }
-        logger.info("Playwright provider configured (browser=%s, headless=%s, stealth=%s)",
-                     cfg.PLAYWRIGHT_CONFIG["browser"],
-                     cfg.PLAYWRIGHT_CONFIG["headless"],
-                     cfg.PLAYWRIGHT_CONFIG["stealth"])
+        print(f"Playwright provider configured (browser={cfg.PLAYWRIGHT_CONFIG['browser']}, headless={cfg.PLAYWRIGHT_CONFIG['headless']}, stealth={cfg.PLAYWRIGHT_CONFIG['stealth']})")
 
     # Validate provider_sequence references configured providers
     for pid in [p.strip() for p in cfg.MARKDOWN_PROVIDER_SEQUENCE.split(",") if p.strip()]:
         if pid not in cfg.MARKDOWN_PROVIDERS:
-            logger.warning(
-                "Provider '%s' is in provider_sequence but not configured in "
-                "content_providers. It will be skipped.", pid)
+            print(f"WARNING: Provider '{pid}' is in provider_sequence but not configured in content_providers. It will be skipped.")
 
     # Status output (mirrors V2 print statements)
     print(f"Configuration loaded from: {config_file}")
@@ -508,6 +549,7 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
     print(f"Combined last run file: {cfg.LAST_RUN_FILE}")
     print(f"RSS last run file: {cfg.RSS_LAST_RUN_FILE}")
     print(f"Sitemap last run file: {cfg.SITEMAP_LAST_RUN_FILE}")
+    print(f"Known URLs file: {cfg.KNOWN_URLS_FILE}")
     print(f"RSS feeds: {len(cfg.RSS_FEEDS)} configured")
     print(f"Recursive URLs: {len(cfg.RECURSIVE_URLS)} configured")
     print(f"Paginated URLs (Explicit): {len(cfg.PAGINATED_URLS)} configured")

@@ -6,12 +6,13 @@ Migrated from scrape_sitemap_GPT_v2.py (lines 5512-6102).
 """
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 import logging
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -291,6 +292,94 @@ def build_vector_store_cache(vector_store_id: str) -> Dict[str, Any]:
         print(f"Skipped {skipped_404_count} files (404 - deleted or processing)")
     print(f"Cache built: {len(url_to_file_cache)} files indexed in {elapsed_time:.1f}s")
     return url_to_file_cache
+
+
+def cleanup_removed_urls(
+    removed_urls: Set[str],
+    vector_store_id: str,
+    vector_store_cache: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, Set[str]]:
+    """Delete vector store files for URLs that have been removed from the sitemap.
+
+    Args:
+        removed_urls: Set of base URLs that have been removed.
+        vector_store_id: OpenAI Vector Store ID.
+        vector_store_cache: Pre-built cache from build_vector_store_cache().
+
+    Returns:
+        Tuple of (deleted_count, failed_urls) where deleted_count is the number
+        of successfully deleted files and failed_urls is the set of base URLs
+        whose deletion failed (so the caller can preserve them in the snapshot
+        for retry on the next run).
+
+    Note:
+        Handles chunk variants (#chunkA, #chunkB, #summarizedA etc.) by building
+        an inverted index for O(1) lookup per removed URL.
+    """
+    # Early returns
+    if not removed_urls:
+        logger.info("No removed URLs to clean up")
+        return 0, set()
+
+    if not vector_store_id:
+        logger.error("Cannot cleanup removed URLs: vector_store_id is empty")
+        return 0, set()
+
+    if vector_store_cache is None:
+        logger.warning("Cannot cleanup removed URLs: vector_store_cache is None (cache required)")
+        return 0, set()
+
+    logger.info(f"Starting cleanup for {len(removed_urls)} removed URLs")
+    print(f"Cleaning up {len(removed_urls)} removed URLs from Vector Store...")
+
+    # Step A: Build inverted index (normalized base URL -> list of cache keys)
+    base_to_keys: Dict[str, List[str]] = defaultdict(list)
+    for cache_key in vector_store_cache:
+        base = normalize_url_query_params(cache_key.split("#")[0])
+        base_to_keys[base].append(cache_key)
+
+    logger.debug(f"Built inverted index with {len(base_to_keys)} base URLs")
+
+    # Step B: For each removed URL, find and delete matching vector store files
+    deleted_count = 0
+    failed_urls: Set[str] = set()
+    for removed_url in removed_urls:
+        normalized_removed = normalize_url_query_params(removed_url)
+        # Find all cache keys (including chunk variants) for this base URL
+        matching_keys = base_to_keys.get(normalized_removed, [])
+
+        if not matching_keys:
+            logger.info(f"No vector store files found for removed URL: {removed_url}")
+            continue
+
+        logger.info(f"Found {len(matching_keys)} vector store file(s) for removed URL: {removed_url}")
+
+        for cache_key in matching_keys:
+            cache_entry = vector_store_cache.get(cache_key)
+            if not cache_entry:
+                continue
+
+            file_id = cache_entry.get("file_id")
+            if not file_id:
+                continue
+
+            if delete_vector_store_file(vector_store_id, file_id):
+                deleted_count += 1
+                logger.info(f"Deleted vector store file {file_id} (cache key: {cache_key})")
+                # Invalidate cache entry
+                if cache_key in vector_store_cache:
+                    del vector_store_cache[cache_key]
+            else:
+                logger.warning(f"Failed to delete vector store file {file_id} for removed URL: {removed_url}")
+                failed_urls.add(removed_url)
+
+    # Step C: Log and print summary
+    logger.info(f"Cleanup complete: Deleted {deleted_count} vector store files for {len(removed_urls)} removed URLs")
+    if failed_urls:
+        logger.warning(f"Cleanup had {len(failed_urls)} URL(s) with failed deletions (will be retried next run)")
+    print(f"Cleanup complete: Deleted {deleted_count} vector store file(s)")
+
+    return deleted_count, failed_urls
 
 
 def find_existing_file_by_url_cached(

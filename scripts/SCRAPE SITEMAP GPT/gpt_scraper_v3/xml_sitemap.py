@@ -8,6 +8,7 @@ Migrated from scrape_sitemap_GPT_v2.py with the following fixes applied:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -225,6 +226,7 @@ def extract_urls_from_xml_sitemap(
     enable_resume: bool = False,
     vector_store_id: Optional[str] = None,
     vector_store_cache: Optional[Dict[str, Any]] = None,
+    previous_known_urls: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Extract URLs from XML sitemap data for processing.
 
@@ -264,6 +266,7 @@ def extract_urls_from_xml_sitemap(
             rss_published_date=None,
             vector_store_id=vector_store_id,
             vector_store_cache=vector_store_cache,
+            previous_known_urls=previous_known_urls,
         ):
             # Extract title from URL path as fallback
             parsed_url = urlparse(url)
@@ -508,3 +511,103 @@ def build_local_files_cache(
         )
 
     return url_to_file_cache
+
+
+def load_known_urls_snapshot() -> Set[str]:
+    """Load the set of known URLs from the snapshot file.
+
+    Reads the snapshot file specified in ``cfg.KNOWN_URLS_FILE`` and returns
+    the set of URLs that have been seen in previous runs. This is used for
+    detecting new URLs added to the sitemap.
+
+    Returns:
+        A set of URL strings from the snapshot file. Returns an empty set if
+        the file doesn't exist (first run) or if there are errors reading it.
+    """
+    cfg = get_config()
+
+    if not os.path.exists(cfg.KNOWN_URLS_FILE):
+        logger.info(
+            "Known URLs snapshot file not found: %s (first run)",
+            cfg.KNOWN_URLS_FILE,
+        )
+        return set()
+
+    try:
+        with open(cfg.KNOWN_URLS_FILE, "r", encoding="utf-8") as f:
+            url_list = json.load(f)
+
+        if not isinstance(url_list, list):
+            logger.warning(
+                "Known URLs snapshot has invalid format (expected list), returning empty set",
+            )
+            return set()
+
+        # Filter non-string entries (corrupt data protection) and normalize
+        non_string_count = sum(1 for item in url_list if not isinstance(item, str))
+        if non_string_count:
+            logger.warning(
+                "Filtered %d non-string entries from known URLs snapshot",
+                non_string_count,
+            )
+        known_urls = {
+            normalize_url_query_params(item)
+            for item in url_list
+            if isinstance(item, str)
+        }
+        logger.info(
+            "Loaded %d known URLs from snapshot: %s",
+            len(known_urls),
+            cfg.KNOWN_URLS_FILE,
+        )
+        return known_urls
+
+    except (json.JSONDecodeError, OSError, TypeError) as e:
+        logger.warning(
+            "Error loading known URLs snapshot from %s: %s",
+            cfg.KNOWN_URLS_FILE,
+            e,
+        )
+        return set()
+
+
+def save_known_urls_snapshot(current_urls: Set[str]) -> None:
+    """Save the current set of known URLs to the snapshot file.
+
+    Writes the set of URLs atomically using a temporary file to prevent
+    corruption if the process is interrupted. The URLs are sorted for
+    deterministic output.
+
+    Args:
+        current_urls: Set of URL strings to save to the snapshot file.
+    """
+    cfg = get_config()
+    temp_file = cfg.KNOWN_URLS_FILE + ".tmp"
+
+    try:
+        # Write to temporary file first
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(sorted(current_urls), f, indent=2)
+
+        # Atomic replace: move temp file to final location
+        os.replace(temp_file, cfg.KNOWN_URLS_FILE)
+
+        logger.info(
+            "Saved %d known URLs to snapshot: %s",
+            len(current_urls),
+            cfg.KNOWN_URLS_FILE,
+        )
+
+    except (OSError, TypeError) as e:
+        logger.error(
+            "Error saving known URLs snapshot to %s: %s",
+            cfg.KNOWN_URLS_FILE,
+            e,
+        )
+    finally:
+        # Clean up temp file if it still exists
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except OSError:
+            pass  # Ignore cleanup errors

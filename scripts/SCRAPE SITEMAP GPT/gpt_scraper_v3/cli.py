@@ -12,19 +12,21 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from gpt_scraper_v3.config import load_configuration, get_config, ScraperConfig
 from gpt_scraper_v3.logging_setup import setup_logging, get_logger
 from gpt_scraper_v3.token_tracker import get_token_usage_summary
-from gpt_scraper_v3.vector_store import build_vector_store_cache, create_chunking_strategy
+from gpt_scraper_v3.utilities import normalize_url_query_params
+from gpt_scraper_v3.vector_store import build_vector_store_cache, create_chunking_strategy, cleanup_removed_urls
 from gpt_scraper_v3.xml_sitemap import (
     fetch_xml_sitemap, extract_urls_from_xml_sitemap,
     get_last_run_timestamp, save_last_run_timestamp, build_local_files_cache,
+    load_known_urls_snapshot, save_known_urls_snapshot,
 )
 from gpt_scraper_v3.rss_feeds import process_rss_feeds
 from gpt_scraper_v3.sitemap_parsing import extract_links_from_html_sitemap, parse_menu, extract_links
-from gpt_scraper_v3.content_fetching import get_html_content_via_jina
+from gpt_scraper_v3.content_fetching import get_html_content_via_jina, get_raw_html_content
 from gpt_scraper_v3.url_processing import process_test_urls
 from gpt_scraper_v3.pagination_processing import process_paginated_url
 
 _XS_KEYS = ("last_run_timestamp", "local_files_cache", "enable_resume",
-             "vector_store_id", "vector_store_cache")
+             "vector_store_id", "vector_store_cache", "previous_known_urls")
 
 
 def _extract_xml_urls(lm_map: Dict[str, Any], **kw: Any) -> List[Dict[str, Any]]:
@@ -183,8 +185,9 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: ScraperConfig) -> None:
     if args.debug:
         logger.setLevel(logging.DEBUG)
         for h in logger.handlers:
-            h.setLevel(logging.DEBUG)
-        logger.info("Debug mode enabled")
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                h.setLevel(logging.DEBUG)
+        logger.info("Debug mode enabled (console=DEBUG, file=INFO)")
     if args.no_check_modified:
         cfg.CHECK_LAST_MODIFIED = 0
         logger.info("Last modified checking disabled - will process all URLs")
@@ -232,6 +235,7 @@ def resolve_urls(
     vs_cache: Optional[Dict[str, Any]], enable_resume: bool,
     last_ts: Optional[datetime], rss_only: bool, sitemap_only: bool,
     xml_only: bool, remove_sel: str, vs_id: str,
+    previous_known_urls: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Resolve URLs from test list, HTML/XML sitemap, and RSS feeds."""
     logger = get_logger()
@@ -239,6 +243,7 @@ def resolve_urls(
     xs_kw: Dict[str, Any] = dict(
         last_run_timestamp=last_ts, local_files_cache=local_cache,
         enable_resume=enable_resume, vector_store_id=vs_id, vector_store_cache=vs_cache,
+        previous_known_urls=previous_known_urls,
     )
 
     if not rss_only:
@@ -247,7 +252,8 @@ def resolve_urls(
             lm_map.update(fetch_xml_sitemap())
             urls = process_test_urls(cfg.TEST_URLS, lm_map, last_ts, local_cache,
                                      enable_resume, vector_store_id=vs_id,
-                                     vector_store_cache=vs_cache)
+                                     vector_store_cache=vs_cache,
+                                     previous_known_urls=previous_known_urls)
             logger.info("TEST MODE: %d test URLs to process", len(urls))
         elif xml_only:
             logger.info("XML-only mode: Skipping HTML sitemap")
@@ -281,8 +287,8 @@ def _resolve_html_sitemap(
 ) -> List[Dict[str, Any]]:
     """Fetch HTML sitemap, parse links, with XML/legacy fallback."""
     logger = get_logger()
-    logger.info("Fetching HTML sitemap from %s", cfg.SITEMAP_URL)
-    html = get_html_content_via_jina(cfg.SITEMAP_URL, remove_sel)
+    logger.info("Fetching HTML sitemap from %s (provider-sequence-aware)", cfg.SITEMAP_URL)
+    html = get_raw_html_content(cfg.SITEMAP_URL)
 
     if not html:
         logger.error("Failed to get HTML sitemap; falling back to XML-only")
@@ -470,6 +476,7 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
 
     # Step 3: Setup logging (last print() above, logger below)
     setup_logging(cfg)
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     logger = get_logger()
 
     # Step 4: Apply CLI overrides
@@ -513,6 +520,15 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
     # Step 6: Build caches
     vs_cache, local_cache = build_caches(cfg, args, vs_id, dedup)
 
+    # Step 6b: Load known URLs snapshot for new-URL detection
+    previous_known_urls: Optional[Set[str]] = None
+    if cfg.CHECK_LAST_MODIFIED != 0:
+        previous_known_urls = load_known_urls_snapshot()
+        if previous_known_urls:
+            logger.info("Loaded %d known URLs from previous snapshot", len(previous_known_urls))
+        else:
+            logger.info("No previous known URLs snapshot (first run or empty)")
+
     # Step 7: Processing mode and timestamps
     rss_only = getattr(args, "rss_only", False)
     sitemap_only = getattr(args, "sitemap_only", False)
@@ -527,9 +543,58 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
     try:
         lm_map: Dict[str, Any] = {}
         extracted = resolve_urls(cfg, args, lm_map, local_cache, vs_cache, enable_resume,
-                                 last_ts, rss_only, sitemap_only, xml_only, remove_sel, vs_id)
+                                 last_ts, rss_only, sitemap_only, xml_only, remove_sel, vs_id,
+                                 previous_known_urls=previous_known_urls)
         stats = process_urls(extracted, cfg, lm_map, last_ts, local_cache, enable_resume,
                              vs_id, dedup, chunking, vs_cache, remove_sel)
+
+        # Step 9b: Known URLs snapshot — save current state and cleanup removed URLs
+        if cfg.CHECK_LAST_MODIFIED != 0:
+            # Build current URL set from lm_map keys (all URLs seen in this run's sitemap)
+            current_known_urls: Set[str] = set()
+            for url_key in lm_map:
+                current_known_urls.add(normalize_url_query_params(url_key))
+            logger.info("Current sitemap contains %d URLs", len(current_known_urls))
+
+            if not current_known_urls:
+                logger.warning(
+                    "Current sitemap returned 0 URLs — skipping snapshot save and cleanup "
+                    "(possible fetch failure)")
+            else:
+                # Detect removed URLs
+                removed_urls: Set[str] = set()
+                if previous_known_urls:
+                    removed_urls = previous_known_urls - current_known_urls
+                    new_urls = current_known_urls - previous_known_urls
+                    logger.info(
+                        "URL diff: %d new, %d removed, %d unchanged",
+                        len(new_urls), len(removed_urls),
+                        len(current_known_urls & previous_known_urls))
+
+                # Safety guard: >50% removal threshold
+                if previous_known_urls and len(removed_urls) > len(previous_known_urls) * 0.5:
+                    logger.warning(
+                        "SAFETY: >50%% of URLs removed (%d of %d) — skipping BOTH "
+                        "cleanup AND snapshot save (possible sitemap fetch failure)",
+                        len(removed_urls), len(previous_known_urls))
+                else:
+                    # Cleanup removed URLs from vector store
+                    if removed_urls and vs_id and vs_cache is not None:
+                        logger.info("Cleaning up %d removed URLs from vector store", len(removed_urls))
+                        deleted, failed_urls = cleanup_removed_urls(removed_urls, vs_id, vs_cache)
+                        logger.info("Cleanup complete: %d files deleted", deleted)
+                        if failed_urls:
+                            logger.warning(
+                                "Adding %d URLs with failed deletions back to snapshot for retry on next run",
+                                len(failed_urls))
+                            current_known_urls.update(failed_urls)
+                    elif removed_urls:
+                        logger.info(
+                            "%d URLs removed from sitemap but no vector store cleanup "
+                            "(no vector store ID or cache)", len(removed_urls))
+
+                    # Save current snapshot
+                    save_known_urls_snapshot(current_known_urls)
 
         # Save timestamps
         if rss_only:

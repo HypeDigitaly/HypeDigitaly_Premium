@@ -1,15 +1,16 @@
 """Content fetching module for GPT Scraper V3.
 
-Jina AI, Firecrawl, and markdown content fetching.  Fixes applied:
+Jina AI, Firecrawl, Playwright, and markdown content fetching.  Fixes applied:
 C1 (partial) mutable default args, C3 debug-level response logging,
 M3 no redundant re-imports, M5 type hints, M8 guarded content preview.
+Provider-sequence-aware raw HTML fetching via ``get_raw_html_content()``.
 """
 from __future__ import annotations
 
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -22,13 +23,41 @@ logger = logging.getLogger(__name__)
 
 _NONE3: Tuple[None, None, None] = (None, None, None)
 
+# Allowed Jina AI API hostnames — prevents leaking the Bearer token to
+# a tampered ``api_url_template`` that points to an attacker-controlled host.
+_JINA_ALLOWED_HOSTS: frozenset[str] = frozenset({"r.jina.ai", "s.jina.ai"})
+
+
+def _validate_jina_api_url(api_url: str) -> bool:
+    """Verify the constructed Jina API URL points to a known Jina host.
+
+    Returns ``True`` when the host is in :data:`_JINA_ALLOWED_HOSTS`,
+    ``False`` otherwise (with an error log).
+    """
+    parsed = urlparse(api_url)
+    if parsed.hostname not in _JINA_ALLOWED_HOSTS:
+        logger.error(
+            "Jina API URL host '%s' is not in allowed hosts %s. "
+            "Refusing to send API key. Check api_url_template in config.",
+            parsed.hostname,
+            _JINA_ALLOWED_HOSTS,
+        )
+        return False
+    return True
+
 
 def get_html_content_via_jina(
     url: str, remove_selectors: Optional[str] = None,
 ) -> Optional[str]:
     """Fetch HTML content via Jina AI API for sitemap processing."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error("Refusing to fetch non-HTTP URL scheme '%s': %s", parsed.scheme, url)
+        return None
     cfg = get_config()
     api_url = cfg.MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
+    if not _validate_jina_api_url(api_url):
+        return None
     headers: Dict[str, str] = {
         "Authorization": f"Bearer {cfg.JINA_AI_API_KEY}",
         "X-Return-Format": "html",
@@ -44,14 +73,20 @@ def get_html_content_via_jina(
         response = get_session().get(api_url, headers=headers, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
-        if response.status_code == 200 and response.text:
+        if response.text:
+            if len(response.text) < 200:
+                logger.warning(
+                    "Jina returned suspiciously short HTML (%d chars) for %s, treating as failure",
+                    len(response.text), url,
+                )
+                return None
             logger.info("Successfully fetched HTML content from %s", url)
             logger.info("HTML content length: %d characters", len(response.text))
             return response.text
-        logger.error("Jina API error for %s: HTTP Status %d", url, response.status_code)
+        logger.error("Jina API returned empty response for %s", url)
         return None
     except requests.exceptions.RequestException as e:
-        logger.error("Request error when fetching HTML from %s: %s", url, e)
+        logger.error("Request error when fetching HTML from %s: %s: %s", url, type(e).__name__, e)
         return None
     except Exception as e:
         logger.error("Unexpected error fetching HTML from %s: %s", url, e)
@@ -62,8 +97,14 @@ def get_html_content_for_pagination_via_jina(
     url: str, remove_selectors: Optional[str] = None,
 ) -> Optional[str]:
     """Fetch HTML content via Jina AI API for pagination detection."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error("Refusing to fetch non-HTTP URL scheme '%s': %s", parsed.scheme, url)
+        return None
     cfg = get_config()
     api_url = cfg.MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
+    if not _validate_jina_api_url(api_url):
+        return None
     headers: Dict[str, str] = {
         "Accept": "application/json",
         "Authorization": f"Bearer {cfg.JINA_AI_API_KEY}",
@@ -79,18 +120,121 @@ def get_html_content_for_pagination_via_jina(
         response = get_session().get(api_url, headers=headers, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
-        if response.status_code == 200 and response.text:
+        if response.text:
+            if len(response.text) < 200:
+                logger.warning(
+                    "Jina returned suspiciously short HTML (%d chars) for pagination %s, treating as failure",
+                    len(response.text), url,
+                )
+                return None
             logger.info("Successfully fetched HTML for pagination check from %s", url)
             logger.info("HTML content length: %d characters", len(response.text))
             return response.text
-        logger.error("Jina API error for pagination check %s: HTTP Status %d", url, response.status_code)
+        logger.error("Jina API returned empty response for pagination check %s", url)
         return None
     except requests.exceptions.RequestException as e:
-        logger.error("Request error when fetching HTML for pagination from %s: %s", url, e)
+        logger.error("Request error when fetching HTML for pagination from %s: %s: %s", url, type(e).__name__, e)
         return None
     except Exception as e:
         logger.error("Unexpected error fetching HTML for pagination from %s: %s", url, e)
         return None
+
+
+def get_raw_html_content(
+    url: str, remove_selectors: Optional[str] = None,
+) -> Optional[str]:
+    """Fetch raw HTML content using configured providers in sequence.
+
+    Iterates through ``cfg.MARKDOWN_PROVIDER_SEQUENCE`` and tries each
+    provider in order until one returns content.  Mirrors the provider
+    iteration pattern used by :func:`get_markdown_content`.
+
+    Supported providers:
+        - **playwright** -- calls ``fetch_playwright_html(url)`` from
+          ``gpt_scraper_v3.playwright_provider``.
+        - **jina** -- delegates to :func:`get_html_content_via_jina`.
+        - **firecrawl** -- skipped with a warning (raw HTML not supported).
+
+    Args:
+        url: The page URL to fetch.
+        remove_selectors: Optional CSS selectors forwarded to the Jina
+            provider for element removal.
+
+    Returns:
+        Raw HTML string on success, or ``None`` if all providers fail.
+    """
+    # SSRF prevention: reject non-HTTP(S) URL schemes (e.g. file://, javascript:)
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error("Refusing to fetch non-HTTP URL scheme '%s': %s", parsed.scheme, url)
+        return None
+
+    cfg = get_config()
+    sequence_ids = [p.strip() for p in cfg.MARKDOWN_PROVIDER_SEQUENCE.split(",") if p.strip()]
+    logger.info("Fetching raw HTML content from: %s", url)
+    logger.info("Using provider sequence: %s", cfg.MARKDOWN_PROVIDER_SEQUENCE)
+
+    if not sequence_ids:
+        logger.error("Provider sequence is empty or invalid.")
+        return None
+
+    for provider_id in sequence_ids:
+        logger.info("Attempting raw HTML fetch with provider: %s", provider_id)
+
+        if provider_id == "playwright":
+            prov_cfg = cfg.MARKDOWN_PROVIDERS.get(provider_id)
+            if not prov_cfg:
+                logger.warning("Provider ID '%s' not found in configuration. Skipping.", provider_id)
+                continue
+            from gpt_scraper_v3.playwright_provider import is_available, fetch_playwright_html
+            if not is_available():
+                logger.warning(
+                    "Playwright is not installed. Skipping provider. "
+                    "Install with: pip install playwright && playwright install chromium"
+                )
+                continue
+            content = fetch_playwright_html(url)
+            if content:
+                logger.info(
+                    "Successfully fetched raw HTML from %s using %s (%d chars)",
+                    url, provider_id, len(content),
+                )
+                return content
+            logger.error("Playwright returned no raw HTML content for %s", url)
+            continue
+
+        elif provider_id == "jina":
+            prov_cfg = cfg.MARKDOWN_PROVIDERS.get(provider_id)
+            if not prov_cfg:
+                logger.warning("Provider ID '%s' not found in configuration. Skipping.", provider_id)
+                continue
+            api_key: Optional[str] = prov_cfg.get("api_key")
+            if prov_cfg.get("requires_api_key", True) and not api_key:
+                logger.error("Missing API key for provider '%s'. Skipping.", provider_id)
+                continue
+            content = get_html_content_via_jina(url, remove_selectors)
+            if content:
+                logger.info(
+                    "Successfully fetched raw HTML from %s using %s (%d chars)",
+                    url, provider_id, len(content),
+                )
+                return content
+            logger.error("Jina returned no raw HTML content for %s", url)
+            continue
+
+        elif provider_id == "firecrawl":
+            logger.warning(
+                "Firecrawl doesn't support raw HTML mode. Skipping provider '%s'.",
+                provider_id,
+            )
+            continue
+
+        else:
+            logger.warning("Unknown provider ID '%s' for raw HTML fetch. Skipping.", provider_id)
+            continue
+
+    logger.error("Failed to fetch raw HTML content for %s from all providers.", url)
+    return None
 
 
 def get_markdown_content(
@@ -101,6 +245,10 @@ def get_markdown_content(
     Returns:
         ``(content, title, metadata, provider_used)`` or all-None tuple.
     """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error("Refusing to fetch non-HTTP URL scheme '%s': %s", parsed.scheme, url)
+        return None, None, None, None
     cfg = get_config()
     logger.info("Fetching markdown content from: %s", url)
     sequence_ids = [p.strip() for p in cfg.MARKDOWN_PROVIDER_SEQUENCE.split(",") if p.strip()]
@@ -194,6 +342,8 @@ def _fetch_jina_markdown(
     """
     cfg = get_config()
     api_url = cfg.MARKDOWN_PROVIDERS["jina"]["api_url_template"].format(url=url)
+    if not _validate_jina_api_url(api_url):
+        return _NONE3
 
     # -- STRATEGY 1: markdown with browser engine + selectors --
     logger.info("STRATEGY 1: Attempting markdown fetch with selectors for %s", url)
@@ -408,6 +558,7 @@ def extract_links_from_jina_summary(
     last_run_timestamp: Optional[datetime] = None,
     local_files_cache: Optional[Dict[str, Any]] = None,
     enable_resume: bool = False,
+    previous_known_urls: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Extract and process links from Jina AI links summary data.
 
@@ -479,6 +630,7 @@ def extract_links_from_jina_summary(
             if should_process_url_with_resume(
                 absolute_url, last_modified, last_run_timestamp,
                 local_files_cache, enable_resume, rss_published_date=None,
+                previous_known_urls=previous_known_urls,
             ):
                 extracted_urls.append({
                     "url": absolute_url, "title": title,

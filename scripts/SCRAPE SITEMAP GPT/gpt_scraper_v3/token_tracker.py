@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-logger: logging.Logger = logging.getLogger("gpt_scraper_v3")
+logger: logging.Logger = logging.getLogger(__name__)
 
 # Token usage accumulator
 global_token_usage: Dict[str, int] = {

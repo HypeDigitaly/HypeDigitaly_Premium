@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
@@ -33,6 +33,7 @@ def extract_links_from_html_sitemap(
     enable_resume: bool = False,
     vector_store_id: Optional[str] = None,
     vector_store_cache: Optional[Dict[str, Any]] = None,
+    previous_known_urls: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Extract links from an HTML sitemap by parsing ``<a>`` anchor tags.
 
@@ -73,6 +74,17 @@ def extract_links_from_html_sitemap(
     if not html_content:
         logger.warning("No HTML content provided for link extraction")
         return extracted_urls
+
+    # Content quality warning — early diagnostic for short/blocked pages
+    content_length = len(html_content)
+    logger.info("HTML sitemap content length: %d characters", content_length)
+    if content_length < 200:
+        logger.warning(
+            "HTML content is suspiciously short (%d chars) — "
+            "anchor extraction will likely find few or no links. "
+            "This may indicate the page was not fully rendered or was blocked.",
+            content_length,
+        )
 
     try:
         soup = BeautifulSoup(html_content, "html.parser")
@@ -125,6 +137,7 @@ def extract_links_from_html_sitemap(
                     rss_published_date=None,
                     vector_store_id=vector_store_id,
                     vector_store_cache=vector_store_cache,
+                    previous_known_urls=previous_known_urls,
                 ):
                     extracted_urls.append({
                         "url": absolute_url,
@@ -218,6 +231,7 @@ def extract_links(
     enable_resume: bool = False,
     vector_store_id: Optional[str] = None,
     vector_store_cache: Optional[Dict[str, Any]] = None,
+    previous_known_urls: Optional[Set[str]] = None,
     _is_root_call: bool = True,
 ) -> List[Dict[str, Any]]:
     """DEPRECATED: Use extract_links_from_html_sitemap instead.
@@ -332,6 +346,7 @@ def extract_links(
                         rss_published_date=None,
                         vector_store_id=vector_store_id,
                         vector_store_cache=vector_store_cache,
+                        previous_known_urls=previous_known_urls,
                     ):
                         extracted_urls.append({
                             "url": absolute_url,
@@ -358,6 +373,7 @@ def extract_links(
                         enable_resume,
                         vector_store_id,
                         vector_store_cache,
+                        previous_known_urls=previous_known_urls,
                         _is_root_call=False,
                     )
                 )
@@ -374,6 +390,7 @@ def extract_links(
                     enable_resume,
                     vector_store_id=vector_store_id,
                     vector_store_cache=vector_store_cache,
+                    previous_known_urls=previous_known_urls,
                     _is_root_call=False,
                 )
             )

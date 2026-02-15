@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from gpt_scraper_v3.config import get_config
 
@@ -168,6 +170,12 @@ def _get_context() -> "BrowserContext":
         "ignore_https_errors": pw_cfg.get("ignore_https_errors", False),
     }
 
+    if context_kwargs["ignore_https_errors"]:
+        logger.warning(
+            "Playwright: ignore_https_errors is enabled — TLS certificate "
+            "verification is DISABLED. Use only for development/testing."
+        )
+
     user_agent = pw_cfg.get("user_agent", "")
     if user_agent:
         context_kwargs["user_agent"] = user_agent
@@ -186,7 +194,13 @@ def _get_context() -> "BrowserContext":
 
     storage_state = pw_cfg.get("storage_state", "")
     if storage_state:
-        context_kwargs["storage_state"] = storage_state
+        if os.path.exists(storage_state):
+            context_kwargs["storage_state"] = storage_state
+        else:
+            logger.warning(
+                "Playwright: storage_state path '%s' does not exist. Ignoring.",
+                storage_state,
+            )
 
     _context = browser.new_context(**context_kwargs)
 
@@ -437,6 +451,16 @@ def fetch_playwright_markdown(
         A ``(markdown, title, metadata)`` tuple on success, or
         ``(None, None, None)`` on any failure.
     """
+    # Reject non-HTTP(S) URLs to prevent SSRF (e.g. file://, javascript:)
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error(
+            "PLAYWRIGHT: Refusing to fetch URL with scheme '%s' — "
+            "only http and https are allowed: %s",
+            parsed.scheme, url,
+        )
+        return (None, None, None)
+
     cfg = get_config()
     pw_cfg = cfg.PLAYWRIGHT_CONFIG
     max_retries = 2
@@ -481,15 +505,16 @@ def fetch_playwright_markdown(
                 # Optional: execute custom JavaScript
                 js_code = pw_cfg.get("javascript_to_execute", "")
                 if js_code:
+                    logger.warning("Executing custom JavaScript from config (security: verify source)")
                     page.evaluate(js_code)
 
                 html = page.content()
-                if not html or len(html.strip()) < 100:
+                if not html or len(html.strip()) < 200:
                     logger.warning(
                         "PLAYWRIGHT: Minimal HTML returned for %s (%d chars)",
                         url, len(html) if html else 0,
                     )
-                    return (None, None, None)
+                    continue
 
                 # Determine selectors
                 r_sel_str = remove_selectors if remove_selectors else pw_cfg.get("remove_selectors", "")
@@ -561,3 +586,142 @@ def fetch_playwright_markdown(
             return (None, None, None)
 
     return (None, None, None)
+
+
+def fetch_playwright_html(url: str) -> Optional[str]:
+    """Fetch *url* via Playwright and return raw HTML content.
+
+    Returns the full page HTML from ``page.content()`` without any markdown
+    conversion or DOM filtering (no ``remove_selectors`` / ``target_selectors``).
+    This preserves all ``<a>`` tags for downstream HTML sitemap link extraction.
+
+    This function NEVER raises exceptions.  All errors are caught internally
+    and logged; on failure the return value is ``None``.
+
+    Retries up to 2 times on ``PlaywrightTimeout`` only.  Other Playwright
+    errors are not retried.
+
+    Args:
+        url: The URL to fetch.
+
+    Returns:
+        Raw HTML string on success, or ``None`` on any failure.
+    """
+    if not _PLAYWRIGHT_AVAILABLE:
+        logger.error(
+            "Playwright is not installed. Cannot fetch HTML. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+        return None
+
+    # Reject non-HTTP(S) URLs to prevent SSRF (e.g. file://, javascript:)
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error(
+            "PLAYWRIGHT HTML: Refusing to fetch URL with scheme '%s' — "
+            "only http and https are allowed: %s",
+            parsed.scheme, url,
+        )
+        return None
+
+    cfg = get_config()
+    pw_cfg = cfg.PLAYWRIGHT_CONFIG
+    max_retries = 2
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            backoff = 2 ** (attempt - 1)
+            logger.info(
+                "PLAYWRIGHT HTML: Retry %d/%d for %s (waiting %ds)",
+                attempt, max_retries, url, backoff,
+            )
+            time.sleep(backoff)
+
+        page: Optional["Page"] = None
+        try:
+            context = _get_context()
+            global _context_page_count
+            _context_page_count += 1
+            page = context.new_page()
+
+            try:
+                nav_timeout = pw_cfg.get("navigation_timeout_ms", 30000)
+                page.set_default_navigation_timeout(nav_timeout)
+
+                wait_until = pw_cfg.get("wait_until", "domcontentloaded")
+                logger.info(
+                    "PLAYWRIGHT HTML: Navigating to %s (wait_until=%s, timeout=%dms)",
+                    url, wait_until, nav_timeout,
+                )
+                page.goto(url, wait_until=wait_until)
+
+                # Optional: wait for specific selector
+                wait_sel = pw_cfg.get("wait_for_selector", "")
+                if wait_sel:
+                    page.wait_for_selector(wait_sel, timeout=10000)
+
+                # Optional: additional fixed wait
+                wait_ms = pw_cfg.get("wait_for_timeout_ms", 0)
+                if wait_ms > 0:
+                    page.wait_for_timeout(wait_ms)
+
+                # Optional: execute custom JavaScript
+                js_code = pw_cfg.get("javascript_to_execute", "")
+                if js_code:
+                    logger.warning("Executing custom JavaScript from config (security: verify source)")
+                    page.evaluate(js_code)
+
+                html = page.content()
+                if not html or len(html.strip()) < 200:
+                    logger.warning(
+                        "PLAYWRIGHT HTML: Minimal HTML returned for %s (%d chars)",
+                        url, len(html) if html else 0,
+                    )
+                    continue
+
+                logger.info(
+                    "PLAYWRIGHT HTML SUCCESS: %s (%d chars)",
+                    url, len(html),
+                )
+                return html
+
+            finally:
+                try:
+                    if page is not None:
+                        page.close()
+                except Exception:
+                    pass
+
+        except PlaywrightTimeout as e:
+            logger.error(
+                "PLAYWRIGHT HTML TIMEOUT for %s (attempt %d/%d): %s",
+                url, attempt + 1, max_retries + 1, e,
+            )
+            if attempt < max_retries:
+                continue
+            return None
+
+        except PlaywrightError as e:
+            error_msg = str(e).lower()
+            if "target page, context or browser has been closed" in error_msg:
+                logger.error(
+                    "PLAYWRIGHT HTML: Browser closed unexpectedly, resetting: %s", e,
+                )
+                _reset_playwright()
+            elif "net::err_name_not_resolved" in error_msg:
+                logger.error("PLAYWRIGHT HTML: DNS error for %s: %s", url, e)
+            elif "net::err_connection_refused" in error_msg:
+                logger.error("PLAYWRIGHT HTML: Connection refused for %s: %s", url, e)
+            elif "executable doesn't exist" in error_msg:
+                logger.error(
+                    "PLAYWRIGHT HTML: Browser not installed. Run: playwright install chromium",
+                )
+            else:
+                logger.error("PLAYWRIGHT HTML error for %s: %s", url, e)
+            return None
+
+        except Exception as e:
+            logger.error("PLAYWRIGHT HTML unexpected error for %s: %s", url, e)
+            return None
+
+    return None
