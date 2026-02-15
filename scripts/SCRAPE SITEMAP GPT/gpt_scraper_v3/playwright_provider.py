@@ -13,6 +13,7 @@ returns ``False`` and the provider is silently skipped.
 from __future__ import annotations
 
 import atexit
+import copy
 import logging
 import os
 import re
@@ -352,6 +353,7 @@ def _html_to_markdown(
     html: str,
     remove_selectors: Optional[List[str]] = None,
     target_selectors: Optional[List[str]] = None,
+    pw_cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     """Convert raw HTML to markdown with optional DOM filtering.
 
@@ -361,10 +363,22 @@ def _html_to_markdown(
         target_selectors: CSS selectors for elements to extract.  If provided,
             only matching elements are converted.  Falls back to the whole
             document when nothing matches.
+        pw_cfg: Playwright config dict controlling image and table behaviour.
+            Recognised keys:
+
+            - ``convert_images_to_alt_text`` (bool, default ``True``): when
+              ``True``, images are converted to ``[Image: alt text]`` markers;
+              when ``False``, ``<img>`` tags are stripped entirely.
+            - ``table_infer_header`` (bool, default ``True``): when ``True``,
+              markdownify receives ``table_infer_header=True`` so headerless
+              HTML tables get an inferred header row.
 
     Returns:
         A ``(markdown_content, title)`` tuple.
     """
+    if pw_cfg is None:
+        pw_cfg = {}
+
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
     soup = BeautifulSoup(html, "html.parser")
@@ -403,12 +417,19 @@ def _html_to_markdown(
     try:
         from markdownify import markdownify as md  # type: ignore[import-untyped]
 
-        markdown = md(
-            str(working_soup),
-            heading_style="ATX",
-            bullets="-",
-            strip=["img", "svg"],
-        )
+        strip_tags = ["svg"]  # Always strip SVG
+        if not pw_cfg.get("convert_images_to_alt_text", True):
+            strip_tags.append("img")
+
+        md_kwargs: Dict[str, Any] = {
+            "heading_style": "ATX",
+            "bullets": "-",
+            "strip": strip_tags,
+        }
+        if pw_cfg.get("table_infer_header", True):
+            md_kwargs["table_infer_header"] = True
+
+        markdown = md(str(working_soup), **md_kwargs)
     except ImportError:
         logger.warning(
             "markdownify not installed, falling back to plain text extraction. "
@@ -418,10 +439,174 @@ def _html_to_markdown(
 
         markdown = html_to_plain_text(str(working_soup))
 
+    # Post-process: convert image markdown to simplified [Image: alt] markers
+    if pw_cfg.get("convert_images_to_alt_text", True):
+
+        def _simplify_image(match: re.Match) -> str:  # type: ignore[type-arg]
+            alt = match.group(1).strip()
+            if len(alt) < 3:
+                return ""
+            return f"[Image: {alt}]"
+
+        markdown = re.sub(
+            r'!\[([^\]]*)\]\([^)]*(?:\s+"[^"]*")?\)', _simplify_image, markdown
+        )
+
     # Post-process: collapse excessive blank lines (max 2 consecutive)
     markdown = re.sub(r"\n{4,}", "\n\n\n", markdown)
 
     return (markdown, title)
+
+
+# ---------------------------------------------------------------------------
+# Page preparation helper
+# ---------------------------------------------------------------------------
+
+
+def _prepare_page(
+    page: "Page",
+    url: str,
+    pw_cfg: dict,
+    include_content_actions: bool = True,
+) -> Optional[str]:
+    """Navigate to *url* and prepare the page for content extraction.
+
+    Centralises the navigation, wait-strategy, cookie-banner dismissal,
+    content-action (scroll / expand), custom JS execution, and HTML capture
+    logic that was previously duplicated across ``fetch_playwright_markdown``
+    and ``fetch_playwright_html``.
+
+    Args:
+        page: An already-created Playwright ``Page`` (navigation timeout
+            should be set by the caller).
+        url: The URL to navigate to.
+        pw_cfg: Playwright configuration dict (from ``ScraperConfig``).
+        include_content_actions: When ``True``, scroll for lazy content and
+            expand collapsible sections after navigation.  ``False`` is used
+            by ``fetch_playwright_html`` which only needs raw HTML.
+
+    Returns:
+        The HTML string on success, or ``None`` if the page returned
+        minimal / empty content (caller should retry).
+    """
+    # -- Navigate -----------------------------------------------------------
+    wait_until = pw_cfg.get("wait_until", "domcontentloaded")
+    page.goto(url, wait_until=wait_until)
+
+    # -- Wait strategy ------------------------------------------------------
+    if pw_cfg.get("smart_wait_enabled", False):
+        from gpt_scraper_v3.playwright_page_actions import wait_for_content_ready
+
+        wait_for_content_ready(page, pw_cfg)
+        # smart wait handles wait_for_selector and wait_for_timeout_ms internally
+    else:
+        # Basic wait -- existing behaviour
+        wait_sel = pw_cfg.get("wait_for_selector", "")
+        if wait_sel:
+            page.wait_for_selector(wait_sel, timeout=10000)
+        wait_ms = pw_cfg.get("wait_for_timeout_ms", 0)
+        if wait_ms > 0:
+            page.wait_for_timeout(wait_ms)
+
+    # -- Cookie banner dismissal (always, regardless of content actions) ----
+    from gpt_scraper_v3.playwright_page_actions import dismiss_cookie_banners
+
+    dismiss_cookie_banners(page, pw_cfg)
+
+    # -- Content actions (gated) --------------------------------------------
+    if include_content_actions:
+        from gpt_scraper_v3.playwright_page_actions import (
+            scroll_for_lazy_content,
+            expand_collapsible_sections,
+        )
+
+        did_scroll = scroll_for_lazy_content(page, pw_cfg)
+        did_expand = expand_collapsible_sections(page, pw_cfg)
+        if did_scroll or did_expand:
+            page.wait_for_timeout(300)
+
+    # -- Custom JS execution ------------------------------------------------
+    js_code = pw_cfg.get("javascript_to_execute", "")
+    if js_code:
+        logger.warning("Executing custom JavaScript from config (security: verify source)")
+        page.evaluate(js_code)
+
+    # -- Capture and validate HTML ------------------------------------------
+    html = page.content()
+    if not html or len(html.strip()) < 200:
+        logger.warning(
+            "PLAYWRIGHT: Minimal HTML for %s (%d chars)",
+            url,
+            len(html) if html else 0,
+        )
+        return None
+
+    return html
+
+
+# ---------------------------------------------------------------------------
+# Content quality assessment + escalation
+# ---------------------------------------------------------------------------
+
+
+def _assess_content_quality(markdown: str, html_length: int, pw_cfg: dict) -> str:
+    """Assess whether markdown extraction produced sufficient content.
+
+    The quality gate is controlled by ``quality_gate_enabled`` in *pw_cfg*.
+    When disabled (the default), this function unconditionally returns
+    ``"good"`` so the caller incurs no overhead.
+
+    Args:
+        markdown: The extracted markdown text.
+        html_length: The length of the raw HTML that was converted.
+        pw_cfg: Playwright configuration dict.
+
+    Returns:
+        ``"good"``, ``"suspect"``, or ``"empty"``.
+    """
+    if not pw_cfg.get("quality_gate_enabled", False):
+        return "good"
+
+    md_len = len(markdown.strip())
+    if md_len == 0:
+        return "empty"
+
+    min_len = pw_cfg.get("quality_gate_min_markdown_length", 100)
+    min_ratio = pw_cfg.get("quality_gate_min_md_html_ratio", 0.02)
+
+    # If HTML itself is small, page is genuinely sparse — accept
+    if html_length < 2000:
+        return "good"
+
+    if md_len < min_len:
+        return "suspect"
+
+    ratio = md_len / html_length if html_length > 0 else 0
+    if ratio < min_ratio:
+        return "suspect"
+
+    return "good"
+
+
+def _escalate_pw_cfg(pw_cfg: dict) -> dict:
+    """Create an escalated copy of *pw_cfg* with more aggressive settings.
+
+    Enables smart wait, auto-scroll, and collapsible expansion, and adds
+    3 000 ms to the existing ``wait_for_timeout_ms``.
+
+    Args:
+        pw_cfg: The original Playwright configuration dict.
+
+    Returns:
+        A deep-copied dict with escalated values.
+    """
+    escalated = copy.deepcopy(pw_cfg)
+    escalated["smart_wait_enabled"] = True
+    escalated["auto_scroll_enabled"] = True
+    escalated["expand_collapsibles_enabled"] = True
+    current_wait = escalated.get("wait_for_timeout_ms", 0)
+    escalated["wait_for_timeout_ms"] = min(current_wait + 3000, 15000)
+    return escalated
 
 
 # ---------------------------------------------------------------------------
@@ -438,8 +623,13 @@ def fetch_playwright_markdown(
     This function NEVER raises exceptions.  All errors are caught internally
     and logged; on failure the return value is ``(None, None, None)``.
 
-    Retries up to 2 times on ``PlaywrightTimeout`` only.  Other Playwright
-    errors are not retried.
+    The inner ``for`` loop retries up to 2 times on ``PlaywrightTimeout``
+    only.  Other Playwright errors are not retried.
+
+    An outer quality-gate loop (max 1 escalation) re-fetches with more
+    aggressive page-interaction settings when the extracted markdown looks
+    suspiciously thin relative to the HTML size.  The quality gate is only
+    active when ``quality_gate_enabled`` is ``True`` in ``PLAYWRIGHT_CONFIG``.
 
     Args:
         url: The URL to fetch.
@@ -451,6 +641,13 @@ def fetch_playwright_markdown(
         A ``(markdown, title, metadata)`` tuple on success, or
         ``(None, None, None)`` on any failure.
     """
+    if not _PLAYWRIGHT_AVAILABLE:
+        logger.error(
+            "Playwright is not installed. Cannot fetch markdown. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+        return (None, None, None)
+
     # Reject non-HTTP(S) URLs to prevent SSRF (e.g. file://, javascript:)
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -463,129 +660,146 @@ def fetch_playwright_markdown(
 
     cfg = get_config()
     pw_cfg = cfg.PLAYWRIGHT_CONFIG
+    active_pw_cfg = pw_cfg  # Will be escalated by quality gate if needed
     max_retries = 2
+    quality_retried = False
 
-    for attempt in range(max_retries + 1):
-        if attempt > 0:
-            backoff = 2 ** (attempt - 1)
-            logger.info(
-                "PLAYWRIGHT: Retry %d/%d for %s (waiting %ds)",
-                attempt, max_retries, url, backoff,
-            )
-            time.sleep(backoff)
+    for _quality_attempt in range(2):  # Outer loop for quality gate (max 1 escalation)
+        result_markdown: Optional[str] = None
+        result_title: Optional[str] = None
+        result_metadata: Optional[Dict[str, Any]] = None
+        last_html_length: int = 0
 
-        page: Optional["Page"] = None
-        try:
-            context = _get_context()
-            global _context_page_count
-            _context_page_count += 1
-            page = context.new_page()
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                backoff = 2 ** (attempt - 1)
+                logger.info(
+                    "PLAYWRIGHT: Retry %d/%d for %s (waiting %ds)",
+                    attempt, max_retries, url, backoff,
+                )
+                time.sleep(backoff)
 
+            page: Optional["Page"] = None
             try:
-                nav_timeout = pw_cfg.get("navigation_timeout_ms", 30000)
-                page.set_default_navigation_timeout(nav_timeout)
+                context = _get_context()
+                global _context_page_count
+                _context_page_count += 1
+                page = context.new_page()
 
-                wait_until = pw_cfg.get("wait_until", "domcontentloaded")
-                logger.info(
-                    "PLAYWRIGHT: Navigating to %s (wait_until=%s, timeout=%dms)",
-                    url, wait_until, nav_timeout,
-                )
-                page.goto(url, wait_until=wait_until)
-
-                # Optional: wait for specific selector
-                wait_sel = pw_cfg.get("wait_for_selector", "")
-                if wait_sel:
-                    page.wait_for_selector(wait_sel, timeout=10000)
-
-                # Optional: additional fixed wait
-                wait_ms = pw_cfg.get("wait_for_timeout_ms", 0)
-                if wait_ms > 0:
-                    page.wait_for_timeout(wait_ms)
-
-                # Optional: execute custom JavaScript
-                js_code = pw_cfg.get("javascript_to_execute", "")
-                if js_code:
-                    logger.warning("Executing custom JavaScript from config (security: verify source)")
-                    page.evaluate(js_code)
-
-                html = page.content()
-                if not html or len(html.strip()) < 200:
-                    logger.warning(
-                        "PLAYWRIGHT: Minimal HTML returned for %s (%d chars)",
-                        url, len(html) if html else 0,
-                    )
-                    continue
-
-                # Determine selectors
-                r_sel_str = remove_selectors if remove_selectors else pw_cfg.get("remove_selectors", "")
-                t_sel_str = pw_cfg.get("target_selectors", "")
-                r_sels = _parse_selectors(r_sel_str)
-                t_sels = _parse_selectors(t_sel_str)
-
-                markdown, title = _html_to_markdown(html, r_sels, t_sels)
-
-                if not markdown or not markdown.strip():
-                    logger.warning(
-                        "PLAYWRIGHT: HTML-to-markdown produced empty result for %s",
-                        url,
-                    )
-                    return (None, None, None)
-
-                metadata: Dict[str, Any] = {
-                    "provider": "playwright",
-                    "browser": pw_cfg.get("browser", "chromium"),
-                    "url": url,
-                    "content_length": len(markdown),
-                }
-
-                logger.info(
-                    "PLAYWRIGHT SUCCESS: %s (%d chars markdown)",
-                    url, len(markdown),
-                )
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Content preview: %.500s", markdown[:500])
-                return (markdown, title, metadata)
-
-            finally:
                 try:
-                    if page is not None:
-                        page.close()
-                except Exception:
-                    pass
+                    nav_timeout = active_pw_cfg.get("navigation_timeout_ms", 30000)
+                    page.set_default_navigation_timeout(nav_timeout)
 
-        except PlaywrightTimeout as e:
-            logger.error(
-                "PLAYWRIGHT TIMEOUT for %s (attempt %d/%d): %s",
-                url, attempt + 1, max_retries + 1, e,
+                    logger.info(
+                        "PLAYWRIGHT: Navigating to %s (wait_until=%s, timeout=%dms)",
+                        url,
+                        active_pw_cfg.get("wait_until", "domcontentloaded"),
+                        nav_timeout,
+                    )
+
+                    html = _prepare_page(page, url, active_pw_cfg, include_content_actions=True)
+                    if html is None:
+                        continue  # retry
+
+                    last_html_length = len(html)
+
+                    # Determine selectors
+                    r_sel_str = remove_selectors if remove_selectors else active_pw_cfg.get("remove_selectors", "")
+                    t_sel_str = active_pw_cfg.get("target_selectors", "")
+                    r_sels = _parse_selectors(r_sel_str)
+                    t_sels = _parse_selectors(t_sel_str)
+
+                    markdown, title = _html_to_markdown(html, r_sels, t_sels, pw_cfg=active_pw_cfg)
+
+                    if not markdown or not markdown.strip():
+                        logger.warning(
+                            "PLAYWRIGHT: HTML-to-markdown produced empty result for %s",
+                            url,
+                        )
+                        logger.debug("Quality gate: skipped (empty markdown)")
+                        return (None, None, None)
+
+                    result_metadata = {
+                        "provider": "playwright",
+                        "browser": active_pw_cfg.get("browser", "chromium"),
+                        "url": url,
+                        "content_length": len(markdown),
+                    }
+
+                    result_markdown = markdown
+                    result_title = title
+
+                    logger.info(
+                        "PLAYWRIGHT SUCCESS: %s (%d chars markdown)",
+                        url, len(markdown),
+                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Content preview: %.500s", markdown[:500])
+                    break  # Success — exit inner retry loop
+
+                finally:
+                    try:
+                        if page is not None:
+                            page.close()
+                    except Exception:
+                        pass
+
+            except PlaywrightTimeout as e:
+                logger.error(
+                    "PLAYWRIGHT TIMEOUT for %s (attempt %d/%d): %s",
+                    url, attempt + 1, max_retries + 1, e,
+                )
+                if attempt < max_retries:
+                    continue
+                # All timeout retries exhausted — result_markdown stays None
+
+            except PlaywrightError as e:
+                error_msg = str(e).lower()
+                if "target page, context or browser has been closed" in error_msg:
+                    logger.error(
+                        "PLAYWRIGHT: Browser closed unexpectedly, resetting: %s", e,
+                    )
+                    _reset_playwright()
+                elif "net::err_name_not_resolved" in error_msg:
+                    logger.error("PLAYWRIGHT: DNS error for %s: %s", url, e)
+                elif "net::err_connection_refused" in error_msg:
+                    logger.error("PLAYWRIGHT: Connection refused for %s: %s", url, e)
+                elif "executable doesn't exist" in error_msg:
+                    logger.error(
+                        "PLAYWRIGHT: Browser not installed. Run: playwright install chromium",
+                    )
+                else:
+                    logger.error("PLAYWRIGHT error for %s: %s", url, e)
+                return (None, None, None)
+
+            except Exception as e:
+                logger.error("PLAYWRIGHT unexpected error for %s: %s", url, e)
+                return (None, None, None)
+
+        # -- After inner retry loop ------------------------------------------
+        if result_markdown is None:
+            return (None, None, None)
+
+        # -- QUALITY GATE ----------------------------------------------------
+        quality = _assess_content_quality(result_markdown, last_html_length, active_pw_cfg)
+        logger.debug(
+            "Quality assessment for %s: %s (%d chars md, %d chars html)",
+            url, quality, len(result_markdown), last_html_length,
+        )
+
+        if quality == "suspect" and not quality_retried:
+            quality_retried = True
+            active_pw_cfg = _escalate_pw_cfg(pw_cfg)
+            logger.warning(
+                "Quality gate: suspect content for %s (%d chars markdown from %d chars HTML), "
+                "retrying with escalated strategy",
+                url, len(result_markdown), last_html_length,
             )
-            if attempt < max_retries:
-                continue
-            return (None, None, None)
+            continue  # Re-enter outer loop with escalated config
 
-        except PlaywrightError as e:
-            error_msg = str(e).lower()
-            if "target page, context or browser has been closed" in error_msg:
-                logger.error(
-                    "PLAYWRIGHT: Browser closed unexpectedly, resetting: %s", e,
-                )
-                _reset_playwright()
-            elif "net::err_name_not_resolved" in error_msg:
-                logger.error("PLAYWRIGHT: DNS error for %s: %s", url, e)
-            elif "net::err_connection_refused" in error_msg:
-                logger.error("PLAYWRIGHT: Connection refused for %s: %s", url, e)
-            elif "executable doesn't exist" in error_msg:
-                logger.error(
-                    "PLAYWRIGHT: Browser not installed. Run: playwright install chromium",
-                )
-            else:
-                logger.error("PLAYWRIGHT error for %s: %s", url, e)
-            return (None, None, None)
+        break  # Quality is good (or already retried) — no need for second iteration
 
-        except Exception as e:
-            logger.error("PLAYWRIGHT unexpected error for %s: %s", url, e)
-            return (None, None, None)
-
-    return (None, None, None)
+    return (result_markdown, result_title, result_metadata)
 
 
 def fetch_playwright_html(url: str) -> Optional[str]:
@@ -648,36 +862,16 @@ def fetch_playwright_html(url: str) -> Optional[str]:
                 nav_timeout = pw_cfg.get("navigation_timeout_ms", 30000)
                 page.set_default_navigation_timeout(nav_timeout)
 
-                wait_until = pw_cfg.get("wait_until", "domcontentloaded")
                 logger.info(
                     "PLAYWRIGHT HTML: Navigating to %s (wait_until=%s, timeout=%dms)",
-                    url, wait_until, nav_timeout,
+                    url,
+                    pw_cfg.get("wait_until", "domcontentloaded"),
+                    nav_timeout,
                 )
-                page.goto(url, wait_until=wait_until)
 
-                # Optional: wait for specific selector
-                wait_sel = pw_cfg.get("wait_for_selector", "")
-                if wait_sel:
-                    page.wait_for_selector(wait_sel, timeout=10000)
-
-                # Optional: additional fixed wait
-                wait_ms = pw_cfg.get("wait_for_timeout_ms", 0)
-                if wait_ms > 0:
-                    page.wait_for_timeout(wait_ms)
-
-                # Optional: execute custom JavaScript
-                js_code = pw_cfg.get("javascript_to_execute", "")
-                if js_code:
-                    logger.warning("Executing custom JavaScript from config (security: verify source)")
-                    page.evaluate(js_code)
-
-                html = page.content()
-                if not html or len(html.strip()) < 200:
-                    logger.warning(
-                        "PLAYWRIGHT HTML: Minimal HTML returned for %s (%d chars)",
-                        url, len(html) if html else 0,
-                    )
-                    continue
+                html = _prepare_page(page, url, pw_cfg, include_content_actions=False)
+                if html is None:
+                    continue  # retry
 
                 logger.info(
                     "PLAYWRIGHT HTML SUCCESS: %s (%d chars)",

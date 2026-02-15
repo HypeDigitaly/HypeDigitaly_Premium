@@ -5,7 +5,7 @@
 - For subagents, you MUST always use Opus 4.6
 - Always use Opus 4.6
 # currentDate
-Today's date is 2026-02-14.
+Today's date is 2026-02-15.
 
 ## V3 Architecture
 - V3 is a modular rewrite of V2 (single 9,304-line file -> 21 modules in gpt_scraper_v3/)
@@ -69,6 +69,71 @@ deleted from the OpenAI vector store.
 - `vector_store.py` -- Added `cleanup_removed_urls()` with inverted index and failure tracking
 - `cli.py` -- Orchestrates full snapshot lifecycle: load, pass, diff, safety guards, cleanup, save
 
+### Playwright Page Actions (added 2026-02-15)
+Six configurable features in `PLAYWRIGHT_CONFIG` to improve markdown scraping quality.
+All default to OFF for backward compatibility.
+
+**Pipeline order:**
+navigate -> smart wait -> cookie dismiss -> scroll -> expand -> settle -> custom JS -> capture HTML -> convert to markdown -> quality gate
+
+**Features and config keys:**
+
+1. **Smart Wait (DOM Stability Detection)** -- Waits for `networkidle`, then polls
+   `document.body.innerText.length` until stable across consecutive rounds.
+   - `smart_wait_enabled`: false
+   - `smart_wait_stability_rounds`: 3
+   - `smart_wait_stability_interval_ms`: 500
+
+2. **Auto-Scroll** -- Scrolls viewport-by-viewport to trigger lazy-loaded content.
+   Stops when `document.body.scrollHeight` stabilises or max scrolls reached.
+   Scrolls back to top when finished.
+   - `auto_scroll_enabled`: false
+   - `auto_scroll_max_scrolls`: 20
+   - `auto_scroll_step_delay_ms`: 200
+
+3. **Quality Gate** -- After markdown extraction, compares markdown length to HTML length.
+   If the ratio is "suspect", automatically retries with escalated settings (enables
+   smart wait + scroll + expand + extra 3s wait, capped at 15s). Maximum 1 escalation retry.
+   - `quality_gate_enabled`: false
+   - `quality_gate_min_markdown_length`: 100
+   - `quality_gate_min_md_html_ratio`: 0.02
+
+4. **Expand Collapsibles** -- Opens `<details>` elements, clicks `aria-expanded="false"`
+   toggles, `data-toggle="collapse"` elements, and accordion class patterns. Excludes
+   `<a>` tags to prevent navigation. Supports custom selectors.
+   - `expand_collapsibles_enabled`: false
+   - `expand_collapsibles_selectors`: "" (uses built-in heuristics when empty)
+   - `expand_collapsibles_wait_ms`: 500
+
+5. **Markdownify Improvements** -- Dynamic `strip_tags` (conditionally strips `<img>`),
+   `table_infer_header` support, and post-processing that converts `![alt](url)` to
+   `[Image: alt text]` markers (alt text < 3 chars is dropped entirely).
+   - `convert_images_to_alt_text`: true
+   - `table_infer_header`: true
+
+6. **Cookie Banner Dismissal** -- Tries 8 built-in CMP selectors (Cookiebot, OneTrust,
+   CookieFirst, CookieYes, Complianz, CookieConsent, generic) or custom selectors from
+   config. Clicks the first match with a 2s timeout per selector.
+   - `dismiss_cookie_banners`: false
+   - `cookie_banner_selectors`: "" (uses 8 built-in CMP selectors when empty)
+
+**Architecture notes:**
+- `_prepare_page()` in `playwright_provider.py` centralises navigate -> wait -> cookie ->
+  scroll -> expand -> JS -> capture. Returns `Optional[str]` (HTML) or `None` for retry.
+- `_escalate_pw_cfg()` uses `copy.deepcopy()` with wait cap of 15000ms.
+- Quality gate: outer `for _quality_attempt in range(2)` loop, inner retry loop for timeouts.
+- All page action functions never raise -- errors logged internally, execution continues.
+- Lazy imports in `_prepare_page()` avoid circular dependencies with `playwright_page_actions`.
+
+**Files created/modified:**
+- `playwright_page_actions.py` (NEW, ~335 lines) -- Four page interaction functions:
+  `wait_for_content_ready()`, `dismiss_cookie_banners()`, `scroll_for_lazy_content()`,
+  `expand_collapsible_sections()`
+- `playwright_provider.py` -- Refactored `_html_to_markdown()` with pw_cfg parameter,
+  extracted `_prepare_page()` helper, added `_assess_content_quality()` and `_escalate_pw_cfg()`,
+  restructured `fetch_playwright_markdown()` with quality gate outer loop
+- `config.py` -- Added 16 new fields to `PLAYWRIGHT_CONFIG` dict
+
 ## Key Files
 - `scrape_sitemap_GPT_v2.py` - Original V2 script (reference)
 - `gpt_scraper_v3/config.py` - Config dataclass + loading (replaces 40+ globals)
@@ -76,5 +141,7 @@ deleted from the OpenAI vector store.
 - `gpt_scraper_v3/xml_sitemap.py` - XML sitemap parsing, timestamps, known URLs snapshot
 - `gpt_scraper_v3/url_processing.py` - URL eligibility logic (lastmod, resume, new-URL detection)
 - `gpt_scraper_v3/vector_store.py` - OpenAI vector store operations + removed URL cleanup
+- `gpt_scraper_v3/playwright_provider.py` - Playwright browser automation, markdown conversion, quality gate
+- `gpt_scraper_v3/playwright_page_actions.py` - Page interaction functions (smart wait, cookie dismiss, scroll, expand)
 - `run_gpt_scraper_v3.py` - Entry point
 - `scrape_sitemap_GPT_config_*_v3.json` - V3 config files per site

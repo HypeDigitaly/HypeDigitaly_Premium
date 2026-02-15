@@ -528,6 +528,34 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
             "ignore_https_errors": pw_raw.get("ignore_https_errors", False),
             "executable_path": pw_raw.get("executable_path", ""),
             "context_pages_limit": pw_raw.get("context_pages_limit", 500),
+
+            # Smart Wait (A)
+            "smart_wait_enabled": pw_raw.get("smart_wait_enabled", False),
+            "smart_wait_stability_rounds": pw_raw.get("smart_wait_stability_rounds", 3),
+            "smart_wait_stability_interval_ms": pw_raw.get("smart_wait_stability_interval_ms", 500),
+
+            # Auto-Scroll (B)
+            "auto_scroll_enabled": pw_raw.get("auto_scroll_enabled", False),
+            "auto_scroll_max_scrolls": pw_raw.get("auto_scroll_max_scrolls", 20),
+            "auto_scroll_step_delay_ms": pw_raw.get("auto_scroll_step_delay_ms", 200),
+
+            # Quality Gate (C)
+            "quality_gate_enabled": pw_raw.get("quality_gate_enabled", False),
+            "quality_gate_min_markdown_length": pw_raw.get("quality_gate_min_markdown_length", 100),
+            "quality_gate_min_md_html_ratio": pw_raw.get("quality_gate_min_md_html_ratio", 0.02),
+
+            # Expand Collapsibles (D)
+            "expand_collapsibles_enabled": pw_raw.get("expand_collapsibles_enabled", False),
+            "expand_collapsibles_selectors": pw_raw.get("expand_collapsibles_selectors", ""),
+            "expand_collapsibles_wait_ms": pw_raw.get("expand_collapsibles_wait_ms", 500),
+
+            # Markdownify (E)
+            "convert_images_to_alt_text": pw_raw.get("convert_images_to_alt_text", True),
+            "table_infer_header": pw_raw.get("table_infer_header", True),
+
+            # Cookie Banners (F)
+            "dismiss_cookie_banners": pw_raw.get("dismiss_cookie_banners", False),
+            "cookie_banner_selectors": pw_raw.get("cookie_banner_selectors", ""),
         }
         cfg.MARKDOWN_PROVIDERS["playwright"] = {
             "name": "playwright",
