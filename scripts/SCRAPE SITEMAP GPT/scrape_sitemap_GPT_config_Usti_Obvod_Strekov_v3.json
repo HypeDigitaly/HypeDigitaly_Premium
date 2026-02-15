@@ -1,0 +1,102 @@
+{
+  "website": {
+    "base_url": "https://www.strekov.cz/cz/",
+    "sitemap_url": "https://www.strekov.cz/cz/mapa-serveru.html",
+    "xml_sitemap_url": "https://www.strekov.cz/sitemap.xml",
+    "blacklisted_urls": [],
+    "rss_feeds": [
+      "https://www.strekov.cz/cz/rss-kanal.html"
+    ],
+    "recursive_urls": [],
+    "paginated_urls": [],
+    "test_urls": [],
+    "blacklisted_relative_url_paths": [],
+    "IncludeBaseURL": 0
+  },
+  "api_keys": {
+    "jina_ai": "REMOVED-JINA-KEY",
+    "firecrawl": "REMOVED-FIRECRAWL-KEY",
+    "openai": "REMOVED-OPENAI-KEY",
+    "openrouter": "REMOVED-OPENROUTER-KEY"
+  },
+  "openrouter": {
+    "max_tokens": 64000,
+    "target_language": "Czech",
+    "models": [
+      "google/gemini-3-flash-preview",
+      "openai/gpt-4.1-mini"
+    ],
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "fallback_enabled": true,
+    "timeout_seconds": 120,
+    "enable_caching": false,
+    "cache_type": "ephemeral",
+    "provider": {}
+  },
+  "content_providers": {
+    "jina": {
+      "name": "jina",
+      "remove_selectors": "header, footer, aside",
+      "target_selectors": "main, #main, .main"
+    },
+    "firecrawl": {
+      "name": "firecrawl"
+    },
+    "playwright": {
+      "browser": "chromium",
+      "headless": true,
+      "stealth": true,
+      "viewport": {"width": 1920, "height": 1080},
+      "user_agent": "",
+      "locale": "cs-CZ",
+      "timezone_id": "Europe/Prague",
+      "extra_http_headers": {},
+      "remove_selectors": "header, footer, aside",
+      "target_selectors": "main, #main, .main",
+      "wait_until": "domcontentloaded",
+      "wait_for_selector": "",
+      "wait_for_timeout_ms": 0,
+      "navigation_timeout_ms": 30000,
+      "javascript_to_execute": "",
+      "block_resources": ["image", "font", "media"],
+      "block_urls": [],
+      "cookies": [],
+      "storage_state": "",
+      "ignore_https_errors": false,
+      "executable_path": "",
+      "context_pages_limit": 500
+    },
+    "provider_sequence": "playwright,jina,firecrawl"
+  },
+  "vector_store": {
+    "id": "vs_68d0542823a08191849e93a01d716032",
+    "enable_deduplication": true,
+    "chunking_strategy": "static",
+    "max_chunk_size": 4096,
+    "chunk_overlap": 0,
+    "content_token_offset": 500,
+    "content_ratio": 0.5
+  },
+  "http_settings": {
+    "request_timeout": 150,
+    "retry_codes": [
+      500,
+      502,
+      503,
+      504,
+      524
+    ],
+    "retry_count": 3,
+    "backoff_factor": 0.3
+  },
+  "processing": {
+    "check_last_modified": 1,
+    "max_filename_length": 200,
+    "RSSDateThreshold": "01-01-2025"
+  },
+  "script_info": {
+    "name": "scrape_sitemap_GPT_v3",
+    "version": "3.0.0"
+  }
+}
