@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(git log:*)",
+      "Bash(gh repo view:*)",
+      "Bash(pip index:*)",
+      "Bash(playwright install:*)",
+      "Bash(gh api:*)"
+    ]
+  }
+}
