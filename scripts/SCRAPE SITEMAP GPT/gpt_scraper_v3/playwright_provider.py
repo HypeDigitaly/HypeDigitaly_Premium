@@ -610,6 +610,22 @@ def _escalate_pw_cfg(pw_cfg: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Retryable network errors (Chromium net:: errors that are transient)
+# ---------------------------------------------------------------------------
+
+_RETRYABLE_NET_ERRORS = (
+    "net::err_connection_timed_out",
+    "net::err_connection_reset",
+    "net::err_timed_out",
+    "net::err_connection_closed",
+    "net::err_connection_aborted",
+    "net::err_network_changed",
+    "net::err_socket_not_connected",
+    "net::err_http2_ping_failed",
+)
+
+
+# ---------------------------------------------------------------------------
 # Main fetch function
 # ---------------------------------------------------------------------------
 
@@ -755,6 +771,19 @@ def fetch_playwright_markdown(
 
             except PlaywrightError as e:
                 error_msg = str(e).lower()
+
+                # Retryable transient network errors
+                if any(net_err in error_msg for net_err in _RETRYABLE_NET_ERRORS):
+                    logger.error(
+                        "PLAYWRIGHT: Transient network error for %s (attempt %d/%d): %s",
+                        url, attempt + 1, max_retries + 1, e,
+                    )
+                    if attempt < max_retries:
+                        continue
+                    # All retries exhausted
+                    return (None, None, None)
+
+                # Non-retryable errors
                 if "target page, context or browser has been closed" in error_msg:
                     logger.error(
                         "PLAYWRIGHT: Browser closed unexpectedly, resetting: %s", e,
@@ -897,6 +926,18 @@ def fetch_playwright_html(url: str) -> Optional[str]:
 
         except PlaywrightError as e:
             error_msg = str(e).lower()
+
+            # Retryable transient network errors
+            if any(net_err in error_msg for net_err in _RETRYABLE_NET_ERRORS):
+                logger.error(
+                    "PLAYWRIGHT HTML: Transient network error for %s (attempt %d/%d): %s",
+                    url, attempt + 1, max_retries + 1, e,
+                )
+                if attempt < max_retries:
+                    continue
+                return None
+
+            # Non-retryable errors
             if "target page, context or browser has been closed" in error_msg:
                 logger.error(
                     "PLAYWRIGHT HTML: Browser closed unexpectedly, resetting: %s", e,
