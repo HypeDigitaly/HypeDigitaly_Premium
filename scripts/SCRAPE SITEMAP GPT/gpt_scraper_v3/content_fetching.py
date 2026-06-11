@@ -8,6 +8,7 @@ Provider-sequence-aware raw HTML fetching via ``get_raw_html_content()``.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -17,7 +18,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from gpt_scraper_v3.config import get_config
-from gpt_scraper_v3.utilities import get_session, is_url_blacklisted_by_path
+from gpt_scraper_v3.rate_limiter import get_rate_limiter
+from gpt_scraper_v3.utilities import get_session, is_url_blacklisted_by_path, strip_url_fragment
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,106 @@ _NONE3: Tuple[None, None, None] = (None, None, None)
 # Allowed Jina AI API hostnames — prevents leaking the Bearer token to
 # a tampered ``api_url_template`` that points to an attacker-controlled host.
 _JINA_ALLOWED_HOSTS: frozenset[str] = frozenset({"r.jina.ai", "s.jina.ai"})
+
+# ---------------------------------------------------------------------------
+# Provider-agnostic markdown boilerplate scrubber
+# ---------------------------------------------------------------------------
+
+# Known Czech language-name tokens that appear in the Google-Translate language
+# wall (a long, space-less concatenation of every selectable language). These
+# are used ONLY to positively identify the unmistakable translate widget; they
+# are deliberately distinctive so we never touch real prose.
+_TRANSLATE_LANG_TOKENS: Tuple[str, ...] = (
+    "abcházština", "acehština", "afrikánština", "albánština", "amharština",
+    "angličtina", "arabština", "bulharština", "čeština", "dánština",
+    "francouzština", "italština", "japonština", "korejština", "maďarština",
+    "němčina", "nizozemština", "polština", "portugalština", "ruština",
+    "slovenština", "španělština", "švédština", "ukrajinština", "zulština",
+    "zulu",
+)
+
+# A "language wall" is a very long alphabetic run with no whitespace. We require
+# it to be long AND to contain at least two known language tokens so that ordinary
+# long words / URLs / hashes are never mistaken for it.
+_LANG_WALL_MIN_LEN: int = 200
+_LANG_WALL_RE = re.compile(r"[^\W\d_]{%d,}" % _LANG_WALL_MIN_LEN, re.UNICODE)
+
+
+def scrub_boilerplate_markdown(md: str) -> str:
+    """Conservatively remove unmistakable Google-Translate boilerplate from markdown.
+
+    Two narrowly-targeted scrubs are applied:
+
+    a) The concatenated Google-Translate language-name run (a very long,
+       whitespace-free alphabetic run such as ``"abcházštinaacehština...zulu"``).
+       A line is dropped only when it contains such a run AND at least two known
+       Czech language tokens — making false positives effectively impossible.
+    b) The Google Translator widget header (``## Google Translator``) and its
+       immediately-following language-selector artifacts (``[Vyberte jazyk``,
+       ``původní jazyk``).
+
+    The function is SAFE-BY-DEFAULT: if nothing matches, *md* is returned
+    unchanged. It never raises — any unexpected error returns the input intact.
+
+    Args:
+        md: Markdown content from any provider.
+
+    Returns:
+        Scrubbed markdown, or the original string if nothing matched / on error.
+    """
+    if not md:
+        return md
+    try:
+        lines = md.split("\n")
+        out: List[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            lowered = line.lower()
+
+            # (a) Drop the Google-Translate language wall line.
+            wall_match = _LANG_WALL_RE.search(line)
+            if wall_match:
+                run = wall_match.group(0).lower()
+                token_hits = sum(1 for tok in _TRANSLATE_LANG_TOKENS if tok in run)
+                if token_hits >= 2:
+                    # Unmistakable translate language wall — drop this line.
+                    i += 1
+                    continue
+
+            # (b) Drop the "## Google Translator" header and immediately-following
+            #     language-selector artifacts.
+            stripped = line.strip()
+            if re.match(r"^#{1,6}\s*google\s+translator\b", lowered.strip()):
+                i += 1
+                # Skip following blank lines and translator-selector artifacts.
+                while i < n:
+                    nxt = lines[i].strip()
+                    nxt_low = nxt.lower()
+                    if not nxt:
+                        i += 1
+                        continue
+                    if (
+                        nxt_low.startswith("[vyberte jazyk")
+                        or nxt_low.startswith("vyberte jazyk")
+                        or "původní jazyk" in nxt_low
+                    ):
+                        i += 1
+                        continue
+                    break
+                continue
+
+            out.append(line)
+            i += 1
+
+        scrubbed = "\n".join(out)
+        # Collapse any excessive blank lines introduced by removals.
+        scrubbed = re.sub(r"\n{4,}", "\n\n\n", scrubbed)
+        return scrubbed
+    except Exception as exc:  # never raise — boilerplate scrub is best-effort
+        logger.debug("scrub_boilerplate_markdown failed, returning input: %s", exc)
+        return md
 
 
 def _validate_jina_api_url(api_url: str) -> bool:
@@ -70,7 +172,8 @@ def get_html_content_via_jina(
         logger.debug("Using remove selectors for HTML: %s", selectors)
     logger.info("Fetching HTML content with links summary from: %s", url)
     try:
-        response = get_session().get(api_url, headers=headers, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=headers, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
         if response.text:
@@ -117,7 +220,8 @@ def get_html_content_for_pagination_via_jina(
         logger.debug("Using remove selectors for pagination HTML: %s", selectors)
     logger.info("PAGINATION CHECK: Fetching HTML for pagination detection from: %s", url)
     try:
-        response = get_session().get(api_url, headers=headers, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=headers, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
         if response.text:
@@ -298,6 +402,7 @@ def get_markdown_content(
                     # Playwright handles retries internally — break out of retry loop
                     if content:
                         logger.info("Successfully fetched markdown from %s using playwright", url)
+                        content = scrub_boilerplate_markdown(content)
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.debug("Content preview: %.500s", content[:500])
                         return content, title, metadata, provider_name
@@ -305,6 +410,7 @@ def get_markdown_content(
                     break  # Try next provider
                 if content:
                     logger.info("Successfully fetched markdown from %s using %s", url, provider_name)
+                    content = scrub_boilerplate_markdown(content)
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug("Content preview: %.500s", content[:500])
                     return content, title, metadata, provider_name
@@ -363,7 +469,8 @@ def _fetch_jina_markdown(
         logger.debug("Using target selectors: %s", cfg.JINA_TARGET_SELECTORS)
 
     try:
-        response = get_session().get(api_url, headers=hdrs, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=hdrs, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
         data = response.json()
@@ -380,11 +487,13 @@ def _fetch_jina_markdown(
         if e.response is not None and e.response.status_code == 422:
             logger.warning("STRATEGY 1 FAILED: 422 with selectors - trying without selectors")
         else:
-            logger.error("STRATEGY 1 FAILED: HTTP %s - %s", getattr(e.response, "status_code", "?"), e)
-            raise
+            # Bug 9: non-422 errors fall through to the next strategy instead of aborting
+            # the whole chain (strategies 4-5 already swallow). A hard 500 here may now
+            # ultimately succeed via a later strategy (possibly plain-text quality).
+            logger.warning("STRATEGY 1 FAILED: HTTP %s - %s - falling through to STRATEGY 2",
+                           getattr(e.response, "status_code", "?"), e)
     except Exception as e:
-        logger.error("STRATEGY 1 FAILED: %s", e)
-        raise
+        logger.warning("STRATEGY 1 FAILED: %s - falling through to STRATEGY 2", e)
 
     # -- STRATEGY 2: markdown with browser engine WITHOUT selectors --
     logger.info("STRATEGY 2: Attempting markdown fetch WITHOUT selectors for %s", url)
@@ -396,7 +505,8 @@ def _fetch_jina_markdown(
         "X-Proxy": "auto",
     }
     try:
-        response = get_session().get(api_url, headers=hdrs_plain, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=hdrs_plain, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
         data = response.json()
@@ -413,11 +523,11 @@ def _fetch_jina_markdown(
         if e.response is not None and e.response.status_code == 422:
             logger.warning("STRATEGY 2 FAILED: 422 without selectors - trying default HTTP fetcher")
         else:
-            logger.error("STRATEGY 2 FAILED: HTTP %s - %s", getattr(e.response, "status_code", "?"), e)
-            raise
+            # Bug 9: non-422 errors fall through to STRATEGY 3 instead of aborting the chain.
+            logger.warning("STRATEGY 2 FAILED: HTTP %s - %s - falling through to STRATEGY 3",
+                           getattr(e.response, "status_code", "?"), e)
     except Exception as e:
-        logger.error("STRATEGY 2 FAILED: %s", e)
-        raise
+        logger.warning("STRATEGY 2 FAILED: %s - falling through to STRATEGY 3", e)
 
     # -- STRATEGY 3: markdown with DEFAULT HTTP fetcher (no browser engine) --
     # When browser engine returns empty content it usually means the headless
@@ -430,7 +540,8 @@ def _fetch_jina_markdown(
         "X-Return-Format": "markdown",
     }
     try:
-        response = get_session().get(api_url, headers=hdrs_default, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=hdrs_default, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response preview: %.500s", response.text[:500])
         data = response.json()
@@ -445,11 +556,11 @@ def _fetch_jina_markdown(
         if e.response is not None and e.response.status_code == 422:
             logger.warning("STRATEGY 3 FAILED: 422 with default fetcher - trying HTML fallbacks")
         else:
-            logger.error("STRATEGY 3 FAILED: HTTP %s - %s", getattr(e.response, "status_code", "?"), e)
-            raise
+            # Bug 9: non-422 errors fall through to STRATEGY 4 instead of aborting the chain.
+            logger.warning("STRATEGY 3 FAILED: HTTP %s - %s - falling through to STRATEGY 4",
+                           getattr(e.response, "status_code", "?"), e)
     except Exception as e:
-        logger.error("STRATEGY 3 FAILED: %s", e)
-        raise
+        logger.warning("STRATEGY 3 FAILED: %s - falling through to STRATEGY 4", e)
 
     # -- STRATEGY 4: HTML with browser engine + text extraction --
     logger.info("STRATEGY 4: Fetching HTML (browser engine) and extracting text content for %s", url)
@@ -461,7 +572,8 @@ def _fetch_jina_markdown(
         "X-Proxy": "auto",
     }
     try:
-        response = get_session().get(api_url, headers=hdrs_html, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=hdrs_html, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response status: %d, length: %d chars", response.status_code, len(response.text))
         data = response.json()
@@ -492,7 +604,8 @@ def _fetch_jina_markdown(
         "X-Return-Format": "html",
     }
     try:
-        response = get_session().get(api_url, headers=hdrs_html_default, timeout=cfg.REQUEST_TIMEOUT)
+        with get_rate_limiter().acquire(api_url):
+            response = get_session().get(api_url, headers=hdrs_html_default, timeout=cfg.REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.debug("Response status: %d, length: %d chars", response.status_code, len(response.text))
         data = response.json()
@@ -536,7 +649,8 @@ def _fetch_firecrawl_markdown(
         "url": url, "formats": ["markdown"],
         "onlyMainContent": True, "parsePDF": True, "maxAge": 14400000,
     }
-    response = get_session().post(api_url, headers=headers, json=payload, timeout=cfg.REQUEST_TIMEOUT)
+    with get_rate_limiter().acquire(api_url):
+        response = get_session().post(api_url, headers=headers, json=payload, timeout=cfg.REQUEST_TIMEOUT)
     response.raise_for_status()
     data = response.json()
     if response.status_code == 200 and data.get("success") and data.get("data"):
@@ -610,7 +724,7 @@ def extract_links_from_jina_summary(
                 logger.debug("Skipping link %d: No URL found in %s", i, link_info)
                 continue
 
-            absolute_url = urljoin(cfg.BASE_URL, link_url)
+            absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, link_url))
             parsed_url = urlparse(absolute_url)
             if parsed_url.netloc not in (cfg.BASE_NETLOC, cfg.NON_WWW_BASE_NETLOC):
                 logger.debug("Skipping external URL: %s", absolute_url)

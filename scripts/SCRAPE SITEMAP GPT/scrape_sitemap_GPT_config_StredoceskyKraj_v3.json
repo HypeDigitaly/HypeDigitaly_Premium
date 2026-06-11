@@ -57,7 +57,7 @@
       "wait_until": "domcontentloaded",
       "wait_for_selector": "",
       "wait_for_timeout_ms": 0,
-      "navigation_timeout_ms": 30000,
+      "navigation_timeout_ms": 80000,
       "javascript_to_execute": "",
       "block_resources": ["image", "font", "media"],
       "block_urls": [],
@@ -78,7 +78,7 @@
       "expand_collapsibles_enabled": false,
       "expand_collapsibles_selectors": "",
       "expand_collapsibles_wait_ms": 500,
-      "convert_images_to_alt_text": true,
+      "image_handling": "markdown",
       "table_infer_header": true,
       "dismiss_cookie_banners": true,
       "cookie_banner_selectors": ""
@@ -86,7 +86,7 @@
     "provider_sequence": "playwright,jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_6991a9ed6e6c81919b3185c06490ed48",
+    "id": "vs_6992168b5a48819193f09cc2a723a8e7",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
@@ -105,6 +105,16 @@
     ],
     "retry_count": 3,
     "backoff_factor": 0.3
+  },
+  "parallelism": {
+    "workers": 6,
+    "max_concurrent_per_domain": 4,
+    "min_interval_ms": 1000,
+    "api_max_concurrent": 12,
+    "rate_limit_enabled": true,
+    "aux_workers": 8,
+    "api_retry_max_attempts": 2,
+    "api_retry_cap_seconds": 60
   },
   "processing": {
     "check_last_modified": 1,

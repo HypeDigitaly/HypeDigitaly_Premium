@@ -32,7 +32,11 @@ def setup_logging(cfg: ScraperConfig) -> None:
     logger.handlers.clear()
     logger.propagate = False  # Prevent duplicate console output via root logger
 
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    # F1: include the thread name so per-URL lines under parallel workers are
+    # attributable to a worker. Shared by both file + console handlers below.
+    formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s"
+    )
 
     file_handler = RotatingFileHandler(
         cfg.LOG_FILE,

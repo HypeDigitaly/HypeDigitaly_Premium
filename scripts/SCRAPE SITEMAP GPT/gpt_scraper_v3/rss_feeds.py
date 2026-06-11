@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
 from gpt_scraper_v3.config import get_config
-from gpt_scraper_v3.utilities import get_session, is_url_blacklisted_by_path
+from gpt_scraper_v3.rate_limiter import get_rate_limiter
+from gpt_scraper_v3.utilities import (
+    get_session, is_url_blacklisted_by_path, normalize_url_query_params,
+    strip_url_fragment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +35,12 @@ def parse_rss_feed(rss_url: str) -> List[Dict[str, Any]]:
     cfg = get_config()
     logger.info("Parsing RSS feed: %s", rss_url)
     try:
-        response = get_session().get(rss_url, timeout=cfg.REQUEST_TIMEOUT)
-        response.raise_for_status()
-        raw_content: bytes = response.content
+        # Politeness rate limiter keyed by the feed URL (pacing across feeds is
+        # intended when parse_rss_feed is called concurrently).
+        with get_rate_limiter().acquire(rss_url):
+            response = get_session().get(rss_url, timeout=cfg.REQUEST_TIMEOUT)
+            response.raise_for_status()
+            raw_content: bytes = response.content
         # Remove chrome-extension script tags that corrupt XML parsing
         if b"chrome-extension://" in raw_content or b"<script" in raw_content:
             content_str = raw_content.decode("utf-8", errors="ignore")
@@ -87,7 +95,7 @@ def parse_atom_feed(soup: BeautifulSoup, rss_url: str) -> List[Dict[str, Any]]:
             if link_elem:
                 url = link_elem.get("href")
                 if url:
-                    absolute_url = urljoin(cfg.BASE_URL, url)
+                    absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, url))
                     title_elem = entry.find("title")
                     title = title_elem.text.strip() if title_elem else "No title"
                     published_elem = (
@@ -137,7 +145,7 @@ def parse_rss_2_0_feed(soup: BeautifulSoup, rss_url: str) -> List[Dict[str, Any]
             if not url:
                 logger.debug("Skipping RSS 2.0 item: No valid URL in <link>, <guid>, or <id>.")
                 continue
-            absolute_url = urljoin(cfg.BASE_URL, url)
+            absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, url))
             title_elem = item.find("title")
             title = title_elem.text.strip() if title_elem else "No title"
             published_elem = (
@@ -180,7 +188,7 @@ def parse_events_feed(soup: BeautifulSoup, rss_url: str) -> List[Dict[str, Any]]
             url = details.find("url").text.strip()
             if not url:
                 continue
-            absolute_url = urljoin(cfg.BASE_URL, url)
+            absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, url))
             # Event ID
             event_id_elem = event.find("id")
             event_id = event_id_elem.text.strip() if event_id_elem else "Unknown"
@@ -336,7 +344,7 @@ def parse_custom_response_feed(soup: BeautifulSoup, rss_url: str) -> List[Dict[s
                     i, link_elem,
                 )
                 continue
-            absolute_url = urljoin(cfg.BASE_URL, url)
+            absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, url))
             logger.debug("Item %d: Converted to absolute URL: %s", i, absolute_url)
             title_elem = item.find("title")
             title = title_elem.get_text(strip=True) if title_elem else "No title"
@@ -426,12 +434,31 @@ def process_rss_feeds(
     logger.info("Processing %d RSS feeds", len(cfg.RSS_FEEDS))
     all_rss_urls: List[Dict[str, Any]] = []
     sitemap_last_run_timestamp = get_last_run_timestamp("sitemap")
-    for rss_url in cfg.RSS_FEEDS:
+    # F4: dedup items ACROSS feeds (spans the whole feed loop). Two feeds that
+    # emit the same article (e.g. /rss and /rss/?21) collapse to one; first
+    # occurrence wins.
+    seen_rss_urls: Set[str] = set()
+    cross_feed_dupes = 0
+
+    # Parallelize ONLY the network fetch of each feed. ex.map preserves input
+    # order, so feed_results[i] corresponds to cfg.RSS_FEEDS[i]; the per-feed
+    # filtering loop below stays strictly serial in the original feed order so
+    # cross-feed dedup (seen_rss_urls, first-occurrence-wins) is unchanged.
+    feeds = list(cfg.RSS_FEEDS)
+    with ThreadPoolExecutor(max_workers=cfg.AUX_PARALLEL_WORKERS) as ex:
+        feed_results = list(ex.map(parse_rss_feed, feeds))
+
+    for rss_url, feed_urls in zip(feeds, feed_results):
         logger.info("Processing RSS feed: %s", rss_url)
-        feed_urls = parse_rss_feed(rss_url)
         filtered_urls: List[Dict[str, Any]] = []
         for url_info in feed_urls:
             url = url_info["url"]
+            norm = normalize_url_query_params(url)
+            if norm in seen_rss_urls:
+                cross_feed_dupes += 1
+                logger.debug("Cross-feed duplicate RSS item %s; skipping.", url)
+                continue
+            seen_rss_urls.add(norm)
             if url in cfg.BLACKLISTED_URLS or is_url_blacklisted_by_path(url, cfg.BLACKLISTED_RELATIVE_PATHS):
                 logger.info("RSS URL %s is blacklisted. Skipping.", url)
                 continue
@@ -449,4 +476,8 @@ def process_rss_feeds(
         all_rss_urls.extend(filtered_urls)
         logger.info("Extracted %d URLs from RSS feed: %s", len(filtered_urls), rss_url)
     logger.info("Total RSS URLs to process: %d", len(all_rss_urls))
+    if cross_feed_dupes:
+        logger.info(
+            "Collapsed %d cross-feed duplicate RSS items (kept first occurrence)",
+            cross_feed_dupes)
     return all_rss_urls

@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from gpt_scraper_v3.config import get_config
 from gpt_scraper_v3.utilities import (
     count_tokens_approximate, construct_final_filename,
-    create_filename_from_url,
+    create_filename_from_url, reserve_unique_filepath_fn,
+    write_content_to_reserved_path,
 )
 from gpt_scraper_v3.metadata_budget import (
     calculate_metadata_token_allocation,
@@ -222,25 +223,42 @@ def process_and_save_chunks_with_metadata_budget(
         else:
             lookup_url = f"{url}#chunk{chunk['chunk_postfix']}"
 
-        logger.info("SAVING: %s (%d tokens)", chunk_fn,
-                     count_tokens_approximate(complete))
+        # Compute the token count of the FINAL ``complete`` string once. This is
+        # the exact content written to disk below (write_content_to_reserved_path
+        # writes ``complete`` verbatim, utf-8) -- nothing is prepended/appended
+        # between here and the write -- so counted-bytes == written-bytes. We
+        # forward both into upload_and_add_to_vector_store (Bug 13) so it skips
+        # re-reading the file and re-tokenizing.
+        complete_token_count = count_tokens_approximate(complete)
+        logger.info("SAVING: %s (%d tokens)", chunk_fn, complete_token_count)
 
         try:
             os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-            filepath = os.path.join(cfg.OUTPUT_DIR, f"{chunk_fn}.txt")
+            # Atomically reserve a unique path, preserving the existing
+            # ``<chunk_fn>_V{n}`` naming (counter 0 = base, n>0 = versioned).
+            # O_CREAT|O_EXCL closes the TOCTOU race two workers hit with a
+            # plain os.path.exists loop on the same base name.
+            base_fp = os.path.join(cfg.OUTPUT_DIR, f"{chunk_fn}.txt")
+            _root, _ext = os.path.splitext(base_fp)
+
+            def _chunk_name_fn(counter: int, _r: str = _root,
+                               _e: str = _ext) -> str:
+                if counter == 0:
+                    return f"{_r}{_e}"
+                return f"{_r}_V{counter}{_e}"
+
+            filepath = reserve_unique_filepath_fn(_chunk_name_fn)
             resolved = os.path.realpath(filepath)
             if not resolved.startswith(os.path.realpath(cfg.OUTPUT_DIR)):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
                 raise ValueError(f"Path traversal detected: {filepath}")
-            # Version collision handling
-            ver = 1
-            orig_fp = filepath
-            while os.path.exists(filepath):
-                name, ext = os.path.splitext(orig_fp)
-                filepath = f"{name}_V{ver}{ext}"
-                ver += 1
 
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(complete)
+            # Crash-safe write into the reserved path (temp + os.replace); on
+            # failure the 0-byte reservation placeholder is removed for us.
+            write_content_to_reserved_path(filepath, complete)
             logger.info("Saved chunk file: %s", filepath)
             print(f"Saved: {filepath}")
 
@@ -248,6 +266,7 @@ def process_and_save_chunks_with_metadata_budget(
                 ok = upload_and_add_to_vector_store(
                     filepath, vector_store_id, lookup_url, base_title,
                     enable_deduplication, chunking_strategy, vector_store_cache,
+                    content=complete, token_count=complete_token_count,
                 )
                 if not ok:
                     logger.warning("Upload failed for %s (saved locally)", filepath)

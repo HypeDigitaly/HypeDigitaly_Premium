@@ -8,20 +8,45 @@ Fixes: H3 (shared helper), C3 (debug-level logging), M5 (type hints).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from requests.exceptions import RequestException
 
 from gpt_scraper_v3.config import get_config
+from gpt_scraper_v3.rate_limiter import get_rate_limiter
+from gpt_scraper_v3.retry_util import with_429_retry
 from gpt_scraper_v3.token_tracker import log_openrouter_token_usage
 from gpt_scraper_v3.utilities import (
-    analyze_content_for_massive_data_warning,
     count_tokens_approximate,
     get_session,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
 OPENROUTER_API_URL: str = "https://openrouter.ai/api/v1/chat/completions"
+
+# Sentence boundary splitter for sentence-aware truncation (E3)
+_SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
+
+# Lowercase fragments that must never appear in a clean summary (E4).
+# Their presence indicates the model leaked its own instructions / English text.
+_LEAK_MARKERS: Tuple[str, ...] = (
+    "it doesn't say",
+    "there are 1",
+    "e.g.,",
+    "tokens maximum",
+    "token limit",
+    "output only",
+    "non-negotiable",
+    "do not mention",
+    "analyst:",
+    "## task",
+    "## critical",
+    "source content",
+    "current file content",
+    "<obsah>",
+    "strict token",
+)
 
 # ---------------------------------------------------------------------------
 # Core unified helper  (H3 fix)
@@ -78,9 +103,22 @@ def _call_openrouter(
 
     try:
         logger.info("Sending %s request to OpenRouter API", call_name)
-        response = get_session().post(
-            OPENROUTER_API_URL, headers=headers, json=payload,
-            timeout=cfg.REQUEST_TIMEOUT * 2,
+
+        def _do_post() -> "requests.Response":
+            # Limiter acquire INSIDE the retried closure so a sleeping 429 retry
+            # re-acquires the API slot rather than holding it while waiting.
+            with get_rate_limiter().acquire(OPENROUTER_API_URL):
+                return get_session().post(
+                    OPENROUTER_API_URL, headers=headers, json=payload,
+                    timeout=cfg.REQUEST_TIMEOUT * 2,
+                )
+
+        response = with_429_retry(
+            _do_post,
+            max_attempts=cfg.API_RETRY_MAX_ATTEMPTS,
+            cap_seconds=cfg.API_RETRY_CAP_SECONDS,
+            logger=logger,
+            call_name=f"OpenRouter {call_name}",
         )
         response.raise_for_status()
 
@@ -118,19 +156,88 @@ def _call_openrouter(
 
 
 def _enforce_token_limit(text: Optional[str], max_tokens: int) -> Optional[str]:
-    """Truncate *text* to stay within *max_tokens* at a word boundary."""
+    """Truncate *text* to stay within *max_tokens*, preferring whole sentences.
+
+    Keeps the same contract as before: ``None`` in -> ``None`` out, and text
+    already within budget is returned unchanged. When truncation is required,
+    accumulates whole sentences (split on ``.!?`` boundaries) up to the budget
+    and returns the largest whole-sentence prefix. If even the first sentence
+    exceeds the budget, falls back to a clean word-boundary cut.
+    """
     if text is None:
         return None
-    tokens = count_tokens_approximate(text)
-    if tokens <= max_tokens:
+    text = text.strip()
+    if count_tokens_approximate(text) <= max_tokens:
         return text
-    logger.warning("Text exceeds token limit (%d > %d) -- truncating", tokens, max_tokens)
-    estimated_chars = int(max_tokens * 3.2)
-    truncated = text[:estimated_chars]
-    last_space = truncated.rfind(" ")
-    if last_space > estimated_chars // 2:
-        truncated = truncated[:last_space]
-    return truncated + "..."
+    logger.warning("Text exceeds token limit (> %d) -- sentence-aware truncating", max_tokens)
+
+    sentences = _SENTENCE_SPLIT.split(text)
+    accumulated = ""
+    for sentence in sentences:
+        candidate = (accumulated + " " + sentence).strip() if accumulated else sentence.strip()
+        if count_tokens_approximate(candidate) <= max_tokens:
+            accumulated = candidate
+        else:
+            break
+
+    if accumulated:
+        return accumulated
+
+    # Even the first sentence is over budget: clean word-boundary cut.
+    return text[:int(max_tokens * 3.2)].rsplit(" ", 1)[0].rstrip(",;:- ") + " …"
+
+
+# ---------------------------------------------------------------------------
+# Output validation + clean fallback (E4)
+# ---------------------------------------------------------------------------
+
+
+def _looks_like_instruction_leak(text: str) -> bool:
+    """Return True if *text* contains any known instruction/English-leak marker."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _LEAK_MARKERS)
+
+
+def _is_mid_word_cut(text: str) -> bool:
+    """Return True if *text* appears to have been cut mid-word / mid-sentence.
+
+    Considers the stripped text cut if it is empty, or if its last character is
+    not sentence-final punctuation (``.!?…``) and it does not end with a closing
+    quote or parenthesis.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    last = stripped[-1]
+    if last in '.!?…':
+        return False
+    if last in '")':
+        return False
+    return True
+
+
+def validate_summary(text: Optional[str], min_chars: int = 15) -> Optional[str]:
+    """Validate a generated summary, returning a cleaned string or ``None``.
+
+    Strips surrounding quotes/whitespace and rejects (returns ``None``) summaries
+    that are empty, shorter than *min_chars*, contain an instruction leak, or look
+    mid-word cut. A WARNING with a short snippet is logged on rejection.
+    """
+    if text is None:
+        return None
+    cleaned = text.strip().strip('"').strip("'").strip("“”„‚").strip()
+    if not cleaned or len(cleaned) < min_chars:
+        logger.warning("Summary rejected (empty/too short): %r", cleaned[:60])
+        return None
+    if _looks_like_instruction_leak(cleaned):
+        logger.warning("Summary rejected (instruction/English leak): %r", cleaned[:60])
+        return None
+    if _is_mid_word_cut(cleaned):
+        logger.warning("Summary rejected (mid-word/sentence cut): %r", cleaned[-60:])
+        return None
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +249,6 @@ from gpt_scraper_v3.llm_prompts import (  # noqa: E402
     get_page_summary_instructions,
     get_current_file_summary_instructions,
     get_overlap_summary_instructions,
-    get_standard_summarization_instructions,
 )
 
 # ---------------------------------------------------------------------------
@@ -234,71 +340,3 @@ def generate_overlap_summary_via_openrouter(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Content summarization functions
-# ---------------------------------------------------------------------------
-
-
-def create_summarization_prompt(
-    markdown_content: str, target_tokens: int = 4000,
-    target_language: str = "English", url: str = "", title: str = "",
-) -> str:
-    """Create an optimised summarization prompt for RAG content processing."""
-    instructions = get_standard_summarization_instructions(
-        target_tokens, target_language=target_language, url=url, title=title,
-    )
-    return f"{instructions}\n\n## SOURCE:\n{markdown_content}"
-
-
-def _process_single_chunk_through_openrouter(chunk_content: str, target_tokens: int) -> str:
-    """Process a single chunk through OpenRouter. Returns original on failure."""
-    cfg = get_config()
-    if not cfg.OPENROUTER_API_KEY:
-        logger.warning("OpenRouter API key not configured for chunk processing")
-        return chunk_content
-    logger.info("Processing single chunk through OpenRouter (target: %d tokens)", target_tokens)
-    result = _call_openrouter(
-        messages=[{"role": "user", "content": chunk_content}],
-        max_tokens=target_tokens, call_name="SINGLE_CHUNK_PROCESSING",
-    )
-    if result and len(result) > 10:
-        logger.info("Successfully processed chunk: %d tokens", count_tokens_approximate(result))
-        return result
-    logger.error("Processed chunk content too short or empty, returning original")
-    return chunk_content
-
-
-def summarize_content_via_openrouter(
-    markdown_content: str, title: str = "", url: str = "", target_tokens: int = 3800,
-) -> Tuple[Optional[str], bool]:
-    """Summarise markdown content via OpenRouter with strict token limits.
-
-    Returns ``(summarized_content, success_flag)``.
-    """
-    cfg = get_config()
-    if not cfg.OPENROUTER_API_KEY:
-        logger.info("OpenRouter API key not configured, skipping summarization for %s", url)
-        return None, False
-
-    original_tokens = count_tokens_approximate(markdown_content)
-    logger.info("Original content token count: %d", original_tokens)
-    content_analysis = analyze_content_for_massive_data_warning(markdown_content, url, title)
-    logger.info("Content analysis: %s", content_analysis.get("message", ""))
-
-    if content_analysis.get("recommendation") == "chunking_required":
-        logger.info("LARGE CONTENT (%s tokens) -- chunking may be required upstream",
-                     f"{original_tokens:,}")
-    elif original_tokens > 8000:
-        logger.info("LARGE CONTENT WARNING: %s tokens -- monitor for loss", f"{original_tokens:,}")
-
-    logger.info("Processing content through OpenRouter API for RAG optimization")
-    prompt = create_summarization_prompt(
-        markdown_content, target_tokens, cfg.OPENROUTER_TARGET_LANGUAGE, url, title)
-    result = _call_openrouter(
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=target_tokens + 200, call_name="CONTENT_SUMMARIZATION", url=url,
-    )
-    if result:
-        logger.info("OpenRouter summarization response: %d tokens", count_tokens_approximate(result))
-        return result, True
-    return None, False

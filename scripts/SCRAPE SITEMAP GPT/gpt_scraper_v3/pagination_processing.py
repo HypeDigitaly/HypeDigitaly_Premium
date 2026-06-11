@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
-import time
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 from gpt_scraper_v3.config import get_config
-from gpt_scraper_v3.utilities import count_tokens_approximate
+from gpt_scraper_v3.utilities import canonical_url, count_tokens_approximate
 from gpt_scraper_v3.content_fetching import (
     get_html_content_for_pagination_via_jina,
     get_markdown_content,
@@ -53,6 +53,44 @@ _NORMAL_KEYS = ("url", "title", "path", "url_last_modified_map", "last_run_times
                 "local_files_cache", "enable_resume", "vector_store_id",
                 "deduplication_enabled", "chunking_strategy", "vector_store_cache",
                 "remove_selectors", "rss_metadata")
+
+
+class VisitedSet:
+    """Run-scoped, thread-safe exactly-once guard for URL processing (Bug 14).
+
+    A single instance is created per run in ``cli.process_urls`` and passed by
+    reference into every ``process_paginated_url`` call (serial and worker
+    paths) and down the pagination/suburl recursion. It prevents a suburl that
+    is reachable via two different parent pages from being fetched/processed
+    twice -- and, under the worker pool, from being processed CONCURRENTLY by
+    two workers.
+
+    NOT a module-level singleton: keeping it run-scoped means repeated
+    ``main()`` calls (tests / batch drivers) each start with a fresh set.
+
+    It is purely an in-run exactly-once guard; the ``should_process_url_with_resume``
+    gate and all other eligibility checks remain untouched.
+    """
+
+    __slots__ = ("_s", "_lock")
+
+    def __init__(self) -> None:
+        self._s: Set[str] = set()
+        self._lock = threading.Lock()
+
+    def mark(self, url: str) -> bool:
+        """Atomically claim *url* for processing.
+
+        Returns ``True`` if this is the first time *url* (by canonical form) is
+        seen -- the caller owns it and should process it. Returns ``False`` if
+        another caller already claimed it -- the caller should skip.
+        """
+        key = canonical_url(url)
+        with self._lock:
+            if key in self._s:
+                return False
+            self._s.add(key)
+            return True
 
 
 def _resolve_ai_url(base_url: str, relative_url: str) -> Optional[str]:
@@ -216,15 +254,63 @@ def process_paginated_url(
     deduplication_enabled: bool, chunking_strategy: Optional[Dict[str, Any]],
     vector_store_cache: Optional[Dict[str, Any]], remove_selectors: str,
     rss_metadata: Optional[Dict[str, Any]] = None, current_depth: int = 0,
-) -> Tuple[int, int]:
+    visited: Optional[VisitedSet] = None,
+) -> Tuple[int, int, str]:
     """Check a URL for pagination/suburls, then process all discovered pages.
 
+    Args:
+        visited: Run-scoped, thread-safe :class:`VisitedSet` (Bug 14) ensuring
+            each URL/suburl/pagination subpage is fetched and processed exactly
+            once across all workers within a run. ``None`` (the default) creates
+            a fresh local instance for backward compatibility / standalone calls.
+
     Returns:
-        Tuple of (success_count, total_processed).
+        Tuple of ``(success_count, total_processed, status)`` where *status* is
+        one of:
+
+        * ``"ok"`` -- at least one page was fetched, saved (and uploaded).
+        * ``"failed"`` -- a genuine fetch/save failure occurred and nothing
+          succeeded. Callers should log this at ERROR level (Bug 10).
+        * ``"skipped"`` -- nothing succeeded but the only "non-success" was an
+          intentional gate decision (not-modified / resume-skip / already
+          visited this run), NOT a real failure. Callers should log this at
+          INFO level (Bug 10).
     """
+    if visited is None:
+        # Backward compat: a standalone call gets its own one-shot guard.
+        visited = VisitedSet()
+
+    # Bug 14: claim this URL for the run. If another parent page already
+    # processed it (or it is both a sitemap entry and someone's suburl), skip
+    # exactly once. This is an in-run guard only -- it does not replace the
+    # should_process_url_with_resume eligibility gate below.
+    if not visited.mark(url):
+        logger.info("VISITED SKIP: %s already processed/claimed this run", url)
+        return (0, 0, "skipped")
+
     logger.info("PAGINATION PROCESSING: Starting for %s", url)
     success_count = 0
     total_processed = 0
+    # Bug 10: track whether any genuine fetch/save failure happened versus only
+    # intentional gate-skips, so the top-level caller can log INFO vs ERROR.
+    had_failure = False
+    had_skip = False
+
+    def _single_status(result: Tuple[int, int]) -> str:
+        """Map a process_single_url_normally result to an "ok"/"failed" status."""
+        return "ok" if result[0] > 0 else "failed"
+
+    def _finalize_status() -> str:
+        """Derive the aggregate status from accumulated counters/flags."""
+        if success_count > 0:
+            return "ok"
+        if had_failure:
+            return "failed"
+        if had_skip:
+            return "skipped"
+        # Nothing succeeded, nothing explicitly skipped, no recorded failure:
+        # treat as failed so it is never silently swallowed.
+        return "failed"
     # Shorthand for delegating to normal processing
     _norm = dict(url=url, title=title, path=path,
                  url_last_modified_map=url_last_modified_map,
@@ -251,7 +337,8 @@ def process_paginated_url(
             html_content = get_html_content_for_pagination_via_jina(url, remove_selectors)
             if not html_content:
                 logger.warning("No HTML for pagination check, processing normally")
-                return process_single_url_normally(**_norm)
+                r = process_single_url_normally(**_norm)
+                return (r[0], r[1], _single_status(r))
             pag_result = detect_pagination_in_html(html_content, url)
             has_suburls = bool(pag_result.get("suburls", [])) and url_recursive_enabled
         else:
@@ -261,7 +348,8 @@ def process_paginated_url(
             logger.info("NO PAGINATION/SUBURLS: confidence=%s%% suburls=%d recursive=%s depth=%d/%d",
                         pag_result["confidence"], len(pag_result.get("suburls", [])),
                         url_recursive_enabled, current_depth, max_recursive_level)
-            return process_single_url_normally(**_norm)
+            r = process_single_url_normally(**_norm)
+            return (r[0], r[1], _single_status(r))
 
         # Step 3: Extract pagination URLs and suburls
         pagination_urls: List[Dict[str, Any]] = []
@@ -285,7 +373,8 @@ def process_paginated_url(
 
         if not pagination_urls and not suburls:
             logger.warning("Detected but no URLs extracted, processing normally")
-            return process_single_url_normally(**_norm)
+            r = process_single_url_normally(**_norm)
+            return (r[0], r[1], _single_status(r))
 
         logger.info("Additional URLs: %d pag + %d sub", len(pagination_urls), len(suburls))
 
@@ -299,9 +388,12 @@ def process_paginated_url(
             main_result = process_single_url_normally(**_norm)
             success_count += main_result[0]
             total_processed += main_result[1]
+            if main_result[0] == 0:
+                had_failure = True  # genuine fetch/save failure of the main page
         else:
             logger.info("Skipping main URL %s (already processed)", url)
             total_processed += 1
+            had_skip = True  # intentional gate decision, not a failure
 
         # Step 5: Process pagination subpages
         if pagination_urls:
@@ -311,6 +403,12 @@ def process_paginated_url(
                 sp_title = f"{title}_PAGE{pn}" if pn is not None else f"{title}_PAGE{i}"
                 sp_path = (f"{path} > Page {pn}" if pn is not None
                            else f"{path} > {pt or f'Page {i}'}")
+                if not visited.mark(pi["url"]):
+                    logger.info("VISITED SKIP subpage: %s already processed/claimed this run",
+                                pi["url"])
+                    total_processed += 1
+                    had_skip = True
+                    continue
                 logger.info("Subpage %d/%d: %s (%s)", i, len(pagination_urls), pi["url"], sp_title)
                 r = process_single_url_normally(
                     pi["url"], sp_title, sp_path, url_last_modified_map, last_run_timestamp,
@@ -318,7 +416,8 @@ def process_paginated_url(
                     deduplication_enabled, chunking_strategy, vector_store_cache,
                     remove_selectors, rss_metadata)
                 success_count += r[0]; total_processed += r[1]
-                time.sleep(1)
+                if r[0] == 0:
+                    had_failure = True  # a subpage genuinely failed to fetch/save
             logger.info("PAGINATION COMPLETE: %d URLs processed", len(pagination_urls))
 
         # Step 6: Process suburls (recursive, within depth limit)
@@ -347,7 +446,7 @@ def process_paginated_url(
                     if parent_is_test:
                         if enable_resume and local_files_cache is not None:
                             if is_url_already_processed_locally(su_url, local_files_cache):
-                                total_processed += 1; continue
+                                total_processed += 1; had_skip = True; continue
                         should_process = True
                     else:
                         su_lm = find_url_last_modified(su_url, url_last_modified_map)
@@ -359,16 +458,18 @@ def process_paginated_url(
 
                     if not should_process:
                         logger.info("Skipping suburl %s", su_url)
-                        total_processed += 1; continue
+                        total_processed += 1; had_skip = True; continue
 
                     r = process_paginated_url(
                         su_url, su_title, su_path, url_last_modified_map,
                         last_run_timestamp, local_files_cache, enable_resume,
                         vector_store_id, deduplication_enabled, chunking_strategy,
                         vector_store_cache, remove_selectors, rss_metadata,
-                        current_depth=current_depth + 1)
+                        current_depth=current_depth + 1, visited=visited)
                     success_count += r[0]; total_processed += r[1]
-                    time.sleep(1)
+                    # r[2] is the recursive status; only "failed" marks a real failure.
+                    if len(r) > 2 and r[2] == "failed":
+                        had_failure = True
                 logger.info("SUBURLS COMPLETE: %d suburls at depth %d",
                             len(suburls), current_depth + 1)
         elif suburls and not url_recursive_enabled:
@@ -381,11 +482,12 @@ def process_paginated_url(
         print(f"Enhanced processing: {success_count}/{total_processed} "
               f"(1 main + {len(pagination_urls)} pag + {proc_sub} sub, "
               f"depth {current_depth}/{max_recursive_level})")
-        return (success_count, total_processed)
+        return (success_count, total_processed, _finalize_status())
 
     except Exception as e:
         logger.error("Error in pagination processing for %s: %s", url, e)
-        return process_single_url_normally(**_norm)
+        r = process_single_url_normally(**_norm)
+        return (r[0], r[1], _single_status(r))
 
 
 # ---------------------------------------------------------------------------

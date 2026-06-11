@@ -2,15 +2,16 @@
   "website": {
     "base_url": "https://www.kr-ustecky.cz",
     "sitemap_url": "https://www.kr-ustecky.cz/mapa-stranek",
-    "xml_sitemap_url": "https://www.kr-ustecky.cz/vismo/sitemap.asp",
+    "xml_sitemap_url": "https://www.kr-ustecky.cz/sitemap.xml",
     "blacklisted_urls": [],
     "rss_feeds": [
-      "https://www.kr-ustecky.cz/rss/?21"
+      "https://www.kr-ustecky.cz/rss/?21",
+	  "https://www.kr-ustecky.cz/rss"
     ],
     "recursive_urls": [],
     "paginated_urls": [],
     "test_urls": [],
-    "blacklisted_relative_url_paths": [],
+    "blacklisted_relative_url_paths": ["/Account/Login"],
     "IncludeBaseURL": 0
   },
   "api_keys": {
@@ -23,8 +24,8 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
-      "google/gemini-3-flash-preview",
-      "anthropic/claude-sonnet-4"
+      "google/gemini-3.1-flash-lite",
+      "anthropic/claude-haiku-4.5"
     ],
     "temperature": 0.1,
     "top_p": 0.9,
@@ -37,8 +38,8 @@
   "content_providers": {
     "jina": {
       "name": "jina",
-      "remove_selectors": "header, footer, aside",
-      "target_selectors": "stred, .stred, #stred"
+      "remove_selectors": "header, footer, aside, nav, #main-nav, #languages, #google_translate_element, .goog-te-combo, #fullscreen-search",
+      "target_selectors": ".content, #home"
     },
     "firecrawl": {
       "name": "firecrawl"
@@ -52,8 +53,8 @@
       "locale": "cs-CZ",
       "timezone_id": "Europe/Prague",
       "extra_http_headers": {},
-      "remove_selectors": "header, footer, aside",
-      "target_selectors": "stred, .stred, #stred",
+      "remove_selectors": "header, footer, aside, nav, #main-nav, #languages, #google_translate_element, .goog-te-combo, #fullscreen-search",
+      "target_selectors": ".content, #home",
       "wait_until": "domcontentloaded",
       "wait_for_selector": "",
       "wait_for_timeout_ms": 0,
@@ -78,7 +79,7 @@
       "expand_collapsibles_enabled": false,
       "expand_collapsibles_selectors": "",
       "expand_collapsibles_wait_ms": 500,
-      "convert_images_to_alt_text": true,
+      "image_handling": "markdown",
       "table_infer_header": true,
       "dismiss_cookie_banners": true,
       "cookie_banner_selectors": ""
@@ -86,13 +87,13 @@
     "provider_sequence": "playwright,jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_68d5ada0786881919a0b231f5184fb02",
+    "id": "vs_6a298a9c9d888191bfae34b5e9955e38",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,
     "chunk_overlap": 0,
     "content_token_offset": 500,
-    "content_ratio": 0.5
+    "content_ratio": 0.65
   },
   "http_settings": {
     "request_timeout": 150,
@@ -106,10 +107,20 @@
     "retry_count": 3,
     "backoff_factor": 0.3
   },
+  "parallelism": {
+    "workers": 6,
+    "max_concurrent_per_domain": 4,
+    "min_interval_ms": 1000,
+    "api_max_concurrent": 12,
+    "rate_limit_enabled": true,
+    "aux_workers": 8,
+    "api_retry_max_attempts": 2,
+    "api_retry_cap_seconds": 60
+  },
   "processing": {
     "check_last_modified": 1,
     "max_filename_length": 200,
-    "RSSDateThreshold": "01-01-2025"
+    "RSSDateThreshold": "01-01-2026"
   },
   "script_info": {
     "name": "scrape_sitemap_GPT_v3",

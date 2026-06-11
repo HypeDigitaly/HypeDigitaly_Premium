@@ -15,7 +15,11 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Tag
 
 from gpt_scraper_v3.config import get_config
-from gpt_scraper_v3.utilities import is_url_blacklisted_by_path
+from gpt_scraper_v3.utilities import (
+    is_url_blacklisted_by_path,
+    normalize_url_query_params,
+    strip_url_fragment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,8 @@ def extract_links_from_html_sitemap(
     vector_store_id: Optional[str] = None,
     vector_store_cache: Optional[Dict[str, Any]] = None,
     previous_known_urls: Optional[Set[str]] = None,
+    html_seen_urls: Optional[Set[str]] = None,
+    html_seen_sink: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Extract links from an HTML sitemap by parsing ``<a>`` anchor tags.
 
@@ -101,7 +107,13 @@ def extract_links_from_html_sitemap(
                     logger.debug("Skipping anchor %d: No URL found", i)
                     continue
 
-                absolute_url = urljoin(cfg.BASE_URL, url)
+                # Same-page-anchor guard: a bare ``#frag`` href has no
+                # independent page identity (it points at the current page).
+                if url.startswith("#"):
+                    logger.debug("Skipping anchor %d: fragment-only href %r", i, url)
+                    continue
+
+                absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, url))
 
                 # Domain filter
                 parsed_url = urlparse(absolute_url)
@@ -115,6 +127,12 @@ def extract_links_from_html_sitemap(
                 ):
                     logger.info("URL %s is blacklisted. Skipping.", absolute_url)
                     continue
+
+                # Record every discovered (canonical) URL — even those skipped
+                # by the lastmod/resume gate — so the HTML-seen snapshot is
+                # complete and suppression works on later runs.
+                if html_seen_sink is not None:
+                    html_seen_sink.add(normalize_url_query_params(absolute_url))
 
                 title = text if text else (parsed_url.path.split("/")[-1] or "Homepage")
                 path = f"HTML Sitemap > {title}"
@@ -138,6 +156,7 @@ def extract_links_from_html_sitemap(
                     vector_store_id=vector_store_id,
                     vector_store_cache=vector_store_cache,
                     previous_known_urls=previous_known_urls,
+                    html_seen_urls=html_seen_urls,
                 ):
                     extracted_urls.append({
                         "url": absolute_url,
@@ -232,6 +251,8 @@ def extract_links(
     vector_store_id: Optional[str] = None,
     vector_store_cache: Optional[Dict[str, Any]] = None,
     previous_known_urls: Optional[Set[str]] = None,
+    html_seen_urls: Optional[Set[str]] = None,
+    html_seen_sink: Optional[Set[str]] = None,
     _is_root_call: bool = True,
 ) -> List[Dict[str, Any]]:
     """DEPRECATED: Use extract_links_from_html_sitemap instead.
@@ -323,8 +344,11 @@ def extract_links(
             current_path = path + [link_text]
             absolute_path = " > ".join(current_path)
 
-            if link_tag and link_tag.has_attr("href"):
-                absolute_url = urljoin(cfg.BASE_URL, link_tag["href"])
+            raw_href = link_tag["href"].strip() if (link_tag and link_tag.has_attr("href")) else ""
+            # Same-page-anchor guard: a bare ``#frag`` href has no independent
+            # page identity, so it must not collapse to the current page.
+            if raw_href and not raw_href.startswith("#"):
+                absolute_url = strip_url_fragment(urljoin(cfg.BASE_URL, raw_href))
                 logger.info("\n=== Processing URL: %s ===", absolute_url)
                 logger.info("Path: %s", absolute_path)
 
@@ -333,6 +357,11 @@ def extract_links(
                 ):
                     logger.info("URL %s is blacklisted. Skipping.", absolute_url)
                 else:
+                    # Record every discovered (canonical) URL for the
+                    # HTML-seen snapshot, even those skipped by the gate.
+                    if html_seen_sink is not None:
+                        html_seen_sink.add(normalize_url_query_params(absolute_url))
+
                     last_modified = find_url_last_modified(
                         absolute_url, url_last_modified_map
                     )
@@ -347,6 +376,7 @@ def extract_links(
                         vector_store_id=vector_store_id,
                         vector_store_cache=vector_store_cache,
                         previous_known_urls=previous_known_urls,
+                        html_seen_urls=html_seen_urls,
                     ):
                         extracted_urls.append({
                             "url": absolute_url,
@@ -374,6 +404,8 @@ def extract_links(
                         vector_store_id,
                         vector_store_cache,
                         previous_known_urls=previous_known_urls,
+                        html_seen_urls=html_seen_urls,
+                        html_seen_sink=html_seen_sink,
                         _is_root_call=False,
                     )
                 )
@@ -391,6 +423,8 @@ def extract_links(
                     vector_store_id=vector_store_id,
                     vector_store_cache=vector_store_cache,
                     previous_known_urls=previous_known_urls,
+                    html_seen_urls=html_seen_urls,
+                    html_seen_sink=html_seen_sink,
                     _is_root_call=False,
                 )
             )

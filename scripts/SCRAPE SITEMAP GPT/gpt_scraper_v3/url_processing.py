@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import email.utils
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from gpt_scraper_v3.config import get_config
-from gpt_scraper_v3.utilities import is_file_url, is_url_blacklisted_by_path, normalize_url_query_params
-from gpt_scraper_v3.vector_store import find_existing_file_by_url_cached, find_existing_files_by_url_cached
+from gpt_scraper_v3.utilities import canonical_url, is_file_url, is_url_blacklisted_by_path, normalize_url_query_params
+from gpt_scraper_v3.vector_store import find_existing_files_by_url_cached
 
 logger = logging.getLogger(__name__)
+
+# Guards the atomic check-and-set of cfg.BASE_URL_PROCESSED_IN_RUN so that, with
+# parallel workers, exactly one worker is allowed to process the base URL.
+_base_url_lock = threading.Lock()
 
 try:
     from dateutil import parser as dateutil_parser
@@ -144,7 +149,14 @@ def find_url_last_modified(url: str, url_last_modified_map: Dict[str, Any]) -> O
     """Find the last modified date for *url* using multi-strategy matching."""
     cfg = get_config()
     logger.debug(f"Finding last modified date for URL: {url}")
-    norm = url.rstrip("/")
+    # Bug 12: canonicalize the input (strip #fragment, sort query params) so it
+    # matches the canonical form used at the snapshot-build site. The trailing
+    # slash is intentionally PRESERVED (the chosen policy); the slash-tolerant
+    # ``rstrip('/')`` fallback below stays as a matching strategy so a ``/page/``
+    # input still matches a ``/page`` sitemap key. lm_map keys come RAW from the
+    # sitemap, so strategy 1 (exact) compares the original URL too.
+    canon = canonical_url(url)
+    norm = canon.rstrip("/")
     pi = urlparse(norm)
     idom = pi.netloc.lower()
     ipath = pi.path.lower()
@@ -318,6 +330,7 @@ def should_process_url_with_resume(
     rss_published_date: Any = None, sitemap_last_run_timestamp: Optional[datetime] = None,
     vector_store_id: Optional[str] = None, vector_store_cache: Optional[Dict[str, Any]] = None,
     previous_known_urls: Optional[Set[str]] = None,
+    html_seen_urls: Optional[Set[str]] = None,
 ) -> bool:
     """Decide whether *url* should be scraped (main eligibility entry point)."""
     cfg = get_config()
@@ -328,12 +341,18 @@ def should_process_url_with_resume(
     norm_base = urlunparse((pu.scheme, pu.netloc, pu.path, "", "", ""))
     if norm_base in cfg.CANONICAL_BASE_URLS:
         if cfg.PROCESS_BASE_URL_ONCE:
-            if cfg.BASE_URL_PROCESSED_IN_RUN:
+            # Atomic check-and-set: under parallel workers exactly one thread may
+            # win the "process once" slot. The lock guards only the read+set of
+            # the flag; log/status calls run outside the lock (no network).
+            with _base_url_lock:
+                already_processed = cfg.BASE_URL_PROCESSED_IN_RUN
+                if not already_processed:
+                    cfg.BASE_URL_PROCESSED_IN_RUN = True
+            if already_processed:
                 logger.info(f"Skipping URL {url}: Base URL already processed once.")
                 _status("URL PROCESSING STATUS (BASE URL)", [
                     f"URL: {url}", "Processing: SKIPPED (BASE URL ALREADY PROCESSED)"])
                 return False
-            cfg.BASE_URL_PROCESSED_IN_RUN = True
             logger.info(f"IncludeBaseURL=1 - allowing BASE URL processing once: {url}")
             _status("URL PROCESSING STATUS (BASE URL)", [
                 f"URL: {url}", "IncludeBaseURL: ENABLED (processing once)",
@@ -414,8 +433,12 @@ def should_process_url_with_resume(
     # process it regardless of lastmod date
     if previous_known_urls is not None and last_run_timestamp:
         normalized_check = normalize_url_query_params(url)
-        if normalized_check not in previous_known_urls:
-            logger.info("NEW URL DETECTED (not in previous sitemap snapshot): %s", url)
+        seen_before = (
+            normalized_check in previous_known_urls
+            or (html_seen_urls is not None and normalized_check in html_seen_urls)
+        )
+        if not seen_before:
+            logger.info("NEW URL DETECTED (not in XML snapshot or HTML-seen set): %s", url)
             _status("URL PROCESSING STATUS (NEW URL)", [
                 f"URL: {url}",
                 "Previous snapshot: NOT PRESENT",

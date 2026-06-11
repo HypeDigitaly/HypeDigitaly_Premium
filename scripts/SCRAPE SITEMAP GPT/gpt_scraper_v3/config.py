@@ -73,10 +73,10 @@ class ScraperConfig:
     OPENAI_VECTOR_STORE_ID: str = ""
     ENABLE_DEDUPLICATION: bool = True
     DEFAULT_CHUNKING_STRATEGY: str = "auto"
-    DEFAULT_MAX_CHUNK_SIZE: int = 800
+    DEFAULT_MAX_CHUNK_SIZE: int = 4096
     DEFAULT_CHUNK_OVERLAP: int = 400
     DEFAULT_CONTENT_TOKEN_OFFSET: int = 0
-    DEFAULT_CONTENT_RATIO: float = 0.5
+    DEFAULT_CONTENT_RATIO: float = 0.65
     # URL configuration
     BASE_URL: str = ""
     PARSED_BASE_URL: Optional[Any] = None  # urllib ParseResult
@@ -95,9 +95,18 @@ class ScraperConfig:
     TEST_URLS: List[str] = field(default_factory=list)
     # HTTP settings
     REQUEST_TIMEOUT: int = 30
-    REQUEST_RETRY_CODES: Tuple[int, ...] = (500, 502, 503, 504, 524)
+    REQUEST_RETRY_CODES: Tuple[int, ...] = (429, 500, 502, 503, 504, 524)
     REQUEST_RETRY_COUNT: int = 3
     REQUEST_BACKOFF_FACTOR: float = 0.3
+    # Parallelism / rate limiting
+    PARALLEL_WORKERS: int = 6
+    RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN: int = 4    # politeness tier
+    RATE_LIMIT_MIN_INTERVAL_MS: int = 1000           # politeness tier only
+    API_MAX_CONCURRENT: int = 12                     # API tier (openrouter.ai, api.openai.com) — no interval
+    RATE_LIMIT_ENABLED: bool = True
+    AUX_PARALLEL_WORKERS: int = 8
+    API_RETRY_MAX_ATTEMPTS: int = 2                  # app tier on top of transport retries
+    API_RETRY_CAP_SECONDS: int = 60
     # Processing flags
     CHECK_LAST_MODIFIED: int = 1  # 0=off, 1=on (skip no-lastmod if exists), 2=partial (always process no-lastmod)
     MAX_FILENAME_LENGTH: int = 200
@@ -111,6 +120,8 @@ class ScraperConfig:
     RSS_LAST_RUN_FILE: str = ""
     SITEMAP_LAST_RUN_FILE: str = ""
     KNOWN_URLS_FILE: str = ""
+    VS_CACHE_FILE: str = ""
+    HTML_SEEN_URLS_FILE: str = ""
     # Constants
     OPENAI_API_BASE_URL: str = "https://api.openai.com/v1"
 
@@ -370,7 +381,7 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
     cfg.DEFAULT_MAX_CHUNK_SIZE = raw["vector_store"]["max_chunk_size"]
     cfg.DEFAULT_CHUNK_OVERLAP = raw["vector_store"]["chunk_overlap"]
     cfg.DEFAULT_CONTENT_TOKEN_OFFSET = raw["vector_store"].get("content_token_offset", 0)
-    cfg.DEFAULT_CONTENT_RATIO = raw["vector_store"].get("content_ratio", 0.5)
+    cfg.DEFAULT_CONTENT_RATIO = raw["vector_store"].get("content_ratio", 0.65)
 
     # URL configuration
     cfg.BASE_URL = raw["website"]["base_url"]
@@ -466,9 +477,44 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
 
     # HTTP settings
     cfg.REQUEST_TIMEOUT = raw["http_settings"]["request_timeout"]
-    cfg.REQUEST_RETRY_CODES = tuple(raw["http_settings"]["retry_codes"])
+    # Always include 429 (rate-limited) in the retry forcelist; preserve tuple type.
+    cfg.REQUEST_RETRY_CODES = tuple(sorted(set(raw["http_settings"]["retry_codes"]) | {429}))
     cfg.REQUEST_RETRY_COUNT = raw["http_settings"]["retry_count"]
     cfg.REQUEST_BACKOFF_FACTOR = raw["http_settings"]["backoff_factor"]
+
+    # Parallelism / rate limiting (optional JSON block; backward compatible)
+    parallelism: Dict[str, Any] = raw.get("parallelism", {})
+    cfg.PARALLEL_WORKERS = int(parallelism.get("workers", cfg.PARALLEL_WORKERS))
+    cfg.RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN = int(
+        parallelism.get("max_concurrent_per_domain", cfg.RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN))
+    cfg.RATE_LIMIT_MIN_INTERVAL_MS = int(
+        parallelism.get("min_interval_ms", cfg.RATE_LIMIT_MIN_INTERVAL_MS))
+    cfg.API_MAX_CONCURRENT = int(parallelism.get("api_max_concurrent", cfg.API_MAX_CONCURRENT))
+    cfg.RATE_LIMIT_ENABLED = bool(parallelism.get("rate_limit_enabled", cfg.RATE_LIMIT_ENABLED))
+    cfg.AUX_PARALLEL_WORKERS = int(parallelism.get("aux_workers", cfg.AUX_PARALLEL_WORKERS))
+    cfg.API_RETRY_MAX_ATTEMPTS = int(
+        parallelism.get("api_retry_max_attempts", cfg.API_RETRY_MAX_ATTEMPTS))
+    cfg.API_RETRY_CAP_SECONDS = int(
+        parallelism.get("api_retry_cap_seconds", cfg.API_RETRY_CAP_SECONDS))
+
+    if cfg.PARALLEL_WORKERS < 1:
+        raise ValueError(
+            f"Config validation failed: parallelism.workers must be >= 1, got: {cfg.PARALLEL_WORKERS}")
+    if cfg.AUX_PARALLEL_WORKERS < 1:
+        raise ValueError(
+            f"Config validation failed: parallelism.aux_workers must be >= 1, got: {cfg.AUX_PARALLEL_WORKERS}")
+    if cfg.RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN < 1:
+        raise ValueError(
+            f"Config validation failed: parallelism.max_concurrent_per_domain must be >= 1, "
+            f"got: {cfg.RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN}")
+    if cfg.API_MAX_CONCURRENT < 1:
+        raise ValueError(
+            f"Config validation failed: parallelism.api_max_concurrent must be >= 1, "
+            f"got: {cfg.API_MAX_CONCURRENT}")
+    if cfg.RATE_LIMIT_MIN_INTERVAL_MS < 0:
+        raise ValueError(
+            f"Config validation failed: parallelism.min_interval_ms must be >= 0, "
+            f"got: {cfg.RATE_LIMIT_MIN_INTERVAL_MS}")
 
     # Processing flags
     raw_clm = raw["processing"]["check_last_modified"]
@@ -487,6 +533,8 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
     cfg.RSS_LAST_RUN_FILE = f"{identifier}_rss_last_run_time.txt"
     cfg.SITEMAP_LAST_RUN_FILE = f"{identifier}_sitemap_last_run_time.txt"
     cfg.KNOWN_URLS_FILE = f"{identifier}_known_urls.json"
+    cfg.VS_CACHE_FILE = f"{identifier}_vs_cache.json"
+    cfg.HTML_SEEN_URLS_FILE = f"{identifier}_html_seen_urls.json"
 
     # Markdown providers
     cfg.MARKDOWN_PROVIDERS = {
@@ -505,6 +553,16 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
     # --- Playwright provider (optional) ---
     pw_raw: Dict[str, Any] = raw["content_providers"].get("playwright", {})
     if pw_raw:
+        # Image handling (E) — 3-way mode with legacy boolean back-compat.
+        # Legacy `convert_images_to_alt_text`: True -> "alt_text", False -> "strip".
+        _img_mode = pw_raw.get("image_handling")
+        if _img_mode is None:
+            _legacy = pw_raw.get("convert_images_to_alt_text", True)
+            _img_mode = "alt_text" if _legacy else "strip"
+        _img_mode = str(_img_mode).strip().lower()
+        if _img_mode not in ("markdown", "alt_text", "strip"):
+            logger.warning("Invalid image_handling=%r; falling back to 'alt_text'", _img_mode)
+            _img_mode = "alt_text"
         cfg.PLAYWRIGHT_CONFIG = {
             "browser": pw_raw.get("browser", "chromium"),
             "headless": pw_raw.get("headless", True),
@@ -550,12 +608,17 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
             "expand_collapsibles_wait_ms": pw_raw.get("expand_collapsibles_wait_ms", 500),
 
             # Markdownify (E)
+            "image_handling": _img_mode,
+            # legacy-input-only: read above for back-compat mapping, NOT consumed by provider logic
             "convert_images_to_alt_text": pw_raw.get("convert_images_to_alt_text", True),
             "table_infer_header": pw_raw.get("table_infer_header", True),
 
             # Cookie Banners (F)
             "dismiss_cookie_banners": pw_raw.get("dismiss_cookie_banners", False),
             "cookie_banner_selectors": pw_raw.get("cookie_banner_selectors", ""),
+
+            # Boilerplate Removal (G)
+            "strip_boilerplate_default": pw_raw.get("strip_boilerplate_default", True),
         }
         cfg.MARKDOWN_PROVIDERS["playwright"] = {
             "name": "playwright",
@@ -582,6 +645,15 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
     print(f"Recursive URLs: {len(cfg.RECURSIVE_URLS)} configured")
     print(f"Paginated URLs (Explicit): {len(cfg.PAGINATED_URLS)} configured")
     print(f"Test URLs: {len(cfg.TEST_URLS)} configured")
+    _effective_live = min(cfg.PARALLEL_WORKERS, cfg.RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN)
+    print(
+        f"Parallelism: workers={cfg.PARALLEL_WORKERS}, "
+        f"per-domain cap={cfg.RATE_LIMIT_MAX_CONCURRENT_PER_DOMAIN}, "
+        f"api cap={cfg.API_MAX_CONCURRENT}, "
+        f"rate_limit={'on' if cfg.RATE_LIMIT_ENABLED else 'off'}")
+    print(
+        f"   Effective: min(workers, per-domain cap) = {_effective_live} "
+        f"live browsers on single-domain runs")
     if cfg.RSS_DATE_THRESHOLD:
         print(f"RSS Date Threshold: {cfg.RSS_DATE_THRESHOLD.strftime('%d-%m-%Y')} (UTC)")
     if cfg.TEST_URLS:

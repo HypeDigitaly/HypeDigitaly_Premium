@@ -1,0 +1,15 @@
+# Project configuration for the GPT Scraper V3 test harness.
+# (No build-system section: this repo is run as scripts, not installed as a package.)
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+# Treat this file's directory as the rootdir; tests live under the package.
+testpaths = ["gpt_scraper_v3/tests"]
+# Make the repo root importable so `import gpt_scraper_v3` resolves without an
+# install step. conftest.py also inserts this on sys.path as a belt-and-braces
+# fallback for older pytest versions.
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra"

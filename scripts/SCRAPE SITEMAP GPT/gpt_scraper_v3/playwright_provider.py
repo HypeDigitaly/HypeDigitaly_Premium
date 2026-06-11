@@ -7,8 +7,20 @@ integrated via the ``provider_sequence`` mechanism.
 Optional dependency: if ``playwright`` is not installed, ``is_available()``
 returns ``False`` and the provider is silently skipped.
 
-.. note:: The singleton browser pattern is NOT thread-safe.  This is
-   acceptable for the current single-threaded scraper architecture.
+.. note:: Resources follow a **per-thread** model.  The Playwright sync API
+   binds each ``Playwright``/``Browser``/``BrowserContext`` to the OS thread
+   that created it (greenlet ownership), so a single shared browser cannot be
+   driven cross-thread.  Each worker thread therefore owns its own
+   ``Playwright`` + ``Browser`` + ``BrowserContext`` via ``threading.local()``
+   (``_PWThreadState``).  Every live state object is also recorded in a
+   lock-guarded module registry (``_pw_registry``) so an atexit backstop can
+   make a best-effort sweep of any thread that failed to clean up.
+
+   The PRIMARY teardown is ``close_current_thread_playwright()``, which each
+   worker MUST call from its own ``finally`` block (same-thread, greenlet-safe).
+   The atexit sweep is only a last resort and may hit "greenlet" ownership
+   errors when closing objects owned by other threads — those are logged, never
+   raised.
 """
 from __future__ import annotations
 
@@ -17,6 +29,7 @@ import copy
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -51,50 +64,153 @@ def is_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Singleton browser lifecycle
+# Per-thread browser lifecycle
 # ---------------------------------------------------------------------------
+#
+# The Playwright sync API binds each Playwright/Browser/BrowserContext to the
+# OS thread that created it.  We therefore keep one state object per thread in
+# ``threading.local()`` and record every live state in a module-level,
+# lock-guarded registry so an atexit backstop can sweep leftovers.
 
-_playwright: Optional["Playwright"] = None
-_browser: Optional["Browser"] = None
-_context: Optional["BrowserContext"] = None
-_cleanup_registered: bool = False
-_context_page_count: int = 0
+
+class _PWThreadState:
+    """Per-thread Playwright resources (owned by the creating thread only)."""
+
+    __slots__ = ("playwright", "browser", "context", "context_page_count")
+
+    def __init__(self) -> None:
+        self.playwright: Optional["Playwright"] = None
+        self.browser: Optional["Browser"] = None
+        self.context: Optional["BrowserContext"] = None
+        self.context_page_count: int = 0
 
 
-def _cleanup_playwright() -> None:
-    """Atexit handler: tear down Playwright resources in order."""
-    global _context, _browser, _playwright
+_pw_tls = threading.local()
+_pw_registry: List["_PWThreadState"] = []
+_pw_registry_lock = threading.Lock()
+_atexit_registered: bool = False
+_atexit_registered_lock = threading.Lock()
 
-    logger.info("Playwright cleanup: shutting down browser resources")
 
-    if _context is not None:
+def _get_tls_state() -> "_PWThreadState":
+    """Return the calling thread's ``_PWThreadState``, creating it lazily.
+
+    A freshly created state is appended to the lock-guarded module registry so
+    the atexit backstop can find threads that did not clean up after themselves.
+    """
+    state: Optional["_PWThreadState"] = getattr(_pw_tls, "state", None)
+    if state is None:
+        state = _PWThreadState()
+        _pw_tls.state = state
+        with _pw_registry_lock:
+            _pw_registry.append(state)
+    return state
+
+
+def _ensure_atexit_registered() -> None:
+    """Register the atexit backstop sweep exactly once (thread-safe)."""
+    global _atexit_registered
+    if _atexit_registered:
+        return
+    with _atexit_registered_lock:
+        if not _atexit_registered:
+            atexit.register(_atexit_sweep)
+            _atexit_registered = True
+
+
+def _close_state(state: "_PWThreadState") -> None:
+    """Close a single state's context -> browser -> playwright (each guarded).
+
+    Every close is wrapped in its own try/except.  This is shared by the
+    same-thread teardown (``close_current_thread_playwright``) and the atexit
+    backstop (which may legitimately hit greenlet ownership errors on foreign
+    threads — those are logged, never raised).
+    """
+    if state.context is not None:
         try:
-            _context.close()
+            state.context.close()
         except Exception as exc:
             logger.warning("Playwright cleanup: failed to close context: %s", exc)
-        _context = None
+        state.context = None
 
-    if _browser is not None:
+    if state.browser is not None:
         try:
-            _browser.close()
+            state.browser.close()
         except Exception as exc:
             logger.warning("Playwright cleanup: failed to close browser: %s", exc)
-        _browser = None
+        state.browser = None
 
-    if _playwright is not None:
+    if state.playwright is not None:
         try:
-            _playwright.stop()
+            state.playwright.stop()
         except Exception as exc:
             logger.warning("Playwright cleanup: failed to stop playwright: %s", exc)
-        _playwright = None
+        state.playwright = None
+
+    state.context_page_count = 0
+
+
+def close_current_thread_playwright() -> None:
+    """Close the CALLING thread's Playwright resources and deregister them.
+
+    This is the PRIMARY teardown path: each worker thread MUST call it from its
+    own ``finally`` block.  Because it runs on the owning thread, all closes are
+    greenlet-safe.  Each close is individually guarded; the state is zeroed and
+    removed from the module registry afterwards so the atexit backstop has
+    nothing left to sweep for this thread.
+    """
+    state: Optional["_PWThreadState"] = getattr(_pw_tls, "state", None)
+    if state is None:
+        return
+
+    logger.info("Playwright cleanup: tearing down resources for thread '%s'",
+                threading.current_thread().name)
+
+    _close_state(state)
+
+    with _pw_registry_lock:
+        try:
+            _pw_registry.remove(state)
+        except ValueError:
+            pass
+    _pw_tls.state = None
+
+
+def _atexit_sweep() -> None:
+    """Backstop ONLY: best-effort close of any state left in the registry.
+
+    The PRIMARY teardown is ``close_current_thread_playwright()`` invoked on
+    each owning worker thread.  This sweep exists solely to mop up states whose
+    owning thread exited without cleaning up (a bug or an abrupt shutdown).  It
+    runs on the interpreter-shutdown thread, so closing a foreign thread's
+    objects can raise greenlet ownership errors — every close is wrapped in
+    try/except and such errors are logged at debug/warning level, NEVER raised.
+    """
+    with _pw_registry_lock:
+        leftovers = list(_pw_registry)
+        _pw_registry.clear()
+
+    if not leftovers:
+        return
+
+    logger.warning(
+        "Playwright atexit backstop: sweeping %d leftover thread state(s) "
+        "(primary teardown should have closed these on their owning threads)",
+        len(leftovers),
+    )
+    for state in leftovers:
+        try:
+            _close_state(state)
+        except Exception as exc:  # defensive: _close_state already guards each step
+            logger.debug("Playwright atexit backstop: close failed: %s", exc)
 
 
 def get_browser() -> "Browser":
-    """Return the singleton Browser instance, launching it lazily if needed."""
-    global _playwright, _browser, _cleanup_registered
+    """Return the calling thread's Browser instance, launching it lazily."""
+    state = _get_tls_state()
 
-    if _browser is not None:
-        return _browser
+    if state.browser is not None:
+        return state.browser
 
     if not _PLAYWRIGHT_AVAILABLE:
         raise RuntimeError(
@@ -104,16 +220,14 @@ def get_browser() -> "Browser":
     cfg = get_config()
     pw_cfg = cfg.PLAYWRIGHT_CONFIG
 
-    _playwright = sync_playwright().start()
+    state.playwright = sync_playwright().start()
 
-    # Register atexit cleanup exactly once
-    if not _cleanup_registered:
-        atexit.register(_cleanup_playwright)
-        _cleanup_registered = True
+    # Register atexit backstop exactly once (primary teardown is in-worker).
+    _ensure_atexit_registered()
 
     # Select browser engine (chromium, firefox, webkit)
     browser_type_name = pw_cfg.get("browser", "chromium")
-    browser_type = getattr(_playwright, browser_type_name)
+    browser_type = getattr(state.playwright, browser_type_name)
 
     # Build launch kwargs
     launch_kwargs: Dict[str, Any] = {
@@ -124,7 +238,7 @@ def get_browser() -> "Browser":
         launch_kwargs["executable_path"] = executable_path
 
     try:
-        _browser = browser_type.launch(**launch_kwargs)
+        state.browser = browser_type.launch(**launch_kwargs)
     except PlaywrightError as exc:
         if "executable doesn't exist" in str(exc).lower():
             logger.error(
@@ -135,33 +249,37 @@ def get_browser() -> "Browser":
         raise
 
     logger.info(
-        "Playwright %s browser launched (headless=%s)",
+        "Playwright %s browser launched (headless=%s) on thread '%s'",
         browser_type_name,
         launch_kwargs["headless"],
+        threading.current_thread().name,
     )
-    return _browser
+    return state.browser
 
 
 def _get_context() -> "BrowserContext":
-    """Return the singleton BrowserContext, recreating it when page limit is reached."""
-    global _context, _context_page_count
+    """Return the calling thread's BrowserContext, recycling it at the page limit."""
+    state = _get_tls_state()
 
     cfg = get_config()
     pw_cfg = cfg.PLAYWRIGHT_CONFIG
     context_pages_limit = pw_cfg.get("context_pages_limit", 500)
 
-    # Recycle context if page count exceeds limit
-    if _context is not None and _context_page_count >= context_pages_limit:
+    # Recycle context if page count exceeds limit (per-thread)
+    if state.context is not None and state.context_page_count >= context_pages_limit:
         try:
-            _context.close()
+            state.context.close()
         except Exception:
             pass
-        _context = None
-        _context_page_count = 0
-        logger.info("Playwright context recreated after %d pages", context_pages_limit)
+        state.context = None
+        state.context_page_count = 0
+        logger.info(
+            "Playwright context recreated after %d pages on thread '%s'",
+            context_pages_limit, threading.current_thread().name,
+        )
 
-    if _context is not None:
-        return _context
+    if state.context is not None:
+        return state.context
 
     browser = get_browser()
 
@@ -203,7 +321,8 @@ def _get_context() -> "BrowserContext":
                 storage_state,
             )
 
-    _context = browser.new_context(**context_kwargs)
+    context = browser.new_context(**context_kwargs)
+    state.context = context
 
     # Route-based resource blocking
     block_resources: List[str] = pw_cfg.get("block_resources", [])
@@ -216,53 +335,73 @@ def _get_context() -> "BrowserContext":
             else:
                 route.continue_()
 
-        _context.route("**/*", _block_handler)
+        context.route("**/*", _block_handler)
 
     # URL pattern blocking
     block_urls: List[str] = pw_cfg.get("block_urls", [])
     for pattern in block_urls:
-        _context.route(pattern, lambda route, _request: route.abort())
+        context.route(pattern, lambda route, _request: route.abort())
 
     # Inject cookies
     cookies: List[Dict[str, Any]] = pw_cfg.get("cookies", [])
     if cookies:
-        _context.add_cookies(cookies)
+        context.add_cookies(cookies)
 
     # Apply stealth anti-detection
     if pw_cfg.get("stealth", True):
-        _apply_stealth_scripts(_context)
+        _apply_stealth_scripts(context)
 
-    return _context
+    return context
 
 
 def _reset_playwright() -> None:
-    """Full teardown for crash recovery -- reset all singletons."""
-    global _context, _browser, _playwright, _context_page_count
+    """Full teardown for crash recovery — reset ONLY the calling thread's state.
 
-    logger.warning("Playwright: performing full reset of browser resources")
+    Invoked from the crash-recovery branches of ``fetch_playwright_markdown`` /
+    ``fetch_playwright_html``, which run INSIDE the worker thread that owns the
+    state.  Closing on the owning thread is greenlet-safe.  The state is also
+    removed from the registry; a subsequent call on this thread lazily creates a
+    fresh one.  Other threads' states are untouched, so one worker's crash never
+    disturbs a sibling worker's live browser.
+    """
+    state: Optional["_PWThreadState"] = getattr(_pw_tls, "state", None)
+    if state is None:
+        return
 
-    if _context is not None:
+    logger.warning(
+        "Playwright: performing full reset of browser resources on thread '%s'",
+        threading.current_thread().name,
+    )
+
+    if state.context is not None:
         try:
-            _context.close()
+            state.context.close()
         except Exception:
             pass
-        _context = None
+        state.context = None
 
-    if _browser is not None:
+    if state.browser is not None:
         try:
-            _browser.close()
+            state.browser.close()
         except Exception:
             pass
-        _browser = None
+        state.browser = None
 
-    if _playwright is not None:
+    if state.playwright is not None:
         try:
-            _playwright.stop()
+            state.playwright.stop()
         except Exception:
             pass
-        _playwright = None
+        state.playwright = None
 
-    _context_page_count = 0
+    state.context_page_count = 0
+
+    with _pw_registry_lock:
+        try:
+            _pw_registry.remove(state)
+        except ValueError:
+            pass
+    _pw_tls.state = None
 
 
 # ---------------------------------------------------------------------------
@@ -349,11 +488,225 @@ def _parse_selectors(selector_string: str) -> List[str]:
     return [s.strip() for s in selector_string.split(",") if s.strip()]
 
 
+def _best_from_srcset(value: str) -> str:
+    """Return the best candidate URL from a srcset/data-srcset value.
+
+    Robust against commas inside URLs (Cloudinary `w_100,h_50`, query strings,
+    data-URIs). Picks the highest `w` descriptor; else the highest `x` density;
+    else the first candidate. A candidate with no descriptor is treated as 1x.
+    """
+    if not value:
+        return ""
+    # WHATWG-style tokenizer: a URL is a run of non-whitespace; if it ends with a
+    # comma it is a no-descriptor candidate, otherwise the descriptor runs up to
+    # the next comma. This correctly handles BOTH comma-no-space separators
+    # (`/a.jpg 100w,/b.jpg 200w`) AND commas INSIDE URLs (Cloudinary
+    # `w_100,h_50`, query strings), which a plain comma split cannot.
+    candidates = []  # list of (url, descriptor)
+    i, n = 0, len(value)
+    while i < n:
+        while i < n and (value[i].isspace() or value[i] == ","):
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and not value[i].isspace():
+            i += 1
+        url = value[start:i]
+        desc = ""
+        if url.endswith(","):
+            url = url.rstrip(",")
+        else:
+            while i < n and value[i].isspace():
+                i += 1
+            dstart = i
+            while i < n and value[i] != ",":
+                i += 1
+            desc = value[dstart:i].strip()
+            if i < n and value[i] == ",":
+                i += 1
+        if url:
+            candidates.append((url, desc))
+
+    best_url = ""
+    best_w = -1.0
+    best_x = -1.0
+    for url, desc in candidates:
+        # Reject a "URL" that is actually a bare descriptor (malformed srcset).
+        if re.match(r"^[\d.]+[wx]$", url, re.IGNORECASE):
+            continue
+        desc = desc.lower()
+        if desc.endswith("w"):
+            try:
+                w = float(desc[:-1])
+            except ValueError:
+                w = 0.0
+            if w > best_w:
+                best_w = w
+                best_url = url
+        elif desc.endswith("x"):
+            try:
+                x = float(desc[:-1])
+            except ValueError:
+                x = 1.0
+            if best_w < 0 and x > best_x:  # only honour x when no w-candidate won
+                best_x = x
+                best_url = url
+        else:
+            # no descriptor -> treat as 1x
+            if best_w < 0 and best_x < 1.0:
+                best_x = 1.0
+                if not best_url:
+                    best_url = url
+    return best_url
+
+
+def _is_spacer_dimensions(img) -> bool:
+    """True only when BOTH width and height attrs are exactly 1 (tolerant of 'px')."""
+    def _is_one(v):
+        if v is None:
+            return False
+        return bool(re.match(r'^\s*1\s*(px)?\s*$', str(v), re.IGNORECASE))
+    return _is_one(img.get("width")) and _is_one(img.get("height"))
+
+
+def _normalize_images(soup, base_url):
+    """Rewrite <img> tags in-place so markdownify emits ![alt](absolute_url).
+
+    Recovers lazy-loaded URLs, drops junk (data-URIs/spacers), resolves
+    relative URLs to absolute. Never raises. Operates only when image markdown
+    output is desired (caller gates on mode == 'markdown').
+    """
+    from urllib.parse import urljoin
+
+    # Promote <picture><source srcset> into the inner <img> when src looks like a placeholder.
+    for picture in soup.find_all("picture"):
+        img = picture.find("img")
+        if img is None:
+            continue
+        cur = (img.get("src") or "").strip()
+        if (not cur) or cur.startswith("data:"):
+            best = ""
+            for source in picture.find_all("source"):
+                cand = _best_from_srcset(source.get("srcset") or source.get("data-srcset") or "")
+                if cand:
+                    best = cand  # last/best source wins; sources are usually ordered
+                    break
+            if best:
+                img["src"] = best
+
+    for img in list(soup.find_all("img")):
+        try:
+            # 1. Resolve the real source in priority order.
+            src = ""
+            for attr in ("data-src", "data-original", "data-lazy-src", "data-lazy"):
+                val = (img.get(attr) or "").strip()
+                if val:
+                    src = val
+                    break
+            if not src:
+                src = _best_from_srcset(img.get("srcset") or img.get("data-srcset") or "")
+            if not src:
+                src = (img.get("src") or "").strip()
+
+            # 2. Drop junk.
+            if not src or src.startswith("data:"):
+                img.decompose()
+                continue
+            if _is_spacer_dimensions(img):
+                img.decompose()
+                continue
+
+            # 3. Resolve relative -> absolute (only when base_url is usable).
+            if base_url:
+                try:
+                    src = urljoin(base_url, src)
+                except Exception:
+                    pass
+
+            # 4. Write back the clean src; strip lazy/srcset attrs so nothing re-introduces a placeholder.
+            img["src"] = src
+            for attr in ("srcset", "data-srcset", "data-src", "data-original",
+                         "data-lazy-src", "data-lazy"):
+                if img.has_attr(attr):
+                    del img[attr]
+        except Exception as exc:
+            logger.debug("Playwright: image normalization skipped one <img>: %s", exc)
+            continue
+
+
+# Tags whose presence inside an <a> marks it as an image- or heading-bearing
+# "card" link that markdownify renders as a single `[...](href)` spanning block
+# content, producing broken multi-line markdown such as
+# `[![alt](img)\n### Heading](/href)`.  Deliberately NARROW: we only unwrap
+# anchors that wrap images or headings (the cases that break image markdown).
+# Anchors wrapping a bare <div>/<ul>/etc. with no image/heading are left intact
+# so ordinary CTA / navigational link hrefs are preserved.
+_BLOCK_LINK_DESCENDANTS = (
+    "img", "figure", "picture",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+)
+
+
+def _unwrap_block_links(soup) -> None:
+    """Unwrap <a> tags that wrap block-level content (images, headings, cards).
+
+    Such anchors otherwise become a single markdown link spanning the block
+    content, e.g. ``[![alt](img)\\n### Heading](/href)`` — leaving an orphan
+    ``[`` and a broken closing ``](/href)``.  Unwrapping keeps the inner
+    content (image, heading) as clean standalone markdown.  Purely-inline text
+    links (email, phone, in-text links) contain none of these tags and are
+    preserved.  Never raises.
+    """
+    try:
+        for a in list(soup.find_all("a")):
+            try:
+                if a.find(_BLOCK_LINK_DESCENDANTS) is not None:
+                    a.unwrap()
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.debug("Playwright: block-link unwrap failed: %s", exc)
+
+
+def _markdownify_safe_images(html: str, md_kwargs: Dict[str, Any]) -> str:
+    """Run markdownify with a ``convert_img`` override that ALWAYS emits ``![alt](url)``.
+
+    markdownify's stock ``convert_img`` returns the bare alt text (dropping the
+    URL) whenever an image sits in an inline context (a heading or table cell)
+    whose direct parent tag is not allow-listed — and the allow-list can never
+    cover every wrapper tag (``span``/``strong``/``picture``/...).  Overriding
+    ``convert_img`` to unconditionally emit a well-formed image guarantees the
+    URL survives regardless of where the ``<img>`` sits.  We also sanitise the
+    alt text and the URL so special characters can never break ``![alt](url)``
+    syntax (``]`` in alt, spaces/parens in the URL, etc.).
+    """
+    from markdownify import MarkdownConverter  # type: ignore[import-untyped]
+
+    class _ImgSafeConverter(MarkdownConverter):  # type: ignore[misc, valid-type]
+        def convert_img(self, el, text, *args, **kwargs):  # type: ignore[no-untyped-def]
+            alt = el.attrs.get("alt", None) or ""
+            src = el.attrs.get("src", None) or ""
+            title = el.attrs.get("title", None) or ""
+            # Sanitise alt so it cannot break the ![...]() syntax.
+            alt = alt.replace("\r", " ").replace("\n", " ")
+            alt = alt.replace("![", "(").replace("[", "(").replace("]", ")")
+            # Sanitise the URL: CommonMark angle-bracket form legally allows
+            # spaces and parentheses; neutralise any literal angle brackets.
+            if src and re.search(r"[\s()]", src):
+                src = "<" + src.replace("<", "%3C").replace(">", "%3E") + ">"
+            title_part = ' "%s"' % title.replace('"', r"\"") if title else ""
+            return "![%s](%s%s)" % (alt, src, title_part)
+
+    return _ImgSafeConverter(**md_kwargs).convert(html)
+
+
 def _html_to_markdown(
     html: str,
     remove_selectors: Optional[List[str]] = None,
     target_selectors: Optional[List[str]] = None,
     pw_cfg: Optional[Dict[str, Any]] = None,
+    base_url: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Convert raw HTML to markdown with optional DOM filtering.
 
@@ -366,18 +719,26 @@ def _html_to_markdown(
         pw_cfg: Playwright config dict controlling image and table behaviour.
             Recognised keys:
 
-            - ``convert_images_to_alt_text`` (bool, default ``True``): when
-              ``True``, images are converted to ``[Image: alt text]`` markers;
-              when ``False``, ``<img>`` tags are stripped entirely.
+            - ``image_handling`` (str, default ``"alt_text"``): 3-way image
+              mode.  ``"markdown"`` keeps real images as ``![alt](absolute_url)``
+              (lazy/srcset URLs recovered, relative URLs resolved against
+              ``base_url``, data-URI/spacer images dropped); ``"alt_text"``
+              rewrites images to ``[Image: alt text]`` markers (dropping
+              images whose alt text is shorter than 3 chars); ``"strip"``
+              removes ``<img>`` tags entirely.
             - ``table_infer_header`` (bool, default ``True``): when ``True``,
               markdownify receives ``table_infer_header=True`` so headerless
               HTML tables get an inferred header row.
+        base_url: Page URL used to resolve relative image ``src`` values to
+            absolute URLs when ``image_handling`` is ``"markdown"``.
 
     Returns:
         A ``(markdown_content, title)`` tuple.
     """
     if pw_cfg is None:
         pw_cfg = {}
+
+    mode = str(pw_cfg.get("image_handling", "alt_text")).strip().lower()
 
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
@@ -403,9 +764,41 @@ def _html_to_markdown(
             combined_html = "".join(str(el) for el in extracted_parts)
             working_soup = BeautifulSoup(combined_html, "html.parser")
         else:
-            logger.debug(
-                "Playwright: target_selectors matched nothing, using whole document"
+            logger.warning(
+                "Playwright: target_selectors %s matched nothing — falling back to whole document",
+                target_selectors,
             )
+
+    # Generic structural boilerplate pass (additive, safe-by-default).
+    # Runs on BOTH the target-selector path and the whole-document fallback.
+    # Strips navigation / language-widget / search / cookie containers that are
+    # frequently siblings of <header> and thus missed by remove_selectors.
+    if pw_cfg.get("strip_boilerplate_default", True):
+        boilerplate_selectors = (
+            "nav, header, footer, aside, form, "
+            '[role="navigation"], [role="search"], '
+            "#google_translate_element, .goog-te-combo, #languages, "
+            "#main-nav, #fullscreen-search, "
+            '[id*="translate" i], [id*="search" i], '
+            '[class*="cookie" i], [class*="menu" i]'
+        )
+        # Snapshot pre-strip HTML so we can fall back if over-stripping empties the soup.
+        pre_strip_html = str(working_soup)
+        try:
+            for el in working_soup.select(boilerplate_selectors):
+                try:
+                    el.decompose()
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("Playwright: boilerplate strip pass failed: %s", exc)
+        # Never return empty because of over-stripping.
+        if not working_soup.get_text(strip=True):
+            logger.warning(
+                "Playwright: boilerplate strip emptied the document — "
+                "reverting to pre-strip content"
+            )
+            working_soup = BeautifulSoup(pre_strip_html, "html.parser")
 
     # Remove selector filtering
     if remove_selectors:
@@ -413,12 +806,21 @@ def _html_to_markdown(
             for el in working_soup.select(selector):
                 el.decompose()
 
+    if mode == "markdown":
+        try:
+            _normalize_images(working_soup, base_url)
+        except Exception as exc:
+            logger.debug("Playwright: image normalization failed: %s", exc)
+        # Unwrap card/block links so images render as standalone ![alt](url)
+        # instead of being wrapped in a multi-line [...](href) link.
+        _unwrap_block_links(working_soup)
+
     # Convert to markdown
     try:
         from markdownify import markdownify as md  # type: ignore[import-untyped]
 
         strip_tags = ["svg"]  # Always strip SVG
-        if not pw_cfg.get("convert_images_to_alt_text", True):
+        if mode == "strip":
             strip_tags.append("img")
 
         md_kwargs: Dict[str, Any] = {
@@ -429,7 +831,12 @@ def _html_to_markdown(
         if pw_cfg.get("table_infer_header", True):
             md_kwargs["table_infer_header"] = True
 
-        markdown = md(str(working_soup), **md_kwargs)
+        if mode == "markdown":
+            # Custom converter guarantees ![alt](url) even for images nested in
+            # headings / table cells, with alt/URL sanitisation.
+            markdown = _markdownify_safe_images(str(working_soup), md_kwargs)
+        else:
+            markdown = md(str(working_soup), **md_kwargs)
     except ImportError:
         logger.warning(
             "markdownify not installed, falling back to plain text extraction. "
@@ -439,10 +846,9 @@ def _html_to_markdown(
 
         markdown = html_to_plain_text(str(working_soup))
 
-    # Post-process: convert image markdown to simplified [Image: alt] markers
-    if pw_cfg.get("convert_images_to_alt_text", True):
-
-        def _simplify_image(match: re.Match) -> str:  # type: ignore[type-arg]
+    # Post-process images according to mode.
+    if mode == "alt_text":
+        def _simplify_image(match: "re.Match") -> str:  # type: ignore[type-arg]
             alt = match.group(1).strip()
             if len(alt) < 3:
                 return ""
@@ -451,6 +857,12 @@ def _html_to_markdown(
         markdown = re.sub(
             r'!\[([^\]]*)\]\([^)]*(?:\s+"[^"]*")?\)', _simplify_image, markdown
         )
+    elif mode == "markdown":
+        # Belt-and-suspenders: drop any residual data-URI image that slipped through.
+        markdown = re.sub(r'!\[[^\]]*\]\(\s*data:[^)]*\)', "", markdown)
+        # Drop any empty-URL image artifact (e.g. a src-less <img> that bypassed
+        # normalization) so we never emit a malformed `![alt]()`.
+        markdown = re.sub(r'!\[[^\]]*\]\(\s*\)', "", markdown)
 
     # Post-process: collapse excessive blank lines (max 2 consecutive)
     markdown = re.sub(r"\n{4,}", "\n\n\n", markdown)
@@ -489,50 +901,61 @@ def _prepare_page(
         The HTML string on success, or ``None`` if the page returned
         minimal / empty content (caller should retry).
     """
-    # -- Navigate -----------------------------------------------------------
-    wait_until = pw_cfg.get("wait_until", "domcontentloaded")
-    page.goto(url, wait_until=wait_until)
+    # The politeness-tier rate-limiter slot is held for the entire
+    # network-active region (navigation + smart-wait + scroll/expand + capture)
+    # because the page is actively driving the TARGET site throughout. It is
+    # released as soon as this function returns -- BEFORE the caller performs
+    # the CPU-bound HTML->markdown conversion -- so we never hold a politeness
+    # slot during pure local work.
+    from gpt_scraper_v3.rate_limiter import get_rate_limiter
 
-    # -- Wait strategy ------------------------------------------------------
-    if pw_cfg.get("smart_wait_enabled", False):
-        from gpt_scraper_v3.playwright_page_actions import wait_for_content_ready
+    with get_rate_limiter().acquire(url):
+        # -- Navigate -------------------------------------------------------
+        wait_until = pw_cfg.get("wait_until", "domcontentloaded")
+        page.goto(url, wait_until=wait_until)
 
-        wait_for_content_ready(page, pw_cfg)
-        # smart wait handles wait_for_selector and wait_for_timeout_ms internally
-    else:
-        # Basic wait -- existing behaviour
-        wait_sel = pw_cfg.get("wait_for_selector", "")
-        if wait_sel:
-            page.wait_for_selector(wait_sel, timeout=10000)
-        wait_ms = pw_cfg.get("wait_for_timeout_ms", 0)
-        if wait_ms > 0:
-            page.wait_for_timeout(wait_ms)
+        # -- Wait strategy --------------------------------------------------
+        if pw_cfg.get("smart_wait_enabled", False):
+            from gpt_scraper_v3.playwright_page_actions import wait_for_content_ready
 
-    # -- Cookie banner dismissal (always, regardless of content actions) ----
-    from gpt_scraper_v3.playwright_page_actions import dismiss_cookie_banners
+            wait_for_content_ready(page, pw_cfg)
+            # smart wait handles wait_for_selector and wait_for_timeout_ms internally
+        else:
+            # Basic wait -- existing behaviour
+            wait_sel = pw_cfg.get("wait_for_selector", "")
+            if wait_sel:
+                page.wait_for_selector(wait_sel, timeout=10000)
+            wait_ms = pw_cfg.get("wait_for_timeout_ms", 0)
+            if wait_ms > 0:
+                page.wait_for_timeout(wait_ms)
 
-    dismiss_cookie_banners(page, pw_cfg)
+        # -- Cookie banner dismissal (always, regardless of content actions) -
+        from gpt_scraper_v3.playwright_page_actions import dismiss_cookie_banners
 
-    # -- Content actions (gated) --------------------------------------------
-    if include_content_actions:
-        from gpt_scraper_v3.playwright_page_actions import (
-            scroll_for_lazy_content,
-            expand_collapsible_sections,
-        )
+        dismiss_cookie_banners(page, pw_cfg)
 
-        did_scroll = scroll_for_lazy_content(page, pw_cfg)
-        did_expand = expand_collapsible_sections(page, pw_cfg)
-        if did_scroll or did_expand:
-            page.wait_for_timeout(300)
+        # -- Content actions (gated) ----------------------------------------
+        if include_content_actions:
+            from gpt_scraper_v3.playwright_page_actions import (
+                scroll_for_lazy_content,
+                expand_collapsible_sections,
+            )
 
-    # -- Custom JS execution ------------------------------------------------
-    js_code = pw_cfg.get("javascript_to_execute", "")
-    if js_code:
-        logger.warning("Executing custom JavaScript from config (security: verify source)")
-        page.evaluate(js_code)
+            did_scroll = scroll_for_lazy_content(page, pw_cfg)
+            did_expand = expand_collapsible_sections(page, pw_cfg)
+            if did_scroll or did_expand:
+                page.wait_for_timeout(300)
 
-    # -- Capture and validate HTML ------------------------------------------
-    html = page.content()
+        # -- Custom JS execution --------------------------------------------
+        js_code = pw_cfg.get("javascript_to_execute", "")
+        if js_code:
+            logger.warning("Executing custom JavaScript from config (security: verify source)")
+            page.evaluate(js_code)
+
+        # -- Capture HTML (still on the target site) ------------------------
+        html = page.content()
+
+    # -- Validate HTML (slot released; markdown conversion happens in caller) -
     if not html or len(html.strip()) < 200:
         logger.warning(
             "PLAYWRIGHT: Minimal HTML for %s (%d chars)",
@@ -698,9 +1121,10 @@ def fetch_playwright_markdown(
             page: Optional["Page"] = None
             try:
                 context = _get_context()
-                global _context_page_count
-                _context_page_count += 1
                 page = context.new_page()
+                # Bug 11: count the page only AFTER new_page() succeeds.
+                # context_page_count is thread-local (no lock needed).
+                _get_tls_state().context_page_count += 1
 
                 try:
                     nav_timeout = active_pw_cfg.get("navigation_timeout_ms", 30000)
@@ -725,7 +1149,7 @@ def fetch_playwright_markdown(
                     r_sels = _parse_selectors(r_sel_str)
                     t_sels = _parse_selectors(t_sel_str)
 
-                    markdown, title = _html_to_markdown(html, r_sels, t_sels, pw_cfg=active_pw_cfg)
+                    markdown, title = _html_to_markdown(html, r_sels, t_sels, pw_cfg=active_pw_cfg, base_url=url)
 
                     if not markdown or not markdown.strip():
                         logger.warning(
@@ -883,9 +1307,10 @@ def fetch_playwright_html(url: str) -> Optional[str]:
         page: Optional["Page"] = None
         try:
             context = _get_context()
-            global _context_page_count
-            _context_page_count += 1
             page = context.new_page()
+            # Bug 11: count the page only AFTER new_page() succeeds.
+            # context_page_count is thread-local (no lock needed).
+            _get_tls_state().context_page_count += 1
 
             try:
                 nav_timeout = pw_cfg.get("navigation_timeout_ms", 30000)

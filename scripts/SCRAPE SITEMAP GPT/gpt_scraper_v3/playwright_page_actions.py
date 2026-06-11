@@ -178,9 +178,6 @@ def scroll_for_lazy_content(page: "Any", pw_cfg: Dict[str, Any]) -> int:
     max_scrolls: int = pw_cfg.get("auto_scroll_max_scrolls", 20)
     step_delay_ms: int = pw_cfg.get("auto_scroll_step_delay_ms", 200)
 
-    # Bound total JS execution time
-    max_time: int = min(max_scrolls * step_delay_ms + 5000, 25000)
-
     js_code = """\
 async ([maxScrolls, stepDelayMs]) => {
     const step = window.innerHeight;
@@ -210,7 +207,6 @@ async ([maxScrolls, stepDelayMs]) => {
         scroll_count: int = page.evaluate(
             js_code,
             [max_scrolls, step_delay_ms],
-            timeout=max_time,
         )
     except Exception as exc:
         logger.warning("Scroll for lazy content failed: %s", exc)

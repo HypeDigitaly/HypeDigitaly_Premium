@@ -22,7 +22,9 @@ from gpt_scraper_v3.utilities import (
     construct_final_filename,
     create_filename_from_url,
     count_tokens_approximate,
+    reserve_unique_filepath_fn,
     sanitize_filename,
+    write_content_to_reserved_path,
 )
 from gpt_scraper_v3.vector_store import (
     find_existing_files_by_url_cached,
@@ -360,18 +362,9 @@ def save_markdown_to_file(
         if not resolved.startswith(output_dir_resolved):
             raise ValueError(f"Path traversal detected: {filepath}")
 
-        # Check for collisions (local filesystem AND Vector Store)
-        collision_detected = False
-        version_counter = 1
-
-        # Check 1: Local filesystem collision
-        local_collision = os.path.exists(filepath)
-        if local_collision:
-            logger.info(f"LOCAL FILE COLLISION detected: {filepath}")
-            collision_detected = True
-
-        # Check 2: Vector Store collision (if Vector Store is enabled)
-        vector_collision = False
+        # Informational collision logging (naming/versioning is handled
+        # atomically by reserve_unique_filepath_fn below to avoid the TOCTOU
+        # race two worker threads could hit with a plain os.path.exists loop).
         if upload_to_vector_store and vector_store_id and enable_deduplication:
             if vector_store_cache is not None:
                 existing_files = find_existing_files_by_url_cached(
@@ -384,44 +377,48 @@ def save_markdown_to_file(
                         len(existing_files),
                         vector_store_url,
                     )
-                    vector_collision = True
-                    collision_detected = True
-
-        # Apply V[N] versioning ONLY if collision was detected
-        if collision_detected:
-            logger.info(
-                "COLLISION DETECTED - Applying V[N] versioning "
-                "(local: %s, vector: %s)",
-                local_collision,
-                vector_collision,
-            )
-
-            if filename:
-                # Pre-constructed filename -- parse and add versioning
-                original_filepath = filepath
-                while os.path.exists(filepath):
-                    name, ext = os.path.splitext(original_filepath)
-                    filepath = f"{name}_V{version_counter}{ext}"
-                    version_counter += 1
-            else:
-                # Traditional filename construction with V[N] versioning
-                while os.path.exists(filepath):
-                    filename_with_version = construct_final_filename(
-                        base_filename=base_filename,
-                        is_paginated=is_paginated,
-                        page_number=page_number,
-                        chunk_postfix=chunk_postfix,
-                        dedup_counter=version_counter,
-                    )
-                    filepath = os.path.join(
-                        cfg.OUTPUT_DIR, f"{filename_with_version}.txt"
-                    )
-                    version_counter += 1
-        else:
-            logger.info("NO COLLISION - Using original filename without versioning")
 
         # Create output directory if it does not exist
         os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+        # Build a counter->path callback that reproduces the existing
+        # ``<base>_V{n}`` naming (counter 0 = base name, n>0 = versioned), then
+        # atomically reserve the first free name (race-safe via O_CREAT|O_EXCL).
+        if filename:
+            _name_root, _name_ext = os.path.splitext(filepath)
+
+            def _name_fn(counter: int, _root: str = _name_root,
+                         _ext: str = _name_ext) -> str:
+                if counter == 0:
+                    return f"{_root}{_ext}"
+                return f"{_root}_V{counter}{_ext}"
+        else:
+            def _name_fn(
+                counter: int,
+                _base: str = base_filename,
+                _paginated: bool = is_paginated,
+                _page: Optional[int] = page_number,
+                _chunk: Optional[str] = chunk_postfix,
+            ) -> str:
+                versioned = construct_final_filename(
+                    base_filename=_base,
+                    is_paginated=_paginated,
+                    page_number=_page,
+                    chunk_postfix=_chunk,
+                    dedup_counter=(counter if counter > 0 else None),
+                )
+                return os.path.join(cfg.OUTPUT_DIR, f"{versioned}.txt")
+
+        filepath = reserve_unique_filepath_fn(_name_fn)
+
+        # Path traversal protection on the actually reserved path
+        resolved_reserved = os.path.realpath(filepath)
+        if not resolved_reserved.startswith(output_dir_resolved):
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            raise ValueError(f"Path traversal detected: {filepath}")
 
         # Create metadata header with clean URL for display
         metadata_header = create_metadata_header(
@@ -448,9 +445,9 @@ def save_markdown_to_file(
         # Combine metadata header + QUESTION + content
         full_content = metadata_header + question_section + content
 
-        # Save content to file
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(full_content)
+        # Crash-safe write into the reserved path (temp + os.replace); on
+        # failure the 0-byte reservation placeholder is removed for us.
+        write_content_to_reserved_path(filepath, full_content)
 
         logger.info(f"Saved markdown content to: {filepath}")
         print(f"Saved: {filepath}")

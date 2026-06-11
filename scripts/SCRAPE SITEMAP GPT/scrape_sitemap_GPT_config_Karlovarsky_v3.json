@@ -79,7 +79,7 @@
       "expand_collapsibles_enabled": false,
       "expand_collapsibles_selectors": "",
       "expand_collapsibles_wait_ms": 500,
-      "convert_images_to_alt_text": true,
+      "image_handling": "markdown",
       "table_infer_header": true,
       "dismiss_cookie_banners": true,
       "cookie_banner_selectors": ""
@@ -106,6 +106,16 @@
     ],
     "retry_count": 3,
     "backoff_factor": 0.3
+  },
+  "parallelism": {
+    "workers": 6,
+    "max_concurrent_per_domain": 4,
+    "min_interval_ms": 1000,
+    "api_max_concurrent": 12,
+    "rate_limit_enabled": true,
+    "aux_workers": 8,
+    "api_retry_max_attempts": 2,
+    "api_retry_cap_seconds": 60
   },
   "processing": {
     "check_last_modified": 1,

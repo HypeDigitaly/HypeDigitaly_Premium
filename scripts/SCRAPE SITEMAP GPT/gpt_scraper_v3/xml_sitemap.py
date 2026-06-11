@@ -13,11 +13,13 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 
 from gpt_scraper_v3.config import get_config
+from gpt_scraper_v3.rate_limiter import get_rate_limiter
 from gpt_scraper_v3.utilities import get_session, is_url_blacklisted_by_path, normalize_url_query_params
 
 logger = logging.getLogger(__name__)
@@ -90,46 +92,68 @@ def fetch_xml_sitemap() -> Dict[str, Optional[datetime]]:
             if sitemap_page_urls:
                 logger.info("Found %d sitemap page URLs", len(sitemap_page_urls))
 
-                for page_url in sitemap_page_urls:
+                # Fetch + parse ONE sitemap page into local result lists. A
+                # failed child logs and yields empty lists (never aborts the
+                # whole run). The GET is wrapped in the politeness rate limiter
+                # (same-domain pacing across children is intended).
+                def _fetch_page(page_url: str):
                     try:
-                        page_response = get_session().get(
-                            page_url, timeout=cfg.REQUEST_TIMEOUT,
-                        )
-                        page_response.raise_for_status()
+                        with get_rate_limiter().acquire(page_url):
+                            page_response = get_session().get(
+                                page_url, timeout=cfg.REQUEST_TIMEOUT,
+                            )
+                            page_response.raise_for_status()
+                            page_text = page_response.text
 
                         # Match URLs WITH lastmod
                         url_matches = re.findall(
                             r"<url>.*?<loc>(.*?)</loc>.*?<lastmod>(.*?)</lastmod>.*?</url>",
-                            page_response.text,
+                            page_text,
                             re.DOTALL,
                         )
-
-                        for url, lastmod in url_matches:
-                            last_modified = parse_lastmod_date(lastmod)
-                            url_last_modified[url] = last_modified
-
                         # Also capture URLs WITHOUT lastmod (store None)
                         loc_only_matches = re.findall(
                             r"<url>.*?<loc>(.*?)</loc>.*?</url>",
-                            page_response.text,
+                            page_text,
                             re.DOTALL,
                         )
-                        without_lastmod = 0
-                        for url in loc_only_matches:
-                            if url not in url_last_modified:
-                                url_last_modified[url] = None
-                                without_lastmod += 1
-
-                        page_total = len(url_matches) + without_lastmod
-                        logger.info(
-                            "Extracted %d URLs (%d with lastmod, %d without) from %s",
-                            page_total, len(url_matches), without_lastmod, page_url,
-                        )
-
+                        return (page_url, url_matches, loc_only_matches)
                     except Exception as e:
                         logger.error(
                             "Error processing sitemap page %s: %s", page_url, e,
                         )
+                        return (page_url, [], [])
+
+                # ex.map preserves the input order, so the main-thread merge
+                # below replays each page's two-phase merge in the exact same
+                # order as the original serial loop. This is critical because
+                # the "without lastmod" guard (``if url not in url_last_modified``)
+                # consults the GLOBALLY accumulated dict across pages.
+                with ThreadPoolExecutor(
+                    max_workers=cfg.AUX_PARALLEL_WORKERS
+                ) as ex:
+                    page_results = list(ex.map(_fetch_page, sitemap_page_urls))
+
+                for page_url, url_matches, loc_only_matches in page_results:
+                    # Phase 1: URLs WITH lastmod -- unconditional overwrite
+                    # (matches original semantics exactly).
+                    for url, lastmod in url_matches:
+                        last_modified = parse_lastmod_date(lastmod)
+                        url_last_modified[url] = last_modified
+
+                    # Phase 2: URLs WITHOUT lastmod -- only add when not already
+                    # present in the globally accumulated dict (store None).
+                    without_lastmod = 0
+                    for url in loc_only_matches:
+                        if url not in url_last_modified:
+                            url_last_modified[url] = None
+                            without_lastmod += 1
+
+                    page_total = len(url_matches) + without_lastmod
+                    logger.info(
+                        "Extracted %d URLs (%d with lastmod, %d without) from %s",
+                        page_total, len(url_matches), without_lastmod, page_url,
+                    )
 
         # -- Try parsing with BeautifulSoup ----------------------------------
         # Import here so the module can still load without bs4 installed.
@@ -149,17 +173,32 @@ def fetch_xml_sitemap() -> Dict[str, Optional[datetime]]:
                 # -- Sitemap index format (<sitemap> entries) ----------------
                 sitemaps = soup.find_all("sitemap")
                 if sitemaps:
+                    # Collect child sitemap URLs in document order first.
+                    child_sitemap_urls: List[str] = []
                     for sitemap in sitemaps:
                         loc = sitemap.find("loc")
                         if loc and loc.text:
-                            sitemap_response = get_session().get(
-                                loc.text, timeout=cfg.REQUEST_TIMEOUT,
-                            )
-                            sitemap_response.raise_for_status()
+                            child_sitemap_urls.append(loc.text)
 
-                            sitemap_soup = BeautifulSoup(
-                                sitemap_response.text, parser,
-                            )
+                    # Fetch + parse ONE child sitemap into a LOCAL ordered list
+                    # of (url_str, last_modified) tuples, preserving the exact
+                    # BeautifulSoup extraction logic. A failed child logs and
+                    # yields an empty list (never aborts the whole run). The GET
+                    # is wrapped in the politeness rate limiter (same-domain
+                    # pacing across children is intended).
+                    def _fetch_child_sitemap(child_url: str):
+                        try:
+                            with get_rate_limiter().acquire(child_url):
+                                sitemap_response = get_session().get(
+                                    child_url, timeout=cfg.REQUEST_TIMEOUT,
+                                )
+                                sitemap_response.raise_for_status()
+                                child_text = sitemap_response.text
+
+                            sitemap_soup = BeautifulSoup(child_text, parser)
+                            local_entries: List[
+                                tuple[str, Optional[datetime]]
+                            ] = []
                             for url_entry in sitemap_soup.find_all("url"):
                                 loc_elem = url_entry.find("loc")
                                 lastmod_elem = url_entry.find("lastmod")
@@ -173,9 +212,33 @@ def fetch_xml_sitemap() -> Dict[str, Optional[datetime]]:
                                             lastmod_elem.text,
                                         )
 
-                                    # CRITICAL: Add ALL URLs, even without
-                                    # lastmod (store None).
-                                    url_last_modified[url_str] = last_modified
+                                    local_entries.append(
+                                        (url_str, last_modified)
+                                    )
+                            return local_entries
+                        except Exception as e:
+                            logger.error(
+                                "Error processing child sitemap %s: %s",
+                                child_url, e,
+                            )
+                            return []
+
+                    # ex.map preserves input order, so the main-thread merge
+                    # replays the unconditional overwrites in the exact same
+                    # order as the original serial loop.
+                    with ThreadPoolExecutor(
+                        max_workers=cfg.AUX_PARALLEL_WORKERS
+                    ) as ex:
+                        child_results = list(
+                            ex.map(_fetch_child_sitemap, child_sitemap_urls)
+                        )
+
+                    for local_entries in child_results:
+                        for url_str, last_modified in local_entries:
+                            # CRITICAL: Add ALL URLs, even without lastmod
+                            # (store None). Unconditional overwrite -- matches
+                            # original semantics exactly.
+                            url_last_modified[url_str] = last_modified
                     break
 
                 # -- Direct URL entries (<url> elements) ---------------------
@@ -348,24 +411,38 @@ def get_last_run_timestamp(
 def save_last_run_timestamp(timestamp_type: str = "combined") -> None:
     """Save the current timestamp as the last run timestamp.
 
-    The timestamp is stored in the local timezone UTC+02:00 (Central European
-    Summer Time) to match the V2 behaviour.
+    Bug 1 (re-scoped): the timestamp is stored as UTC
+    (``datetime.now(timezone.utc).isoformat()``). The previous implementation
+    hardcoded a ``+02:00`` offset, which is DST-incorrect (CET winter is
+    ``+01:00``), producing a 1-hour drift for half the year. Comparison sites
+    are aware-vs-aware and the reader (:func:`get_last_run_timestamp`) preserves
+    whatever offset is stored, so old ``+02:00`` stamps still parse correctly.
+
+    Bug 6: the write is atomic — content goes to a ``.tmp`` file and is then
+    moved into place via :func:`os.replace` (mirrors :func:`_save_url_set`).
 
     Args:
         timestamp_type: ``"combined"``, ``"rss"``, or ``"sitemap"``.
     """
+    timestamp_file = _resolve_timestamp_file(timestamp_type)
+    temp_file = timestamp_file + ".tmp"
     try:
-        timestamp_file = _resolve_timestamp_file(timestamp_type)
+        with open(temp_file, "w", encoding="utf-8") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
 
-        with open(timestamp_file, "w", encoding="utf-8") as f:
-            f.write(
-                datetime.now()
-                .astimezone(timezone(timedelta(hours=2)))
-                .isoformat()
-            )
-        logger.info("Saved current UTC+02:00 timestamp to %s", timestamp_file)
+        # Atomic replace: move temp file to final location
+        os.replace(temp_file, timestamp_file)
+
+        logger.info("Saved current UTC timestamp to %s", timestamp_file)
     except (OSError, TypeError) as e:
         logger.error("Error saving %s timestamp: %s", timestamp_type, e)
+    finally:
+        # Clean up temp file if it still exists (e.g. write failed before replace)
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except OSError:
+            pass  # Ignore cleanup errors
 
 
 # ============================================================================
@@ -425,6 +502,16 @@ def build_local_files_cache(
 
         filepath = os.path.join(output_dir, filename)
         source_url: Optional[str] = None
+
+        # Skip 0-byte files: an empty .txt is never a real scraped doc (it can
+        # only be an orphaned filename-reservation placeholder from a crash)
+        # and must not poison the resume cache.
+        try:
+            if os.path.getsize(filepath) == 0:
+                logger.debug("Skipping 0-byte file in resume cache: %s", filepath)
+                continue
+        except OSError:
+            continue
 
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -513,33 +600,24 @@ def build_local_files_cache(
     return url_to_file_cache
 
 
-def load_known_urls_snapshot() -> Set[str]:
-    """Load the set of known URLs from the snapshot file.
+def _load_url_set(path: str) -> Set[str]:
+    """Load a normalized set of URLs from a JSON-array snapshot file.
 
-    Reads the snapshot file specified in ``cfg.KNOWN_URLS_FILE`` and returns
-    the set of URLs that have been seen in previous runs. This is used for
-    detecting new URLs added to the sitemap.
-
-    Returns:
-        A set of URL strings from the snapshot file. Returns an empty set if
-        the file doesn't exist (first run) or if there are errors reading it.
+    Shared body for ``load_known_urls_snapshot`` and ``load_html_seen_urls``.
+    Returns an empty set if the file is missing (first run) or unreadable.
     """
-    cfg = get_config()
-
-    if not os.path.exists(cfg.KNOWN_URLS_FILE):
-        logger.info(
-            "Known URLs snapshot file not found: %s (first run)",
-            cfg.KNOWN_URLS_FILE,
-        )
+    if not os.path.exists(path):
+        logger.info("URL snapshot file not found: %s (first run)", path)
         return set()
 
     try:
-        with open(cfg.KNOWN_URLS_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             url_list = json.load(f)
 
         if not isinstance(url_list, list):
             logger.warning(
-                "Known URLs snapshot has invalid format (expected list), returning empty set",
+                "URL snapshot %s has invalid format (expected list), returning empty set",
+                path,
             )
             return set()
 
@@ -547,42 +625,30 @@ def load_known_urls_snapshot() -> Set[str]:
         non_string_count = sum(1 for item in url_list if not isinstance(item, str))
         if non_string_count:
             logger.warning(
-                "Filtered %d non-string entries from known URLs snapshot",
-                non_string_count,
+                "Filtered %d non-string entries from URL snapshot %s",
+                non_string_count, path,
             )
-        known_urls = {
+        urls = {
             normalize_url_query_params(item)
             for item in url_list
             if isinstance(item, str)
         }
-        logger.info(
-            "Loaded %d known URLs from snapshot: %s",
-            len(known_urls),
-            cfg.KNOWN_URLS_FILE,
-        )
-        return known_urls
+        logger.info("Loaded %d URLs from snapshot: %s", len(urls), path)
+        return urls
 
     except (json.JSONDecodeError, OSError, TypeError) as e:
-        logger.warning(
-            "Error loading known URLs snapshot from %s: %s",
-            cfg.KNOWN_URLS_FILE,
-            e,
-        )
+        logger.warning("Error loading URL snapshot from %s: %s", path, e)
         return set()
 
 
-def save_known_urls_snapshot(current_urls: Set[str]) -> None:
-    """Save the current set of known URLs to the snapshot file.
+def _save_url_set(path: str, current_urls: Set[str]) -> None:
+    """Atomically save a set of URLs to a JSON-array snapshot file.
 
-    Writes the set of URLs atomically using a temporary file to prevent
-    corruption if the process is interrupted. The URLs are sorted for
-    deterministic output.
-
-    Args:
-        current_urls: Set of URL strings to save to the snapshot file.
+    Shared body for ``save_known_urls_snapshot`` and ``save_html_seen_urls``.
+    Writes via a ``.tmp`` file + ``os.replace`` to prevent corruption; URLs are
+    sorted for deterministic output.
     """
-    cfg = get_config()
-    temp_file = cfg.KNOWN_URLS_FILE + ".tmp"
+    temp_file = path + ".tmp"
 
     try:
         # Write to temporary file first
@@ -590,20 +656,12 @@ def save_known_urls_snapshot(current_urls: Set[str]) -> None:
             json.dump(sorted(current_urls), f, indent=2)
 
         # Atomic replace: move temp file to final location
-        os.replace(temp_file, cfg.KNOWN_URLS_FILE)
+        os.replace(temp_file, path)
 
-        logger.info(
-            "Saved %d known URLs to snapshot: %s",
-            len(current_urls),
-            cfg.KNOWN_URLS_FILE,
-        )
+        logger.info("Saved %d URLs to snapshot: %s", len(current_urls), path)
 
     except (OSError, TypeError) as e:
-        logger.error(
-            "Error saving known URLs snapshot to %s: %s",
-            cfg.KNOWN_URLS_FILE,
-            e,
-        )
+        logger.error("Error saving URL snapshot to %s: %s", path, e)
     finally:
         # Clean up temp file if it still exists
         try:
@@ -611,3 +669,47 @@ def save_known_urls_snapshot(current_urls: Set[str]) -> None:
                 os.remove(temp_file)
         except OSError:
             pass  # Ignore cleanup errors
+
+
+def load_known_urls_snapshot() -> Set[str]:
+    """Load the set of known (XML-sitemap) URLs from the snapshot file.
+
+    Reads the snapshot file specified in ``cfg.KNOWN_URLS_FILE``. Used for
+    detecting new and removed URLs in the XML sitemap.
+
+    Returns:
+        A set of URL strings from the snapshot file. Returns an empty set if
+        the file doesn't exist (first run) or if there are errors reading it.
+    """
+    return _load_url_set(get_config().KNOWN_URLS_FILE)
+
+
+def save_known_urls_snapshot(current_urls: Set[str]) -> None:
+    """Save the current set of known (XML-sitemap) URLs to the snapshot file.
+
+    Args:
+        current_urls: Set of URL strings to save to ``cfg.KNOWN_URLS_FILE``.
+    """
+    _save_url_set(get_config().KNOWN_URLS_FILE, current_urls)
+
+
+def load_html_seen_urls() -> Set[str]:
+    """Load the set of HTML-discovered URLs seen in previous runs.
+
+    Reads the snapshot file specified in ``cfg.HTML_SEEN_URLS_FILE``. This
+    set suppresses perpetual "NEW URL" detection for HTML-sitemap-only and
+    fragment-stripped URLs that never appear in the XML known-URLs snapshot.
+
+    Returns:
+        A set of URL strings. Empty set on first run or read error.
+    """
+    return _load_url_set(get_config().HTML_SEEN_URLS_FILE)
+
+
+def save_html_seen_urls(current_urls: Set[str]) -> None:
+    """Save the set of HTML-discovered URLs to the snapshot file.
+
+    Args:
+        current_urls: Set of URL strings to save to ``cfg.HTML_SEEN_URLS_FILE``.
+    """
+    _save_url_set(get_config().HTML_SEEN_URLS_FILE, current_urls)
