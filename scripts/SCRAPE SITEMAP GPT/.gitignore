@@ -3,3 +3,6 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+
+# Secrets - real API keys live here, never commit
+.env

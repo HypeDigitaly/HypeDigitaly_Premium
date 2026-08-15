@@ -64,14 +64,47 @@ def generate_unique_paths(config_file):
         'last_run_file': f"{identifier}_last_run_time.txt"
     }
 
+def _load_env_file(env_path):
+    """Load KEY=VALUE lines from a .env file into os.environ (no overrides)."""
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+def _resolve_env_placeholders(config, config_file):
+    """Replace "env:VARNAME" values in api_keys with values from the
+    environment (a .env next to the config file is loaded first)."""
+    api_keys = config.get("api_keys")
+    if not isinstance(api_keys, dict):
+        return
+    _load_env_file(os.path.join(os.path.dirname(os.path.abspath(config_file)), '.env'))
+    for field, value in api_keys.items():
+        if isinstance(value, str) and value.startswith('env:'):
+            var = value[4:]
+            resolved = os.environ.get(var, '')
+            if not resolved:
+                raise ValueError(
+                    f"api_keys.{field} references environment variable '{var}' "
+                    f"but it is not set. Add it to the .env file next to the config."
+                )
+            api_keys[field] = resolved
+
 def load_config(config_file="config.json"):
     """Load configuration from JSON file."""
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Config file not found: {config_file}")
-    
+
     with open(config_file, 'r', encoding='utf-8') as f:
         config = json.load(f)
-    
+
+    _resolve_env_placeholders(config, config_file)
     return config
 
 def validate_config(config):

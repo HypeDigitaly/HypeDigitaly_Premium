@@ -18,10 +18,10 @@
     ]
   },
   "api_keys": {
-    "jina_ai": "REMOVED-JINA-KEY",
-    "firecrawl": "REMOVED-FIRECRAWL-KEY",
-    "openai": "REMOVED-OPENAI-KEY",
-	"openrouter": "REMOVED-OPENROUTER-KEY"
+    "jina_ai": "env:JINA_AI_API_KEY",
+    "firecrawl": "env:FIRECRAWL_API_KEY",
+    "openai": "env:OPENAI_API_KEY_USTECKYKRAJ",
+	"openrouter": "env:OPENROUTER_API_KEY_USTECKYKRAJ"
   },
   "openrouter": {
     "max_tokens": 64000,
