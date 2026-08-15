@@ -1,0 +1,10 @@
+# Secrets — real API keys live only in local untracked files, never commit
+.env
+*.env
+!.env.example
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
