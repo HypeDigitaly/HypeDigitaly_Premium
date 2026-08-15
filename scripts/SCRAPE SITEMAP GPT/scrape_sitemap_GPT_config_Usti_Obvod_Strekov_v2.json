@@ -27,8 +27,8 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
-      "google/gemini-2.5-flash-preview-09-2025",
-      "openai/gpt-4.1-mini" 
+      "google/gemini-3.1-flash-lite",
+      "openai/gpt-5.6-luna"
     ],
     "temperature": 0.1,
     "top_p": 0.9,

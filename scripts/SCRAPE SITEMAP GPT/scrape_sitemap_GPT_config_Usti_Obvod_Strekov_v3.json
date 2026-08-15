@@ -23,8 +23,8 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
-      "google/gemini-3-flash-preview",
-      "openai/gpt-4.1-mini"
+      "google/gemini-3.1-flash-lite",
+      "openai/gpt-5.6-luna"
     ],
     "temperature": 0.1,
     "top_p": 0.9,
@@ -86,7 +86,7 @@
     "provider_sequence": "playwright,jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_68d0542823a08191849e93a01d716032",
+    "id": "vs_6a80838b7df48191b4dffe39780b7cbb",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,

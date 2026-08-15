@@ -21,8 +21,8 @@
     "max_tokens": 64000,
     "target_language": "Czech",
     "models": [
-      "google/gemini-3-flash-preview",
-      "anthropic/claude-sonnet-4"
+      "google/gemini-3.1-flash-lite",
+      "openai/gpt-5.6-luna"
     ],
     "temperature": 0.1,
     "top_p": 0.9,
@@ -84,7 +84,7 @@
     "provider_sequence": "playwright,jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_6991aa1f56848191b78b1b455c12dfb7",
+    "id": "vs_6a8079465c588191a2b2acedd317abbc",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,

@@ -25,7 +25,7 @@
     "target_language": "Czech",
     "models": [
       "google/gemini-3.1-flash-lite",
-      "anthropic/claude-haiku-4.5"
+      "openai/gpt-5.6-luna"
     ],
     "temperature": 0.1,
     "top_p": 0.9,
