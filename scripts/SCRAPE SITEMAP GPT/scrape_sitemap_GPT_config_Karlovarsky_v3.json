@@ -57,7 +57,7 @@
       "wait_until": "domcontentloaded",
       "wait_for_selector": "",
       "wait_for_timeout_ms": 0,
-      "navigation_timeout_ms": 30000,
+      "navigation_timeout_ms": 60000,
       "javascript_to_execute": "",
       "block_resources": ["image", "font", "media"],
       "block_urls": [],

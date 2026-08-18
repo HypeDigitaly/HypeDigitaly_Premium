@@ -748,6 +748,14 @@ def _html_to_markdown(
     title_tag = soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else ""
 
+    # Drop <head> entirely: its text (especially <title>) must not leak into
+    # the markdown output, and it must not mask an emptied <body> in the
+    # over-strip safeguard below (a title-only document would otherwise pass
+    # the "not empty" check and be returned as the page content).
+    head_tag = soup.find("head")
+    if head_tag:
+        head_tag.decompose()
+
     # Remove always-unwanted elements
     for tag_name in ("script", "style", "noscript", "iframe", "svg"):
         for tag in soup.find_all(tag_name):
@@ -787,6 +795,16 @@ def _html_to_markdown(
         try:
             for el in working_soup.select(boilerplate_selectors):
                 try:
+                    # Structural guard: never decompose document roots or any
+                    # wrapper that still holds the main content. Real-world
+                    # trigger: Drupal's EU Cookie Compliance module adds a
+                    # class containing "cookie" to <body> at runtime, which
+                    # matches [class*="cookie" i] and would wipe the entire
+                    # page (kr-karlovarsky.cz, khk.cz).
+                    if el.name in ("html", "body", "main"):
+                        continue
+                    if el.find("main") is not None or el.find("body") is not None:
+                        continue
                     el.decompose()
                 except Exception:
                     pass
@@ -804,6 +822,11 @@ def _html_to_markdown(
     if remove_selectors:
         for selector in remove_selectors:
             for el in working_soup.select(selector):
+                # Same structural guard as the boilerplate pass above.
+                if el.name in ("html", "body", "main"):
+                    continue
+                if el.find("main") is not None or el.find("body") is not None:
+                    continue
                 el.decompose()
 
     if mode == "markdown":

@@ -93,6 +93,18 @@ class ScraperConfig:
     RECURSIVE_URLS: List[Any] = field(default_factory=list)
     PAGINATED_URLS: List[Any] = field(default_factory=list)
     TEST_URLS: List[str] = field(default_factory=list)
+    # Priority URLs (website.priority_urls): always re-scraped every run,
+    # content links followed via BFS in priority_crawl.collect_priority_urls
+    PRIORITY_URLS_ENABLED: bool = False
+    PRIORITY_SEED_URLS: List[str] = field(default_factory=list)
+    PRIORITY_FOLLOW_DEPTH: int = 1
+    PRIORITY_INCLUDE_PATTERNS: List[str] = field(default_factory=list)
+    PRIORITY_EXCLUDE_PATTERNS: List[str] = field(default_factory=list)
+    PRIORITY_MAX_URLS: int = 500
+    PRIORITY_MAX_FETCH_PAGES: int = 0  # BFS fetch budget; 0 = unlimited
+    PRIORITY_REMOVE_SELECTORS: str = ""  # "" -> falls back to JINA_REMOVE_SELECTORS
+    # Runtime: normalized priority URL set, built in cli.resolve_urls before workers start
+    PRIORITY_URL_SET: Set[str] = field(default_factory=set)
     # HTTP settings
     REQUEST_TIMEOUT: int = 30
     REQUEST_RETRY_CODES: Tuple[int, ...] = (429, 500, 502, 503, 504, 524)
@@ -509,6 +521,54 @@ def load_configuration(config_file: str = "config.json") -> ScraperConfig:
 
     # Test URLs
     cfg.TEST_URLS = raw["website"].get("test_urls", [])
+
+    # Priority URLs (optional section; absent -> feature disabled)
+    prio_raw_any: Any = raw["website"].get("priority_urls", {})
+    if not isinstance(prio_raw_any, dict):
+        if prio_raw_any:
+            print(f"WARNING: priority_urls must be an object, got {type(prio_raw_any).__name__} - feature disabled")
+        prio_raw_any = {}
+    prio_raw: Dict[str, Any] = prio_raw_any
+    try:
+        prio_enabled = int(prio_raw.get("enabled", 0))
+    except (ValueError, TypeError):
+        print(f"WARNING: Invalid priority_urls.enabled {prio_raw.get('enabled')!r} - feature disabled")
+        prio_enabled = 0
+    prio_seeds_raw: Any = prio_raw.get("seed_urls") or []
+    if not isinstance(prio_seeds_raw, list):
+        print("WARNING: priority_urls.seed_urls must be a list - feature disabled")
+        prio_seeds_raw = []
+    cfg.PRIORITY_SEED_URLS = [
+        u.strip() for u in prio_seeds_raw if isinstance(u, str) and u.strip()
+    ]
+    cfg.PRIORITY_URLS_ENABLED = bool(prio_enabled) and bool(cfg.PRIORITY_SEED_URLS)
+    if prio_enabled and not cfg.PRIORITY_SEED_URLS:
+        print("WARNING: priority_urls.enabled is set but seed_urls is empty - feature disabled")
+    prio_depth: Any = prio_raw.get("follow_depth", 1)
+    if not isinstance(prio_depth, int) or isinstance(prio_depth, bool) or prio_depth < 0:
+        print(f"WARNING: Invalid priority_urls.follow_depth {prio_depth!r}, defaulting to 1")
+        prio_depth = 1
+    cfg.PRIORITY_FOLLOW_DEPTH = prio_depth
+    prio_max: Any = prio_raw.get("max_urls", 500)
+    if not isinstance(prio_max, int) or isinstance(prio_max, bool) or prio_max < 1:
+        print(f"WARNING: Invalid priority_urls.max_urls {prio_max!r}, defaulting to 500")
+        prio_max = 500
+    cfg.PRIORITY_MAX_URLS = prio_max
+    prio_fetch: Any = prio_raw.get("max_fetch_pages", 0)
+    if not isinstance(prio_fetch, int) or isinstance(prio_fetch, bool) or prio_fetch < 0:
+        print(f"WARNING: Invalid priority_urls.max_fetch_pages {prio_fetch!r}, defaulting to 0 (unlimited)")
+        prio_fetch = 0
+    cfg.PRIORITY_MAX_FETCH_PAGES = prio_fetch
+    prio_inc: Any = prio_raw.get("include_patterns") or []
+    prio_exc: Any = prio_raw.get("exclude_patterns") or []
+    cfg.PRIORITY_INCLUDE_PATTERNS = (
+        [p for p in prio_inc if isinstance(p, str)] if isinstance(prio_inc, list) else [])
+    cfg.PRIORITY_EXCLUDE_PATTERNS = (
+        [p for p in prio_exc if isinstance(p, str)] if isinstance(prio_exc, list) else [])
+    prio_sel: Any = prio_raw.get("remove_selectors", "")
+    cfg.PRIORITY_REMOVE_SELECTORS = prio_sel if isinstance(prio_sel, str) else ""
+    # Reset runtime set for in-process reloads (mirrors BASE_URL_PROCESSED_IN_RUN)
+    cfg.PRIORITY_URL_SET = set()
 
     # HTTP settings
     cfg.REQUEST_TIMEOUT = raw["http_settings"]["request_timeout"]

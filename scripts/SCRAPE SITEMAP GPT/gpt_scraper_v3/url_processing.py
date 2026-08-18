@@ -401,6 +401,17 @@ def should_process_url_with_resume(
             logger.info(f"Suburl of test+recursive URL {url} not found in local cache. Will process.")
         return True
 
+    # Step 0b: Priority URLs (website.priority_urls) - ALWAYS processed, even
+    # under --resume (they must be fresh every run by definition).
+    # Defense-in-depth: the common batch path bypasses this gate entirely
+    # (process_single_url_normally does no gating); this covers the pagination/
+    # recursive call sites and any extract-time overlap with priority URLs.
+    if cfg.PRIORITY_URL_SET and normalize_url_query_params(url) in cfg.PRIORITY_URL_SET:
+        logger.info(f"PRIORITY URL - always processed: {url}")
+        _status("URL PROCESSING STATUS (PRIORITY)", [
+            f"URL: {url}", "Priority URL: YES", "Processing: WILL PROCEED"])
+        return True
+
     # Step 1: Local resume cache
     if enable_resume and local_cache is not None:
         if is_url_already_processed_locally(url, local_cache):

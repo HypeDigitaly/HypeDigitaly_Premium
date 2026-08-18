@@ -102,7 +102,7 @@
     "provider_sequence": "playwright,jina,firecrawl"
   },
   "vector_store": {
-    "id": "vs_6991a84c00c4819185327f59eaaea744",
+    "id": "vs_6a807de4913c81919f9b235b767f907c",
     "enable_deduplication": true,
     "chunking_strategy": "static",
     "max_chunk_size": 4096,

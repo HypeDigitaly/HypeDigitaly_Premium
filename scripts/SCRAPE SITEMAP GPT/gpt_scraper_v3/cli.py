@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from gpt_scraper_v3.config import load_configuration, get_config, ScraperConfig
 from gpt_scraper_v3.logging_setup import setup_logging, get_logger
 from gpt_scraper_v3.token_tracker import get_token_usage_summary
-from gpt_scraper_v3.utilities import canonical_url
+from gpt_scraper_v3.utilities import canonical_url, normalize_url_query_params
 from gpt_scraper_v3.vector_store import (
     build_vector_store_cache, create_chunking_strategy, cleanup_removed_urls,
     save_vs_cache_snapshot, snapshot_vs_cache,
@@ -26,6 +26,7 @@ from gpt_scraper_v3.xml_sitemap import (
 from gpt_scraper_v3.rss_feeds import process_rss_feeds
 from gpt_scraper_v3.sitemap_parsing import extract_links_from_html_sitemap, parse_menu, extract_links
 from gpt_scraper_v3.content_fetching import get_html_content_via_jina, get_raw_html_content
+from gpt_scraper_v3.priority_crawl import collect_priority_urls
 from gpt_scraper_v3.url_processing import process_test_urls
 from gpt_scraper_v3.pagination_processing import VisitedSet, process_paginated_url
 from gpt_scraper_v3.playwright_provider import close_current_thread_playwright
@@ -370,6 +371,30 @@ def resolve_urls(
         logger.info("Skipping RSS processing (%s mode)", "sitemap-only" if sitemap_only else "XML-only")
     else:
         logger.info("No RSS feeds configured, skipping")
+
+    # Priority URLs: always-rescrape seed pages + content-link discovery.
+    # Explicit guards: TEST MODE falls through to this point (no early return),
+    # and rss-only / xml-only runs keep their narrow semantics. --sitemap-only
+    # DOES run the priority crawl deliberately: priority URLs belong to the
+    # sitemap-side pipeline (they share its timestamp and snapshot handling).
+    if (cfg.PRIORITY_URLS_ENABLED and not cfg.TEST_URLS
+            and not rss_only and not xml_only):
+        priority_infos = collect_priority_urls()
+        # The BFS drove Playwright on the MAIN thread; tear its browser down now
+        # (worker threads own their teardown in _worker's finally, the main
+        # thread otherwise only has the atexit backstop).
+        try:
+            close_current_thread_playwright()
+        except Exception:
+            logger.warning("Priority crawl: main-thread Playwright teardown failed", exc_info=True)
+        if priority_infos:
+            # info["url"] is fragment-stripped (extractor parity for dedup);
+            # the gate set holds the query-normalized form the gate computes.
+            cfg.PRIORITY_URL_SET.update(
+                normalize_url_query_params(info["url"]) for info in priority_infos)
+            urls.extend(priority_infos)
+            logger.info("Added %d priority URLs to batch (always re-scraped)",
+                        len(priority_infos))
 
     return _deduplicate_urls(urls), html_seen_sink
 
@@ -961,6 +986,18 @@ def main(args: Optional[argparse.Namespace] = None) -> int:
                             "URL diff: %d new, %d removed, %d unchanged",
                             len(new_urls), len(removed_urls),
                             len(current_known_urls & previous_known_urls))
+                        # Priority URLs are re-scraped and re-uploaded every run
+                        # regardless of sitemap membership; deleting them here
+                        # would undo this run's own upload. Keep them in the
+                        # snapshot so cleanup stays possible if the priority
+                        # set ever shrinks. (Both sides are canonical-form.)
+                        protected = removed_urls & cfg.PRIORITY_URL_SET
+                        if protected:
+                            logger.info(
+                                "Excluding %d priority URLs from removed-URL cleanup",
+                                len(protected))
+                            removed_urls -= protected
+                            current_known_urls |= protected
 
                     # Safety guard: >50% removal threshold
                     if previous_known_urls and len(removed_urls) > len(previous_known_urls) * 0.5:
